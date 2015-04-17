@@ -29,6 +29,7 @@
 *.sql
 *.sqlite
 *.sdf
+*.opensdf
 *.user
 
 # Sublime Text workspaces #
