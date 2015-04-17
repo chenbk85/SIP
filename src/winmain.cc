@@ -166,7 +166,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
                 {
                     // TODO(rlk): With Direct2D this doesn't work correctly.
                     // Direct2D seems to try and change the display mode...
-                    // toggle_fullscreen(hWnd);
+                    toggle_fullscreen(hWnd);
                     return 0; // prevent default handling.
                 }
             }

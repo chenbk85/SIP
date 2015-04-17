@@ -29,6 +29,7 @@
 *.sql
 *.sqlite
 *.sdf
+*.suo
 *.opensdf
 *.user
 

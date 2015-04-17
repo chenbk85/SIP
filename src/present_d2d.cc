@@ -162,6 +162,9 @@ intptr_t __cdecl PrDisplayDriverOpen(HWND window)
         OutputDebugString(_T("ERROR: Unable to retrieve DXGI surface representing back buffer.\n"));
         goto error_cleanup;
     }
+
+    // disable Alt+Enter handling by DXGI; it does it poorly.
+    dxgi_factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
     
     // the final steps are to create a Direct2D bitmap attached to the DXGI
     // surface that represents the swap chain back buffer, and set up D2D scaling.
@@ -331,6 +334,9 @@ void __cdecl PrDisplayDriverReset(intptr_t drv)
         OutputDebugString(_T("ERROR: Unable to retrieve DXGI surface representing back buffer.\n"));
         goto error_cleanup;
     }
+
+    // disable DXGI handling of Alt+Enter; it does it poorly.
+    dxgi_factory->MakeWindowAssociation(driver->Window, DXGI_MWA_NO_ALT_ENTER);
     
     // the final steps are to create a Direct2D bitmap attached to the DXGI
     // surface that represents the swap chain back buffer, and set up D2D scaling.
@@ -481,3 +487,6 @@ void __cdecl PrDisplayDriverClose(intptr_t drv)
 // presented, an atomic command buffer swap should be performed. Note that we'll have some trouble
 // synchronizing things this way; end-of-frame should probably trigger the command buffer being 
 // queued to the display driver.
+
+// DXGI best practices: https://msdn.microsoft.com/en-us/library/windows/desktop/ee417025(v=vs.85).aspx
+// http://stackoverflow.com/questions/25369231/properly-handling-alt-enter-alt-tab-fullscreen-resolution
