@@ -212,7 +212,7 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     dxgi_device ->Release();
     d3d_context ->Release(); // maintain the 11.1 context
     d3d_device  ->Release(); // maintain the 11.1 device
-    return (intptr_t)driver;
+    return (uintptr_t)driver;
 
 error_cleanup:
     // release references to all temporary interface pointers.
@@ -235,7 +235,7 @@ error_cleanup:
         if (driver->D2DFactory != NULL) { driver->D2DFactory->Release(); driver->D2DFactory = NULL; }
         free(driver);
     }
-    return (intptr_t)0;
+    return (uintptr_t)0;
 }
 
 /// @summary Performs an explicit reinitialization of the display driver used to render 
