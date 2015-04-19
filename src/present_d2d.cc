@@ -1,9 +1,14 @@
-/// @summary Defines the exported presentation DLL entry points for the Direct2D 
-/// presentation library implementation.
-/// Download the latest(?) debug runtimes:
+/*/////////////////////////////////////////////////////////////////////////////
+/// @summary Defines the exported presentation DLL entry points for the 
+/// Direct2D presentation library implementation.
+/// Some useful links:
+/// https://katyscode.wordpress.com/
 /// http://blog.airesoft.co.uk/2014/05/windows-sdk-8-1-iso/#debug
-/// https://katyscode.wordpress.com/2013/01/23/migrating-existing-direct2d-applications-to-use-direct2d-1-1-functionality-in-windows-7/
+///////////////////////////////////////////////////////////////////////////80*/
 
+/*////////////////
+//   Includes   //
+////////////////*/
 #include <Windows.h>
 #include <tchar.h>
 
@@ -11,6 +16,13 @@
 #include <d3d11_1.h>
 #include <dwrite_1.h>
 
+/*/////////////////
+//   Constants   //
+/////////////////*/
+
+/*///////////////////
+//   Local Types   //
+///////////////////*/
 /// @summary Define all of the state associated with a Direct3D/Direct2D display driver.
 /// This presentation driver requires Windows 7 w/Platform Update 1 or later, and relies
 /// on both Direct3D 11.1, Direct2D 1.1 and DirectWrite 1.1.
@@ -28,12 +40,23 @@ struct present_driver_d2d_t
     HWND                  Window;        /// The handle of the target window.
 };
 
+/*///////////////
+//   Globals   //
+///////////////*/
+
+/*///////////////////////
+//   Local Functions   //
+///////////////////////*/
+
+/*///////////////////////
+//  Public Functions   //
+///////////////////////*/
 /// @summary Perform the initialization necessary to set up both Direct3D and Direct2D 
 /// and their associated swap chain, and attach the interfaces to a given window. Each
 /// window maintains its own device (generally just a command queue and some state.)
 /// @param window The window to which the display driver instance is attached.
 /// @return A handle to the display driver used to render to the given window.
-intptr_t __cdecl PrDisplayDriverOpen(HWND window)
+uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
 {
     present_driver_d2d_t *driver = (present_driver_d2d_t*) malloc(sizeof(present_driver_d2d_t));
     if (driver == NULL)   return 0;
@@ -219,7 +242,7 @@ error_cleanup:
 /// content into a given window. This function is primarily used internally to handle 
 /// detected device removal conditions, but may be called by the application as well.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
-void __cdecl PrDisplayDriverReset(intptr_t drv)
+void __cdecl PrDisplayDriverReset(uintptr_t drv)
 {   // this is essentially the contents of PrDisplayDriverOpen copied and pasted.
     // there are some minor differences in that we don't allocate storage for the
     // driver state, and don't accept the window handle, but it's otherwise the same.
@@ -383,7 +406,7 @@ error_cleanup:
 /// @summary Handles the case where the window associated with a display driver is resized.
 /// This function should be called in response to a WM_SIZE or WM_DISPLAYCHANGE event.
 /// @param drv The display driver handle returned by PrDisplayDriverResize().
-void __cdecl PrDisplayDriverResize(intptr_t drv)
+void __cdecl PrDisplayDriverResize(uintptr_t drv)
 {
     present_driver_d2d_t   *driver       = (present_driver_d2d_t*) drv;
     D2D1_BITMAP_PROPERTIES1 bitmap_desc  = {};
@@ -436,7 +459,7 @@ void __cdecl PrDisplayDriverResize(intptr_t drv)
 
 /// @summary Copies the current frame to the application window.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
-void __cdecl PrPresentFrameToWindow(intptr_t drv)
+void __cdecl PrPresentFrameToWindow(uintptr_t drv)
 {
     present_driver_d2d_t *driver = (present_driver_d2d_t*) drv;
     if (driver != NULL)
@@ -462,7 +485,7 @@ void __cdecl PrPresentFrameToWindow(intptr_t drv)
 
 /// @summary Closes a display driver instance and releases all associated resources.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
-void __cdecl PrDisplayDriverClose(intptr_t drv)
+void __cdecl PrDisplayDriverClose(uintptr_t drv)
 {
     present_driver_d2d_t *driver = (present_driver_d2d_t*) drv;
     if (driver != NULL)

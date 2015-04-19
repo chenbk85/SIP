@@ -13,7 +13,7 @@
 /// @summary Initialize a new instance of the null presentation driver.
 /// @param window The window to which the display driver instance is attached.
 /// @return A handle to the display driver used to render to the given window.
-internal_function intptr_t __cdecl PrDisplayDriverOpen_Null(HWND window)
+internal_function uintptr_t __cdecl PrDisplayDriverOpen_Null(HWND window)
 {
     UNREFERENCED_PARAMETER(window);
     return (intptr_t) 1;
@@ -23,7 +23,7 @@ internal_function intptr_t __cdecl PrDisplayDriverOpen_Null(HWND window)
 /// content into a given window. This function is primarily used internally to handle 
 /// detected device removal conditions, but may be called by the application as well.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
-internal_function void     __cdecl PrDisplayDriverReset_Null(intptr_t drv)
+internal_function void     __cdecl PrDisplayDriverReset_Null(uintptr_t drv)
 {
     UNREFERENCED_PARAMETER(drv);
 }
@@ -31,28 +31,28 @@ internal_function void     __cdecl PrDisplayDriverReset_Null(intptr_t drv)
 /// @summary Handles the case where the window associated with a display driver is resized.
 /// This function should be called in response to a WM_SIZE or WM_DISPLAYCHANGE event.
 /// @param drv The display driver handle returned by PrDisplayDriverResize().
-internal_function void     __cdecl PrDisplayDriverResize_Null(intptr_t drv)
+internal_function void     __cdecl PrDisplayDriverResize_Null(uintptr_t drv)
 {
     UNREFERENCED_PARAMETER(drv);
 }
 
 /// @summary Copies the current frame to the application window.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
-internal_function void     __cdecl PrPresentFrameToWindow_Null(intptr_t drv)
+internal_function void     __cdecl PrPresentFrameToWindow_Null(uintptr_t drv)
 {
     UNREFERENCED_PARAMETER(drv);
 }
 
 /// @summary Closes a display driver instance and releases all associated resources.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
-internal_function void     __cdecl PrDisplayDriverClose_Null(intptr_t drv)
+internal_function void     __cdecl PrDisplayDriverClose_Null(uintptr_t drv)
 {
     UNREFERENCED_PARAMETER(drv);
 }
 
-/*//////////////////
-//   Data Types   //
-//////////////////*/
+/*///////////////////
+//   Local Types   //
+///////////////////*/
 /// @summary Define the supported presentation implementations.
 enum presentation_type_e : uint32_t
 {
@@ -64,11 +64,11 @@ enum presentation_type_e : uint32_t
 };
 
 /// @summary Function signatures for the functions loaded from the presentation DLL.
-typedef intptr_t (__cdecl *PrDisplayDriverOpenFn   )(HWND);
-typedef void     (__cdecl *PrDisplayDriverResetFn  )(intptr_t);
-typedef void     (__cdecl *PrDisplayDriverResizeFn )(intptr_t);
-typedef void     (__cdecl *PrPresentFrameToWindowFn)(intptr_t);
-typedef void     (__cdecl *PrDisplayDriverCloseFn  )(intptr_t);
+typedef uintptr_t (__cdecl *PrDisplayDriverOpenFn   )(HWND);
+typedef void      (__cdecl *PrDisplayDriverResetFn  )(uintptr_t);
+typedef void      (__cdecl *PrDisplayDriverResizeFn )(uintptr_t);
+typedef void      (__cdecl *PrPresentFrameToWindowFn)(uintptr_t);
+typedef void      (__cdecl *PrDisplayDriverCloseFn  )(uintptr_t);
 
 /// @summary Define the data associated with a presentation driver implementation, 
 /// loaded from a DLL at runtime.
@@ -87,15 +87,10 @@ struct presentation_driver_t
 struct display_driver_t
 {
     HWND                     WindowHandle;           /// The target window.
-    intptr_t                 DriverHandle;           /// The display driver handle returned by PrDisplayDriverOpen.
+    uintptr_t                DriverHandle;           /// The display driver handle returned by PrDisplayDriverOpen.
     presentation_driver_t   *Presentation;           /// The presentation implementation used for rendering operations.
-     
-     display_driver_t(void) : 
-         WindowHandle(NULL), 
-         DriverHandle(0), 
-         Presentation(NULL)
-     { /* empty */ }
 
+     display_driver_t(void);                         /// Initialize to use null driver.
     ~display_driver_t(void)
     {   // syntatically, in this case, this makes sense.
         if (Presentation != NULL)
@@ -156,6 +151,15 @@ global_variable presentation_driver_t Global_PresentationDrivers[PRESENTATION_TY
 /*///////////////////////
 //  Public Functions   //
 ///////////////////////*/
+display_driver_t::display_driver_t(void) 
+	: 
+    WindowHandle(NULL), 
+    DriverHandle(0), 
+    Presentation(&Global_PresentationDrivers[PRESENTATION_TYPE_NULL])
+{ 
+    /* empty */ 
+}
+
 /// @summary Query the system to determine whether a particular presentation 
 /// driver has been loaded. If the driver has not yet been loaded, it redirects
 /// to the null driver, which resolves all operations to no-ops.
@@ -239,7 +243,7 @@ public_function bool display_driver_create(display_driver_t *driver, uint32_t pr
     if (load_presentation_driver(presentation_type))
     {
         presentation_driver_t *driver_p = &Global_PresentationDrivers[presentation_type];
-        intptr_t  driver_h =   driver_p->PrDisplayDriverOpen(window);
+        uintptr_t driver_h =   driver_p->PrDisplayDriverOpen(window);
         if (driver_h == 0)
         {   // the display driver state could not be initialized.
             OutputDebugString(_T("ERROR: Unable to initialize display driver state.\n"));
