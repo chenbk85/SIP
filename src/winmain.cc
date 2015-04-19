@@ -1,7 +1,12 @@
-/// @summary Defines the entry point of the application layer. This is where we open up the 
-/// main application window and process all messages it receives, along with loading the 
-/// presentation layer and initializing the system.
+/*/////////////////////////////////////////////////////////////////////////////
+/// @summary Defines the entry point of the application layer. This is where we
+/// open up the main application window and process all messages it receives, 
+/// along with loading the presentation layer and initializing the system.
+///////////////////////////////////////////////////////////////////////////80*/
 
+/*////////////////
+//   Includes   //
+////////////////*/
 #include <Windows.h>
 #include <assert.h>
 #include <stddef.h>
@@ -16,39 +21,36 @@
 #include "runtime.cc"
 #include "presentation.cc"
 
-/*****************************************************************************/
-/*                                   CONSTANTS                               */
-/*****************************************************************************/
-
+/*/////////////////
+//   Constants   //
+/////////////////*/
 /// @summary The scale used to convert from seconds into nanoseconds.
 static uint64_t const SEC_TO_NANOSEC = 1000000000ULL;
 
-/*****************************************************************************/
-/*                                     TYPES                                 */
-/*****************************************************************************/
+/*///////////////////
+//   Local Types   //
+///////////////////*/
 
-/*****************************************************************************/
-/*                                    GLOBALS                                */
-/*****************************************************************************/
-
+/*///////////////
+//   Globals   //
+///////////////*/
 /// @summary A flag used to control whether the main application loop is still running.
-static bool    Global_IsRunning               = true;
+global_variable bool            Global_IsRunning       = true;
 
 /// @summary The high-resolution timer frequency. This is queried once at startup.
-static int64_t Global_ClockFrequency          = {0};
+global_variable int64_t         Global_ClockFrequency  = {0};
 
 /// @summary Information about the window placement saved when entering fullscreen mode.
-static WINDOWPLACEMENT Global_WindowPlacement = {0};
-    
-static display_driver_t Global_Display;
+/// This data is necessary to restore the window to the same position and size when 
+/// the user exits fullscreen mode back to windowed mode.
+global_variable WINDOWPLACEMENT Global_WindowPlacement = {0};
 
-/*****************************************************************************/
-/*                                TIME MANAGEMENT                            */
-/*****************************************************************************/
-
+/*///////////////////////
+//   Local Functions   //
+///////////////////////*/
 /// @summary Retrieve the current high-resolution timer value. 
 /// @return The current time value, specified in system ticks.
-static inline int64_t ticktime(void)
+internal_function inline int64_t ticktime(void)
 {
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
@@ -57,7 +59,7 @@ static inline int64_t ticktime(void)
 
 /// @summary Retrieve the current high-resolution timer value.
 /// @return The current time value, specified in nanoseconds.
-static inline uint64_t nanotime(void)
+internal_function inline uint64_t nanotime(void)
 {
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
@@ -68,7 +70,7 @@ static inline uint64_t nanotime(void)
 /// @param start The nanosecond timestamp at the start of the measured interval.
 /// @param end The nanosecond timestamp at the end of the measured interval.
 /// @return The elapsed time, specified in nanoseconds.
-static inline int64_t elapsed_nanos(uint64_t start, uint64_t end)
+internal_function inline int64_t elapsed_nanos(uint64_t start, uint64_t end)
 {
     return int64_t(end - start);
 }
@@ -77,7 +79,7 @@ static inline int64_t elapsed_nanos(uint64_t start, uint64_t end)
 /// @param start The timestamp at the start of the measured interval.
 /// @param end The timestamp at the end of the measured interval.
 /// @return The elapsed time, specified in system ticks.
-static inline int64_t elapsed_ticks(int64_t start, int64_t end)
+internal_function inline int64_t elapsed_ticks(int64_t start, int64_t end)
 {
     return (end - start);
 }
@@ -85,7 +87,7 @@ static inline int64_t elapsed_ticks(int64_t start, int64_t end)
 /// @summary Convert a time duration specified in system ticks to seconds.
 /// @param ticks The duration, specified in system ticks.
 /// @return The specified duration, specified in seconds.
-static inline float ticks_to_seconds(int64_t ticks)
+internal_function inline float ticks_to_seconds(int64_t ticks)
 {
     return ((float) ticks / (float) Global_ClockFrequency);
 }
@@ -93,16 +95,16 @@ static inline float ticks_to_seconds(int64_t ticks)
 /// @summary Convert a time duration specified in nanoseconds to seconds.
 /// @param nanos The duration, specified in nanoseconds.
 /// @return The specified duration, specified in nanoseconds.
-static inline float nanos_to_seconds(int64_t nanos)
+internal_function inline float nanos_to_seconds(int64_t nanos)
 {
     return ((float) nanos / (float) SEC_TO_NANOSEC);
 }
 
-/*****************************************************************************/
-/*                               WINDOW MANAGEMENT                           */
-/*****************************************************************************/
-
-static void toggle_fullscreen(HWND window)
+/// @summaey Toggles the window styles of a given window between standard 
+/// windowed mode and a borderless fullscreen" mode. The display resolution
+/// is not changed, so rendering will be performed at the desktop resolution.
+/// @param window The window whose styles will be updated.
+internal_function void toggle_fullscreen(HWND window)
 {
     DWORD style = GetWindowLong(window, GWL_STYLE);
     if   (style & WS_OVERLAPPEDWINDOW)
@@ -131,22 +133,23 @@ static void toggle_fullscreen(HWND window)
 /// @param wParam An unsigned pointer-size value specifying data associated with the message.
 /// @param lParam A signed pointer-size value specifying data associated with the message.
 /// @return The return value depends on the message being processed.
-static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+internal_function LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	display_driver_t *display = (display_driver_t*) GetWindowLongPtr(hWnd, GWLP_USERDATA);
+
     switch (uMsg)
     {
     case WM_DESTROY:
-        {
+        {	// post the quit message with the application exit code.
+			// this will be picked up back in WinMain and cause the
+			// message pump and display update loop to terminate.
             PostQuitMessage(EXIT_SUCCESS);
         }
         return 0;
 
     case WM_SIZE:
-        {
-            if (Global_Display.Presentation != NULL)
-            {
-                Global_Display.resize();
-            }
+        {	// we'll receive WM_SIZE messages prior to the display driver being set up.
+            if (display != NULL) display->resize();
         }
         break;
 
@@ -163,9 +166,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
             {
                 bool alt_down = ((lParam & (1 << 29)) != 0);
                 if (vk_code == VK_RETURN && alt_down)
-                {
-                    // TODO(rlk): With Direct2D this doesn't work correctly.
-                    // Direct2D seems to try and change the display mode...
+				{
                     toggle_fullscreen(hWnd);
                     return 0; // prevent default handling.
                 }
@@ -176,10 +177,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
     return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
-/*****************************************************************************/
-/*                                 ENTRY POINT                               */
-/*****************************************************************************/
-
+/*///////////////////////
+//  Public Functions   //
+///////////////////////*/
 /// @summary Implements the entry point of the application.
 /// @param hInstance A handle to the current instance of the application.
 /// @param hPrev A handle to the previous instance of the application. Always NULL.
@@ -188,8 +188,8 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 /// @return Zero if the message loop was not entered, or the value of the WM_QUIT wParam.
 int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int nCmdShow)
 {
+	display_driver_t display;
     int result = 0; // return zero if the message loop isn't entered.
-    UNREFERENCED_PARAMETER(hInstance);
     UNREFERENCED_PARAMETER(hPrev);
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
@@ -217,9 +217,9 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     WNDCLASSEX wnd_class     = {};
     wnd_class.cbSize         = sizeof(WNDCLASSEX);
     wnd_class.cbClsExtra     = 0;
-    wnd_class.cbWndExtra     = 0;
+    wnd_class.cbWndExtra     = sizeof(void*);
     wnd_class.hInstance      = hInstance;
-    wnd_class.lpszClassName  =_T("AIP_WndClass");
+    wnd_class.lpszClassName  =_T("SIP_WndClass");
     wnd_class.lpszMenuName   = NULL;
     wnd_class.lpfnWndProc    = MainWndProc;
     wnd_class.hIcon          = NULL;
@@ -238,11 +238,14 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         OutputDebugString(_T("ERROR: Unable to create main application window.\n"));
         return 0;
     }
-    if (!display_driver_create(&Global_Display, PRESENTATION_TYPE_DIRECT2D, main_window))
+    if (!display_driver_create(&display, PRESENTATION_TYPE_DIRECT2D, main_window))
     {
         OutputDebugString(_T("ERROR: Unable to initialize the display driver.\n"));
         return 0;
     }
+
+	// attach the display driver reference to the window so it can be retrieved in WndProc.
+	SetWindowLongPtr(main_window, GWLP_USERDATA, (LONG_PTR) &display);
 
     // query the monitor refresh rate and use that as our target frame rate.
     int monitor_refresh_hz =  60;
@@ -273,7 +276,6 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
                 result = (int) msg.wParam;
                 Global_IsRunning = false;
                 break;
-
             default:
                 TranslateMessage(&msg);
                 DispatchMessage (&msg);
@@ -311,7 +313,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         // this may take some non-negligible amount of time, as it involves processing
         // queued command buffers to construct the current frame.
         trace_marker_main("tick_present");
-        Global_Display.present();
+        display.present();
 
         // update timestamps to calculate the total presentation time.
         int64_t present_ticks = elapsed_ticks(flip_clock, ticktime());
