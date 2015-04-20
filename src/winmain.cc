@@ -238,7 +238,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         OutputDebugString(_T("ERROR: Unable to create main application window.\n"));
         return 0;
     }
-    if (!display_driver_create(&display, PRESENTATION_TYPE_DIRECT2D, main_window))
+    if (!display_driver_create(&display, PRESENTATION_TYPE_GDI, main_window))
     {
         OutputDebugString(_T("ERROR: Unable to initialize the display driver.\n"));
         return 0;
