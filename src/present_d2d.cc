@@ -38,6 +38,7 @@ struct present_driver_d2d_t
     IDWriteFactory1      *DWFactory;     /// The DirectWrite interface factory.
     D3D_FEATURE_LEVEL     D3DFeature;    /// The Direct3D feature level supported by the display adapter.
     HWND                  Window;        /// The handle of the target window.
+    bool                  IsWARP;        /// True if the WARP rendering engine is in use.
 };
 
 /*///////////////
@@ -76,6 +77,7 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
         D3D_FEATURE_LEVEL_9_1
     };
     UINT                    level_count  =(UINT)(sizeof(d3d_level) / sizeof(d3d_level[0]));
+    bool                    warp_device  = false;
     IDXGIDevice            *dxgi_device  = NULL; // temporary, used to create Direct2D device.
     IDXGIAdapter           *dxgi_adapter = NULL; // temporary, used to retrieve DXGI factory.
     IDXGIFactory2          *dxgi_factory = NULL; // temporary, used to create swap chain.
@@ -94,6 +96,7 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     driver->DWFactory   = NULL;
     driver->D3DFeature  =(D3D_FEATURE_LEVEL) 0;
     driver->Window      = NULL;
+    driver->IsWARP      = false;
 
     // initialize the Direct2D and DirectWrite interface factories.
 #if _DEBUG
@@ -122,7 +125,10 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
             OutputDebugString(_T("ERROR: No Direct3D 11.0 device is available.\n"));
             goto error_cleanup;
         }
+        warp_device = true; // got a WARP device
     }
+    else warp_device = false; // got a hardware device
+
     // use QueryInterface to get the 11.1 interfaces from the 11.0 interfaces.
     if (FAILED(d3d_device->QueryInterface(IID_PPV_ARGS(&driver->D3DDevice))))
     {
@@ -145,6 +151,8 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
         OutputDebugString(_T("ERROR: Unable to create Direct2D device.\n"));
         goto error_cleanup;
     }
+    // TODO(rlk): Maybe specify D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS?
+    // This distributes geometry generation load across multiple cores in the system.
     if (FAILED(driver->D2DDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &driver->D2DContext)))
     {
         OutputDebugString(_T("ERROR: Unable to create Direct2D device context.\n"));
@@ -204,6 +212,7 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     driver->D2DContext->SetDpi(bitmap_desc.dpiX, bitmap_desc.dpiY);
     driver->D3DFeature= got_level;
     driver->Window    = window;
+    driver->IsWARP    = warp_device;
 
     // release references to all temporary interface pointers.
     back_buffer ->Release();
@@ -277,6 +286,7 @@ void __cdecl PrDisplayDriverReset(uintptr_t drv)
         D3D_FEATURE_LEVEL_9_1
     };
     UINT                    level_count  =(UINT)(sizeof(d3d_level) / sizeof(d3d_level[0]));
+    bool                    warp_device  = false;
     IDXGIDevice            *dxgi_device  = NULL; // temporary, used to create Direct2D device.
     IDXGIAdapter           *dxgi_adapter = NULL; // temporary, used to retrieve DXGI factory.
     IDXGIFactory2          *dxgi_factory = NULL; // temporary, used to create swap chain.
@@ -294,7 +304,10 @@ void __cdecl PrDisplayDriverReset(uintptr_t drv)
             OutputDebugString(_T("ERROR: No Direct3D 11.0 device is available.\n"));
             goto error_cleanup;
         }
+        warp_device = true; // got a WARP device
     }
+    else warp_device = false; // got a hardware device
+
     // use QueryInterface to get the 11.1 interfaces from the 11.0 interfaces.
     if (FAILED(d3d_device->QueryInterface(IID_PPV_ARGS(&driver->D3DDevice))))
     {
@@ -317,6 +330,8 @@ void __cdecl PrDisplayDriverReset(uintptr_t drv)
         OutputDebugString(_T("ERROR: Unable to create Direct2D device.\n"));
         goto error_cleanup;
     }
+    // TODO(rlk): Maybe specify D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS?
+    // This distributes geometry generation load across multiple cores in the system.
     if (FAILED(driver->D2DDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &driver->D2DContext)))
     {
         OutputDebugString(_T("ERROR: Unable to create Direct2D device context.\n"));
@@ -375,6 +390,7 @@ void __cdecl PrDisplayDriverReset(uintptr_t drv)
     driver->D2DContext->SetTarget(driver->BackBuffer);
     driver->D2DContext->SetDpi(bitmap_desc.dpiX, bitmap_desc.dpiY);
     driver->D3DFeature= got_level;
+    driver->IsWARP    = warp_device;
 
     // release references to all temporary interface pointers.
     back_buffer ->Release();
