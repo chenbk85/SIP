@@ -9,12 +9,20 @@
 /*////////////////
 //   Includes   //
 ////////////////*/
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <Windows.h>
 #include <tchar.h>
 
 #include <d2d1_1.h>
 #include <d3d11_1.h>
 #include <dwrite_1.h>
+
+#include "intrinsics.h"
+#include "atomic_fifo.h"
+
+#include "prcmdlist.cc"
 
 /*/////////////////
 //   Constants   //
@@ -39,6 +47,7 @@ struct present_driver_d2d_t
     D3D_FEATURE_LEVEL     D3DFeature;    /// The Direct3D feature level supported by the display adapter.
     HWND                  Window;        /// The handle of the target window.
     bool                  IsWARP;        /// True if the WARP rendering engine is in use.
+    pr_command_queue_t    CommandQueue;  /// The driver's command list submission queue.
 };
 
 /*///////////////
@@ -213,6 +222,7 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     driver->D3DFeature= got_level;
     driver->Window    = window;
     driver->IsWARP    = warp_device;
+    pr_command_queue_init(&driver->CommandQueue);
 
     // release references to all temporary interface pointers.
     back_buffer ->Release();
@@ -391,6 +401,7 @@ void __cdecl PrDisplayDriverReset(uintptr_t drv)
     driver->D2DContext->SetDpi(bitmap_desc.dpiX, bitmap_desc.dpiY);
     driver->D3DFeature= got_level;
     driver->IsWARP    = warp_device;
+    pr_command_queue_clear(&driver->CommandQueue);
 
     // release references to all temporary interface pointers.
     back_buffer ->Release();
@@ -499,6 +510,28 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
     }
 }
 
+/// @summary Allocates a new command list for use by the application. The 
+/// application should write display commands to the command list and then 
+/// submit the list for processing by the presentation driver.
+/// @param drv The display driver handle returned by PrDisplayDriverOpen().
+/// @return An empty command list, or NULL if no command lists are available.
+pr_command_list_t* __cdecl PrCreateCommandList(uintptr_t drv)
+{
+    present_driver_d2d_t *driver = (present_driver_d2d_t*) drv;
+    if (driver == NULL)   return NULL;
+    return pr_command_queue_next_available(&driver->CommandQueue);
+}
+
+/// @summary Submits a list of buffered display commands for processing.
+/// @param drv The display driver handle returned by PrDisplayDriverOpen().
+/// @param cmdlist The list of buffered display commands being submitted.
+void __cdecl PrSubmitCommandList(uintptr_t drv, pr_command_list_t *cmdlist)
+{
+    present_driver_d2d_t *driver = (present_driver_d2d_t*) drv;
+    if (driver == NULL)   return;
+    pr_command_queue_submit(&driver->CommandQueue, cmdlist);
+}
+
 /// @summary Closes a display driver instance and releases all associated resources.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
 void __cdecl PrDisplayDriverClose(uintptr_t drv)
@@ -514,6 +547,7 @@ void __cdecl PrDisplayDriverClose(uintptr_t drv)
         if  (driver->D3DDevice  != NULL) { driver->D3DDevice ->Release(); driver->D3DDevice  = NULL; }
         if  (driver->DWFactory  != NULL) { driver->DWFactory ->Release(); driver->DWFactory  = NULL; }
         if  (driver->D2DFactory != NULL) { driver->D2DFactory->Release(); driver->D2DFactory = NULL; }
+        pr_command_queue_delete(&driver->CommandQueue);
         free(driver);
     }
 }

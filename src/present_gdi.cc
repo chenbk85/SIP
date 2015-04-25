@@ -6,10 +6,16 @@
 /*////////////////
 //   Includes   //
 ////////////////*/
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <Windows.h>
 #include <tchar.h>
+
+#include "intrinsics.h"
+#include "atomic_fifo.h"
+
+#include "prcmdlist.cc"
 
 /*/////////////////
 //   Constants   //
@@ -24,15 +30,16 @@
 /// because some operations may need to render into the bitmap through the device context.
 struct present_driver_gdi_t
 {
-    size_t     Pitch;         /// The number of bytes per-scanline in the image.
-    size_t     Height;        /// The number of scanlines in the image.
-    uint8_t   *DIBMemory;     /// The DIBSection memory, allocated with VirtualAlloc.
-    size_t     Width;         /// The actual width of the image, in pixels.
-    size_t     BytesPerPixel; /// The number of bytes allocated for each pixel.
-    HDC        MemoryDC;      /// The memory device context used for rendering operations.
-    HWND       Window;        /// The handle of the target window.
-    HBITMAP    DIBSection;    /// The DIBSection backing the memory device context.
-    BITMAPINFO BitmapInfo;    /// A description of the bitmap layout and attributes.
+    size_t             Pitch;            /// The number of bytes per-scanline in the image.
+    size_t             Height;           /// The number of scanlines in the image.
+    uint8_t           *DIBMemory;        /// The DIBSection memory, allocated with VirtualAlloc.
+    size_t             Width;            /// The actual width of the image, in pixels.
+    size_t             BytesPerPixel;    /// The number of bytes allocated for each pixel.
+    HDC                MemoryDC;         /// The memory device context used for rendering operations.
+    HWND               Window;           /// The handle of the target window.
+    HBITMAP            DIBSection;       /// The DIBSection backing the memory device context.
+    BITMAPINFO         BitmapInfo;       /// A description of the bitmap layout and attributes.
+    pr_command_queue_t CommandQueue;     /// The driver's command list submission queue.
 };
 
 /*///////////////
@@ -119,6 +126,7 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     driver->Window        = window;
     driver->DIBSection    = dib;
     CopyMemory(&driver->BitmapInfo, &bmi, sizeof(BITMAPINFO));
+    pr_command_queue_init(&driver->CommandQueue);
     return (uintptr_t)driver;
 }
 
@@ -128,8 +136,8 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
 void __cdecl PrDisplayDriverReset(uintptr_t drv)
 {
-    // this driver type does not need to handle device resets.
-    UNREFERENCED_PARAMETER(drv);
+    present_driver_gdi_t   *driver = (present_driver_gdi_t*) drv;
+    pr_command_queue_clear(&driver->CommandQueue);
 }
 
 /// @summary Handles the case where the window associated with a display driver is resized.
@@ -211,6 +219,28 @@ void __cdecl PrDisplayDriverResize(uintptr_t drv)
     CopyMemory(&driver->BitmapInfo, &bmi, sizeof(BITMAPINFO));
 }
 
+/// @summary Allocates a new command list for use by the application. The 
+/// application should write display commands to the command list and then 
+/// submit the list for processing by the presentation driver.
+/// @param drv The display driver handle returned by PrDisplayDriverOpen().
+/// @return An empty command list, or NULL if no command lists are available.
+pr_command_list_t* __cdecl PrCreateCommandList(uintptr_t drv)
+{
+    present_driver_gdi_t *driver = (present_driver_gdi_t*) drv;
+    if (driver == NULL)   return NULL;
+    return pr_command_queue_next_available(&driver->CommandQueue);
+}
+
+/// @summary Submits a list of buffered display commands for processing.
+/// @param drv The display driver handle returned by PrDisplayDriverOpen().
+/// @param cmdlist The list of buffered display commands being submitted.
+void __cdecl PrSubmitCommandList(uintptr_t drv, pr_command_list_t *cmdlist)
+{
+    present_driver_gdi_t *driver = (present_driver_gdi_t*) drv;
+    if (driver == NULL)   return;
+    pr_command_queue_submit(&driver->CommandQueue, cmdlist);
+}
+
 /// @summary Copies the current frame to the application window.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
 void __cdecl PrPresentFrameToWindow(uintptr_t drv)
@@ -235,6 +265,7 @@ void __cdecl PrDisplayDriverClose(uintptr_t drv)
     if (driver == NULL)   return;
     if (driver->DIBMemory != NULL)
     {
+        pr_command_queue_delete(&driver->CommandQueue);
         DeleteDC(driver->MemoryDC);
         DeleteObject(driver->DIBSection);
         driver->DIBMemory  = NULL;

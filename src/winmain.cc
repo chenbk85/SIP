@@ -18,6 +18,8 @@
 #include "intrinsics.h"
 #include "atomic_fifo.h"
 
+#include "prcmdlist.cc"
+
 #include "runtime.cc"
 #include "presentation.cc"
 

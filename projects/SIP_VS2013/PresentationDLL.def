@@ -3,5 +3,7 @@ EXPORTS
     PrDisplayDriverOpen       @1
     PrDisplayDriverReset      @2
     PrDisplayDriverResize     @3
-    PrPresentFrameToWindow    @4
-    PrDisplayDriverClose      @5
+    PrCreateCommandList       @4
+    PrSubmitCommandList       @5
+    PrPresentFrameToWindow    @6
+    PrDisplayDriverClose      @7

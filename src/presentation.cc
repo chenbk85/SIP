@@ -36,6 +36,24 @@ internal_function void     __cdecl PrDisplayDriverResize_Null(uintptr_t drv)
     UNREFERENCED_PARAMETER(drv);
 }
 
+/// @summary Retrieves an empty command list that can be used for display command submission.
+/// @param drv The display driver handle returned by PrDisplayDriverOpen().
+/// @return A display driver command list, or NULL.
+internal_function pr_command_list_t* __cdecl PrCreateCommandList_Null(uintptr_t drv)
+{
+    UNREFERENCED_PARAMETER(drv);
+    return NULL;
+}
+
+/// @summary Submits a list of buffered commands to the display driver for processing.
+/// @param drv The display driver handle returned by PrDisplayDriverOpen().
+/// @param cmdlist The command list to submit, allocated with PrCreateCommandList().
+internal_function void __cdecl PrSubmitCommandList_Null(uintptr_t drv, pr_command_list_t *cmdlist)
+{
+    UNREFERENCED_PARAMETER(drv);
+    UNREFERENCED_PARAMETER(cmdlist);
+}
+
 /// @summary Copies the current frame to the application window.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
 internal_function void     __cdecl PrPresentFrameToWindow_Null(uintptr_t drv)
@@ -64,11 +82,13 @@ enum presentation_type_e : uint32_t
 };
 
 /// @summary Function signatures for the functions loaded from the presentation DLL.
-typedef uintptr_t (__cdecl *PrDisplayDriverOpenFn   )(HWND);
-typedef void      (__cdecl *PrDisplayDriverResetFn  )(uintptr_t);
-typedef void      (__cdecl *PrDisplayDriverResizeFn )(uintptr_t);
-typedef void      (__cdecl *PrPresentFrameToWindowFn)(uintptr_t);
-typedef void      (__cdecl *PrDisplayDriverCloseFn  )(uintptr_t);
+typedef uintptr_t          (__cdecl *PrDisplayDriverOpenFn   )(HWND);
+typedef void               (__cdecl *PrDisplayDriverResetFn  )(uintptr_t);
+typedef void               (__cdecl *PrDisplayDriverResizeFn )(uintptr_t);
+typedef pr_command_list_t* (__cdecl *PrCreateCommandListFn   )(uintptr_t);
+typedef void               (__cdecl *PrSubmitCommandListFn   )(uintptr_t, pr_command_list_t*);
+typedef void               (__cdecl *PrPresentFrameToWindowFn)(uintptr_t);
+typedef void               (__cdecl *PrDisplayDriverCloseFn  )(uintptr_t);
 
 /// @summary Define the data associated with a presentation driver implementation, 
 /// loaded from a DLL at runtime.
@@ -78,6 +98,8 @@ struct presentation_driver_t
     PrDisplayDriverOpenFn    PrDisplayDriverOpen;    /// Open a rendering context to a specific window.
     PrDisplayDriverResetFn   PrDisplayDriverReset;   /// Reset the display driver state and recreate buffers.
     PrDisplayDriverResizeFn  PrDisplayDriverResize;  /// Resize buffers to the client area of the window.
+    PrCreateCommandListFn    PrCreateCommandList;    /// Allocate an empty display command list.
+    PrSubmitCommandListFn    PrSubmitCommandList;    /// Submit a previously allocated display command list.
     PrPresentFrameToWindowFn PrPresentFrameToWindow; /// Copy the current frame from the backbuffer to the foreground.
     PrDisplayDriverCloseFn   PrDisplayDriverClose;   /// Close a rendering context and release associated resources.
 };
@@ -104,6 +126,9 @@ struct display_driver_t
     inline void reset  (void) { Presentation->PrDisplayDriverReset  (DriverHandle); }
     inline void resize (void) { Presentation->PrDisplayDriverResize (DriverHandle); }
     inline void present(void) { Presentation->PrPresentFrameToWindow(DriverHandle); }
+
+    inline pr_command_list_t* create_command_list(void)      { Presentation->PrCreateCommandList(DriverHandle);       }
+    inline void submit_command_list(pr_command_list_t *list) { Presentation->PrSubmitCommandList(DriverHandle, list); }
 };
 
 /*///////////////
@@ -131,6 +156,8 @@ struct display_driver_t
         (PrDisplayDriverOpenFn)    PrDisplayDriverOpen_Null,    \
         (PrDisplayDriverResetFn)   PrDisplayDriverReset_Null,   \
         (PrDisplayDriverResizeFn)  PrDisplayDriverResize_Null,  \
+        (PrCreateCommandListFn)    PrCreateCommandList_Null,    \
+        (PrSubmitCommandListFn)    PrSubmitCommandList_Null,    \
         (PrPresentFrameToWindowFn) PrPresentFrameToWindow_Null, \
         (PrDisplayDriverCloseFn)   PrDisplayDriverClose_Null    \
     }
@@ -211,6 +238,8 @@ public_function bool load_presentation_driver(uint32_t presentation_type)
         RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrDisplayDriverOpen);
         RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrDisplayDriverReset);
         RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrDisplayDriverResize);
+        RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrCreateCommandList);
+        RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrSubmitCommandList);
         RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrPresentFrameToWindow);
         RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrDisplayDriverClose);
         driver->DllHandle = driver_dll;
