@@ -20,6 +20,9 @@
 /*/////////////////
 //   Constants   //
 /////////////////*/
+/// @summary Define the size of a command with no data.
+static size_t const PR_COMMAND_SIZE_BASE                   = sizeof(uint32_t);
+
 /// @summary Define the maximum number of command lists per command queue.
 static size_t const PR_COMMAND_LIST_QUEUE_MAX              = 16;
 
@@ -41,9 +44,12 @@ enum pr_command_type_e : uint16_t
 {
     /// @summary A no-op command with no data.
     PR_COMMAND_NO_OP                = 0,
+    /// @summary Specifies an end-of-frame marker, which terminates the display update. 
+    /// This command is added to the buffer when it is submitted to the presentation driver.
+    PR_COMMAND_END_OF_FRAME         = 1, 
     /// @summary Clear the color buffer to a specified color.
     /// @param bgra_color A 32-bit unsigned integer value specifying the BGRA clear color.
-    PR_COMMAND_CLEAR_COLOR_BUFFER   = 1,
+    PR_COMMAND_CLEAR_COLOR_BUFFER   = 2,
 };
 
 /// @summary Defines the structure of a single presentation command. Each command consists
@@ -78,9 +84,27 @@ struct pr_command_queue_t
     #undef  N
 };
 
+/// @summary Define the data associated with PR_COMMAND_CLEAR_COLOR_BUFFER.
+struct pr_clear_color_buffer_data_t
+{
+    float              Red;                   /// The value to write to the red channel.
+    float              Green;                 /// The value to write to the green channel.
+    float              Blue;                  /// The value to write to the blue channel.
+    float              Alpha;                 /// The value to write to the alpha channel.
+};
+
 /*///////////////
 //   Globals   //
 ///////////////*/
+/// @summary A table for translating command IDs into string literals.
+/// Values in this table must appear in the same order they appear in the 
+/// pr_command_type_e enumeration.
+static char const *PR_COMMAND_NAMES[] = 
+{
+    "PR_COMMAND_NO_OP", 
+    "PR_COMMAND_END_OF_FRAME",
+    "PR_COMMAND_CLEAR_COLOR_BUFFER"
+};
 
 /*///////////////////////
 //   Local Functions   //
@@ -90,56 +114,56 @@ struct pr_command_queue_t
 //  Public Functions   //
 ///////////////////////*/
 /// @summary Initialize a command list to empty, with no memory allocated.
-/// @param cl The command list to initialize.
-public_function void pr_command_list_init(pr_command_list_t *cl)
+/// @param cmdlist The command list to initialize.
+public_function void pr_command_list_init(pr_command_list_t *cmdlist)
 {
-    cl->BytesTotal   = 0;
-    cl->BytesUsed    = 0;
-    cl->CommandCount = 0;
-    cl->CommandData  = NULL;
+    cmdlist->BytesTotal   = 0;
+    cmdlist->BytesUsed    = 0;
+    cmdlist->CommandCount = 0;
+    cmdlist->CommandData  = NULL;
 }
 
 /// @summary Clear a command list without allocating or freeing any memory.
-/// @param cl The command list to clear.
-public_function void pr_command_list_clear(pr_command_list_t *cl)
+/// @param cmdlist The command list to clear.
+public_function void pr_command_list_clear(pr_command_list_t *cmdlist)
 {
-    cl->BytesUsed    = 0;
-    cl->CommandCount = 0;
+    cmdlist->BytesUsed    = 0;
+    cmdlist->CommandCount = 0;
 }
 
 /// @summary Frees all memory allocated to a command list and re-initializes it to empty.
-/// @param cl The command list to delete.
-public_function void pr_command_list_free(pr_command_list_t *cl)
+/// @param cmdlist The command list to delete.
+public_function void pr_command_list_free(pr_command_list_t *cmdlist)
 {
-    if (cl->BytesTotal > 0 && cl->CommandData != NULL)
+    if (cmdlist->BytesTotal > 0 && cmdlist->CommandData != NULL)
     {
-        free(cl->CommandData);
+        free(cmdlist->CommandData);
     }
-    cl->BytesTotal   = 0;
-    cl->BytesUsed    = 0;
-    cl->CommandCount = 0;
-    cl->CommandData  = NULL;
+    cmdlist->BytesTotal   = 0;
+    cmdlist->BytesUsed    = 0;
+    cmdlist->CommandCount = 0;
+    cmdlist->CommandData  = NULL;
 }
 
 /// @summary Reserves memory for a single command.
-/// @param cl The command list to allocate from.
+/// @param cmdlist The command list to allocate from.
 /// @param total_size The number of bytes to allocate for the command, including the 32-bit header.
 /// @return A pointer to the newly allocated command, or NULL.
-public_function pr_command_t* pr_command_list_allocate(pr_command_list_t *cl, size_t total_size)
+public_function pr_command_t* pr_command_list_allocate(pr_command_list_t *cmdlist, size_t total_size)
 {
-    if (cl->BytesUsed + total_size > cl->BytesTotal)
+    if (cmdlist->BytesUsed + total_size > cmdlist->BytesTotal)
     {   // allocate additional memory for command data.
-        size_t new_size = align_up(cl->BytesTotal + total_size, PR_COMMAND_LIST_ALLOCATION_GRANULARITY);
-        void  *new_mem  = realloc (cl->CommandData, new_size);
+        size_t new_size = align_up(cmdlist->BytesTotal + total_size, PR_COMMAND_LIST_ALLOCATION_GRANULARITY);
+        void  *new_mem  = realloc (cmdlist->CommandData, new_size);
         if (new_mem == NULL) return NULL;
-        cl->BytesTotal  = new_size;
-        cl->CommandData = (uint8_t*) new_mem;
+        cmdlist->BytesTotal  = new_size;
+        cmdlist->CommandData = (uint8_t*) new_mem;
     }
     // save a pointer to the newly allocated command:
-    pr_command_t *cmd = (pr_command_t*) &cl->CommandData[cl->BytesUsed];
+    pr_command_t *cmd = (pr_command_t*) &cmdlist->CommandData[cmdlist->BytesUsed];
     // bump up the number of bytes used and command count:
-    cl->BytesUsed    += total_size;
-    cl->CommandCount++;
+    cmdlist->BytesUsed += total_size;
+    cmdlist->CommandCount++;
     // initialize the new command to a no-op:
     cmd->CommandId = PR_COMMAND_NO_OP;
     cmd->DataSize  = 0;
@@ -179,11 +203,11 @@ public_function void pr_command_queue_clear(pr_command_queue_t *fifo)
 
 /// @summary Submits a command list for later processing.
 /// @param fifo The command list submission queue.
-/// @param list The populated command list to submit. 
-public_function void pr_command_queue_submit(pr_command_queue_t *fifo, pr_command_list_t *list)
+/// @param cmdlist The populated command list to submit. 
+public_function void pr_command_queue_submit(pr_command_queue_t *fifo, pr_command_list_t *cmdlist)
 {
     fifo_node_t<pr_command_list_t*> *node = fifo_allocator_get(&fifo->CommandListAlloc);
-    node->Item = list;
+    node->Item = cmdlist;
     mpsc_fifo_u_produce(&fifo->CommandListQueue, node);
 }
 
@@ -233,3 +257,77 @@ public_function void pr_command_queue_delete(pr_command_queue_t *fifo)
     mpsc_fifo_u_delete(&fifo->CommandListQueue);
     fifo_allocator_reinit(&fifo->CommandListAlloc);
 }
+
+/// @summary Translate a command identifier into its corresponding string name.
+/// @param command_id The command identifier, one of pr_command_type_e.
+/// @return A NULL-terminated string literal corresponding to the command ID.
+public_function char const* pr_command_name(uint16_t command_id)
+{
+    return PR_COMMAND_NAMES[command_id];
+}
+
+/// @summary Translate a command identifier into its corresponding string name.
+/// @param command The command to translate.
+/// @return A NULL-terminated string literal corresponding to the command ID.
+public_function char const* pr_command_name(pr_command_t *command)
+{
+    return PR_COMMAND_NAMES[command->CommandId];
+}
+
+/// @summary Write a no-op command into a command list.
+/// @param cmdlist The command list to update.
+public_function void pr_command_no_op(pr_command_list_t *cmdlist)
+{
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE);
+    cmd->CommandId    = PR_COMMAND_NO_OP;
+    cmd->DataSize     = 0;
+}
+
+/// @summary Write an end-of-frame marker into a command list.
+/// @param cmdlist The command list to update.
+public_function void pr_command_end_of_frame(pr_command_list_t *cmdlist)
+{
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE);
+    cmd->CommandId    = PR_COMMAND_END_OF_FRAME;
+    cmd->DataSize     = 0;
+}
+
+/// @summary Write a color buffer clear command into a command list.
+/// @param cmdlist The command list to update.
+/// @param rgba Pointer to an array specifying four values representing the values to write to 
+/// the red, green, blue and alpha channels, in that order.
+public_function void pr_command_clear_color_buffer(pr_command_list_t *cmdlist, float const *rgba)
+{
+    size_t        dsz = sizeof(float) * 4;
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
+    cmd->CommandId    = PR_COMMAND_CLEAR_COLOR_BUFFER;
+    cmd->DataSize     = (uint16_t) dsz;
+
+    pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd->Data;
+    data->Red   = rgba[0];
+    data->Green = rgba[1];
+    data->Blue  = rgba[2];
+    data->Alpha = rgba[3];
+}
+
+/// @summary Write a color buffer clear command into a command list.
+/// @param cmdlist The command list to update.
+/// @param r The red channel value of the clear color.
+/// @param g The green channel value of the clear color.
+/// @param b The blue channel value of the clear color.
+/// @param a The alpha channel value of the clear color.
+public_function void pr_command_clear_color_buffer(pr_command_list_t *cmdlist, float r, float g, float b, float a)
+{
+    size_t        dsz = sizeof(float) * 4;
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
+    cmd->CommandId    = PR_COMMAND_CLEAR_COLOR_BUFFER;
+    cmd->DataSize     = (uint16_t) dsz;
+
+    pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd->Data;
+    data->Red   = r;
+    data->Green = g;
+    data->Blue  = b;
+    data->Alpha = a;
+}
+
+// NEXT: sync, fence, draw bitmap

@@ -240,7 +240,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         OutputDebugString(_T("ERROR: Unable to create main application window.\n"));
         return 0;
     }
-    if (!display_driver_create(&display, PRESENTATION_TYPE_GDI, main_window))
+    if (!display_driver_create(&display, PRESENTATION_TYPE_DIRECT2D, main_window))
     {
         OutputDebugString(_T("ERROR: Unable to initialize the display driver.\n"));
         return 0;
@@ -287,6 +287,10 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
         // TODO(rlk): perform application update here.
         // this consists primarily of queueing commands to the display driver.
+        pr_command_list_t *cmdlist = display.create_command_list();
+        pr_command_clear_color_buffer(cmdlist, 1.0, 0.0, 0.0, 1.0);
+        pr_command_end_of_frame(cmdlist);
+        display.submit_command_list(cmdlist);
 
         // throttle the application update rate.
         trace_marker_main("tick_throttle");

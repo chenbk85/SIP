@@ -492,8 +492,53 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
     if (driver != NULL)
     {   // translate queued commands into driver equivalents.
         driver->D2DContext->BeginDraw();
-        // TODO(rlk): process the command queue here.
-        // ...
+        pr_command_list_t *cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
+        while (cmdlist != NULL)
+        {
+            bool       end_of_frame = false;
+            uint8_t const *read_ptr = cmdlist->CommandData;
+            uint8_t const *end_ptr  = cmdlist->CommandData + cmdlist->BytesUsed;
+            while (read_ptr < end_ptr)
+            {
+                pr_command_t *cmd_info = (pr_command_t*) read_ptr;
+                size_t        cmd_size =  cmd_info->DataSize;
+                switch (cmd_info->CommandId)
+                {
+                case PR_COMMAND_NO_OP:
+                    break;
+                case PR_COMMAND_END_OF_FRAME:
+                    {   // break out of the command processing loop and submit
+                        // submit the translated command list to the system driver.
+                        end_of_frame = true;
+                    }
+                    break;
+                case PR_COMMAND_CLEAR_COLOR_BUFFER:
+                    {
+                        pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd_info->Data;
+                        D2D1_COLOR_F  clear_color;
+                        clear_color.r = data->Red;
+                        clear_color.g = data->Green;
+                        clear_color.b = data->Blue;
+                        clear_color.a = data->Alpha;
+                        driver->D2DContext->Clear(clear_color);
+                    }
+                    break;
+                }
+                // advance to the start of the next buffered command.
+                read_ptr += cmd_size;
+            }
+            // return the current command list to the driver's free list
+            // and determine whether to continue submitting commands.
+            pr_command_queue_return(&driver->CommandQueue, cmdlist);
+            if (end_of_frame)
+            {   // finished with command submission for this frame.
+                break;
+            }
+            else
+            {   // advance to the next queued command list.
+                cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
+            }
+        }
         // indicate the end of command submission for this frame.
         driver->D2DContext->EndDraw();
         // synchronize presentation to the vertical blank interval.

@@ -49,6 +49,15 @@ struct present_driver_gdi_t
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
+/// @summary Convert a floating point value, normally in [0, 1], to an unsigned 8-bit
+/// integer value, clamping to the range [0, 255].
+/// @param value The input value.
+/// @return A value in [0, 255].
+internal_function inline uint8_t float_to_u8_sat(float value)
+{
+    float   scaled = value * 255.0f;
+    return (scaled > 255.0f) ? 255 : uint8_t(scaled);
+}
 
 /*///////////////////////
 //  Public Functions   //
@@ -247,7 +256,56 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
 {
     present_driver_gdi_t *driver = (present_driver_gdi_t*) drv;
     if (driver == NULL)   return;
-    // TODO(rlk): Process the queued command list to build the frame.
+
+    pr_command_list_t *cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
+    while (cmdlist != NULL)
+    {
+        bool       end_of_frame = false;
+        uint8_t const *read_ptr = cmdlist->CommandData;
+        uint8_t const *end_ptr  = cmdlist->CommandData + cmdlist->BytesUsed;
+        while (read_ptr < end_ptr)
+        {
+            pr_command_t *cmd_info = (pr_command_t*) read_ptr;
+            size_t        cmd_size =  cmd_info->DataSize;
+            switch (cmd_info->CommandId)
+            {
+            case PR_COMMAND_NO_OP:
+                break;
+            case PR_COMMAND_END_OF_FRAME:
+                {   // break out of the command processing loop and submit
+                    // submit the translated command list to the system driver.
+                    end_of_frame = true;
+                }
+                break;
+            case PR_COMMAND_CLEAR_COLOR_BUFFER:
+                {
+                    pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd_info->Data;
+                    RECT fill_rc  = { 0, 0, (int) driver->Width, (int) driver->Height };
+                    uint8_t    r  = float_to_u8_sat(data->Red);
+                    uint8_t    g  = float_to_u8_sat(data->Green);
+                    uint8_t    b  = float_to_u8_sat(data->Blue);
+                    HBRUSH brush  = CreateSolidBrush(RGB(r, g, b));
+                    FillRect(driver->MemoryDC, &fill_rc, brush);
+                    DeleteObject(brush);
+                }
+                break;
+            }
+            // advance to the start of the next buffered command.
+            read_ptr += cmd_size;
+        }
+        // return the current command list to the driver's free list
+        // and determine whether to continue submitting commands.
+        pr_command_queue_return(&driver->CommandQueue, cmdlist);
+        if (end_of_frame)
+        {   // finished with command submission for this frame.
+            break;
+        }
+        else
+        {   // advance to the next queued command list.
+            cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
+        }
+    }
+
     // now perform a 1-1 blit from the backbuffer to the screen/window.
     HDC win_dc  = GetDC(driver->Window);
     HDC mem_dc  = driver->MemoryDC;

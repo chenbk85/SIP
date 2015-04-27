@@ -127,7 +127,7 @@ struct display_driver_t
     inline void resize (void) { Presentation->PrDisplayDriverResize (DriverHandle); }
     inline void present(void) { Presentation->PrPresentFrameToWindow(DriverHandle); }
 
-    inline pr_command_list_t* create_command_list(void)      { Presentation->PrCreateCommandList(DriverHandle);       }
+    inline pr_command_list_t* create_command_list(void)      { return Presentation->PrCreateCommandList(DriverHandle);}
     inline void submit_command_list(pr_command_list_t *list) { Presentation->PrSubmitCommandList(DriverHandle, list); }
 };
 
