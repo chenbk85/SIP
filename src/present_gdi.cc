@@ -243,11 +243,15 @@ pr_command_list_t* __cdecl PrCreateCommandList(uintptr_t drv)
 /// @summary Submits a list of buffered display commands for processing.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
 /// @param cmdlist The list of buffered display commands being submitted.
-void __cdecl PrSubmitCommandList(uintptr_t drv, pr_command_list_t *cmdlist)
+/// @param wait Specify true to block the calling thread until the command list is processed by the driver.
+/// @param wait_timeout The maximum amount of time to wait, in milliseconds, if wait is also true.
+void __cdecl PrSubmitCommandList(uintptr_t drv, pr_command_list_t *cmdlist, bool wait, uint32_t wait_timeout)
 {
     present_driver_gdi_t *driver = (present_driver_gdi_t*) drv;
     if (driver == NULL)   return;
+    HANDLE sync = cmdlist->SyncHandle;
     pr_command_queue_submit(&driver->CommandQueue, cmdlist);
+    if (wait) safe_wait(sync, wait_timeout);
 }
 
 /// @summary Copies the current frame to the application window.
@@ -293,6 +297,8 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
             // advance to the start of the next buffered command.
             read_ptr += cmd_size;
         }
+        // signal to any waiters that processing of the command list has finished.
+        SetEvent(cmdlist->SyncHandle);
         // return the current command list to the driver's free list
         // and determine whether to continue submitting commands.
         pr_command_queue_return(&driver->CommandQueue, cmdlist);

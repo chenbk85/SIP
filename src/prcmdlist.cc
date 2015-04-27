@@ -9,13 +9,6 @@
 /*////////////////
 //   Includes   //
 ////////////////*/
-#include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <assert.h>
-
-#include "intrinsics.h"
-#include "atomic_fifo.h"
 
 /*/////////////////
 //   Constants   //
@@ -48,7 +41,10 @@ enum pr_command_type_e : uint16_t
     /// This command is added to the buffer when it is submitted to the presentation driver.
     PR_COMMAND_END_OF_FRAME         = 1, 
     /// @summary Clear the color buffer to a specified color.
-    /// @param bgra_color A 32-bit unsigned integer value specifying the BGRA clear color.
+    /// @param red A 32-bit floating-point value in [0, 1] specifying the red channel value.
+    /// @param green A 32-bit floating-point value in [0, 1] specifying the green channel value.
+    /// @param blue A 32-bit floating-point value in [0, 1] specifying the blue channel value.
+    /// @param alpha A 32-bit floating-point value in [0, 1] specifying the alpha channel value.
     PR_COMMAND_CLEAR_COLOR_BUFFER   = 2,
 };
 
@@ -69,6 +65,7 @@ struct pr_command_list_t
     size_t             BytesUsed;             /// The number of bytes actually used for this command list.
     size_t             CommandCount;          /// The number of buffered commands.
     uint8_t           *CommandData;           /// The allocated memory block.
+    HANDLE             SyncHandle;            /// A ManualReset event used to wait for the command list to be processed.
 };
 
 /// @summary Define the data associated with a MPSC FIFO queue of command lists. 
@@ -109,6 +106,22 @@ static char const *PR_COMMAND_NAMES[] =
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
+/// @summary Helper function to safely wait for an event to become signaled.
+/// @param event The handle of a manual or auto-reset event.
+/// @param timeout The wait timeout, in milliseconds, or INFINITE (-1) to wait forever.
+internal_function void safe_wait(HANDLE event, uint32_t timeout)
+{
+    bool keep_waiting = true;
+    do
+    {
+        DWORD  result = WaitForSingleObjectEx(event, timeout, TRUE);
+        if (result != WAIT_IO_COMPLETION)
+        {   // event became signaled, or an error occurred.
+            keep_waiting = false;
+            break;
+        }
+    } while (keep_waiting);
+}
 
 /*///////////////////////
 //  Public Functions   //
@@ -121,6 +134,7 @@ public_function void pr_command_list_init(pr_command_list_t *cmdlist)
     cmdlist->BytesUsed    = 0;
     cmdlist->CommandCount = 0;
     cmdlist->CommandData  = NULL;
+    cmdlist->SyncHandle   = CreateEvent(NULL, TRUE, FALSE, NULL);
 }
 
 /// @summary Clear a command list without allocating or freeing any memory.
@@ -129,6 +143,7 @@ public_function void pr_command_list_clear(pr_command_list_t *cmdlist)
 {
     cmdlist->BytesUsed    = 0;
     cmdlist->CommandCount = 0;
+    ResetEvent(cmdlist->SyncHandle);
 }
 
 /// @summary Frees all memory allocated to a command list and re-initializes it to empty.
@@ -139,10 +154,15 @@ public_function void pr_command_list_free(pr_command_list_t *cmdlist)
     {
         free(cmdlist->CommandData);
     }
+    if (cmdlist->SyncHandle != NULL)
+    {
+        CloseHandle(cmdlist->SyncHandle);
+    }
     cmdlist->BytesTotal   = 0;
     cmdlist->BytesUsed    = 0;
     cmdlist->CommandCount = 0;
     cmdlist->CommandData  = NULL;
+    cmdlist->SyncHandle   = NULL;
 }
 
 /// @summary Reserves memory for a single command.
@@ -329,5 +349,3 @@ public_function void pr_command_clear_color_buffer(pr_command_list_t *cmdlist, f
     data->Blue  = b;
     data->Alpha = a;
 }
-
-// NEXT: sync, fence, draw bitmap

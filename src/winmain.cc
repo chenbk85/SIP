@@ -290,7 +290,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         pr_command_list_t *cmdlist = display.create_command_list();
         pr_command_clear_color_buffer(cmdlist, 1.0, 0.0, 0.0, 1.0);
         pr_command_end_of_frame(cmdlist);
-        display.submit_command_list(cmdlist);
+        display.submit_command_list(cmdlist, false, 0);
 
         // throttle the application update rate.
         trace_marker_main("tick_throttle");

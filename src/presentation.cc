@@ -48,10 +48,14 @@ internal_function pr_command_list_t* __cdecl PrCreateCommandList_Null(uintptr_t 
 /// @summary Submits a list of buffered commands to the display driver for processing.
 /// @param drv The display driver handle returned by PrDisplayDriverOpen().
 /// @param cmdlist The command list to submit, allocated with PrCreateCommandList().
-internal_function void __cdecl PrSubmitCommandList_Null(uintptr_t drv, pr_command_list_t *cmdlist)
+/// @param wait Specify true to block the calling thread until the command list is processed by the driver.
+/// @param wait_timeout The maximum amount of time to wait, in milliseconds, if wait is also true.
+internal_function void __cdecl PrSubmitCommandList_Null(uintptr_t drv, pr_command_list_t *cmdlist, bool wait, uint32_t wait_timeout)
 {
     UNREFERENCED_PARAMETER(drv);
     UNREFERENCED_PARAMETER(cmdlist);
+    UNREFERENCED_PARAMETER(wait);
+    UNREFERENCED_PARAMETER(wait_timeout);
 }
 
 /// @summary Copies the current frame to the application window.
@@ -86,7 +90,7 @@ typedef uintptr_t          (__cdecl *PrDisplayDriverOpenFn   )(HWND);
 typedef void               (__cdecl *PrDisplayDriverResetFn  )(uintptr_t);
 typedef void               (__cdecl *PrDisplayDriverResizeFn )(uintptr_t);
 typedef pr_command_list_t* (__cdecl *PrCreateCommandListFn   )(uintptr_t);
-typedef void               (__cdecl *PrSubmitCommandListFn   )(uintptr_t, pr_command_list_t*);
+typedef void               (__cdecl *PrSubmitCommandListFn   )(uintptr_t, pr_command_list_t*, bool, uint32_t);
 typedef void               (__cdecl *PrPresentFrameToWindowFn)(uintptr_t);
 typedef void               (__cdecl *PrDisplayDriverCloseFn  )(uintptr_t);
 
@@ -123,12 +127,26 @@ struct display_driver_t
         }
     }
 
-    inline void reset  (void) { Presentation->PrDisplayDriverReset  (DriverHandle); }
-    inline void resize (void) { Presentation->PrDisplayDriverResize (DriverHandle); }
-    inline void present(void) { Presentation->PrPresentFrameToWindow(DriverHandle); }
-
-    inline pr_command_list_t* create_command_list(void)      { return Presentation->PrCreateCommandList(DriverHandle);}
-    inline void submit_command_list(pr_command_list_t *list) { Presentation->PrSubmitCommandList(DriverHandle, list); }
+    inline void reset(void)
+    { 
+        Presentation->PrDisplayDriverReset  (DriverHandle);
+    }
+    inline void resize(void)
+    { 
+        Presentation->PrDisplayDriverResize (DriverHandle);
+    }
+    inline void present(void)
+    {
+        Presentation->PrPresentFrameToWindow(DriverHandle);
+    }
+    inline pr_command_list_t* create_command_list(void)
+    {
+        return Presentation->PrCreateCommandList(DriverHandle);
+    }
+    inline void submit_command_list(pr_command_list_t *cmdlist, bool wait, uint32_t timeout) 
+    {
+        Presentation->PrSubmitCommandList(DriverHandle,  cmdlist, wait, timeout);
+    }
 };
 
 /*///////////////
@@ -213,11 +231,11 @@ public_function bool load_presentation_driver(uint32_t presentation_type)
     switch (presentation_type)
     {
     case PRESENTATION_TYPE_GDI:
-        OutputDebugString(_T("STATUS: Beginning load of presentation driver ") _T("PresentGDI.dll") _T("...\n"));
+        OutputDebugString(_T("STATUS: Beginning load of presentation driver ") _T("PresentGDI.dll") _T(".\n"));
         dll_name  = _T("PresentGDI.dll");
         break;
     case PRESENTATION_TYPE_DIRECT2D:
-        OutputDebugString(_T("STATUS: Beginning load of presentation driver ") _T("PresentD2D.dll") _T("...\n"));
+        OutputDebugString(_T("STATUS: Beginning load of presentation driver ") _T("PresentD2D.dll") _T(".\n"));
         dll_name  = _T("PresentD2D.dll");
         break;
     default:
@@ -243,6 +261,7 @@ public_function bool load_presentation_driver(uint32_t presentation_type)
         RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrPresentFrameToWindow);
         RESOLVE_PRESENTATION_DLL_FUNCTION(driver, driver_dll, PrDisplayDriverClose);
         driver->DllHandle = driver_dll;
+        OutputDebugString(_T("STATUS: Presentation driver loaded successfully.\n"));
         return true;
     }
     else
