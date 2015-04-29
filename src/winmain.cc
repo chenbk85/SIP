@@ -21,6 +21,8 @@
 #include "prcmdlist.cc"
 
 #include "runtime.cc"
+#include "filepath.cc"
+#include "iodriver.cc"
 #include "presentation.cc"
 
 /*/////////////////
@@ -190,6 +192,7 @@ internal_function LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wPar
 /// @return Zero if the message loop was not entered, or the value of the WM_QUIT wParam.
 int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int nCmdShow)
 {
+    file_list_t      image_files;
 	display_driver_t display;
     int result = 0; // return zero if the message loop isn't entered.
     UNREFERENCED_PARAMETER(hPrev);
@@ -206,6 +209,21 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     trace_thread_id("main");
     win32_runtime_elevate();
 
+    // get a list of all files in the images subdirectory. these files will be 
+    // loaded asynchronously and displayed in the main application window.
+    if (!create_file_list(&image_files, 0, 0) || !enumerate_files(&image_files, "images", "*.*", true))
+    {
+        OutputDebugString(_T("ERROR: Unable to enumerate files in images subdirectory.\n"));
+        return 0;
+    }
+    if (image_files.PathCount == 0)
+    {
+        OutputDebugString(_T("ERROR: No images found in images subdirectory.\n"));
+        return 0;
+    }
+    
+    // @TODO(rlk): init I/O driver and submit all images.
+
     // query the clock frequency of the high-resolution timer.
     LARGE_INTEGER clock_frequency;
     QueryPerformanceFrequency(&clock_frequency);
@@ -221,7 +239,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     wnd_class.cbClsExtra     = 0;
     wnd_class.cbWndExtra     = sizeof(void*);
     wnd_class.hInstance      = hInstance;
-    wnd_class.lpszClassName  =_T("SIP_WndClass");
+    wnd_class.lpszClassName  =_T("HAPPI_WndClass");
     wnd_class.lpszMenuName   = NULL;
     wnd_class.lpfnWndProc    = MainWndProc;
     wnd_class.hIcon          = NULL;
@@ -234,7 +252,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         OutputDebugString(_T("ERROR: Unable to register window class.\n"));
         return 0;
     }
-    HWND main_window  = CreateWindowEx(0, wnd_class.lpszClassName, _T("AIP Main Window"), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, hInstance, 0);
+    HWND main_window  = CreateWindowEx(0, wnd_class.lpszClassName, _T("HAPPI Main Window"), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, hInstance, 0);
     if  (main_window == NULL)
     {
         OutputDebugString(_T("ERROR: Unable to create main application window.\n"));
