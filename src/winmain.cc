@@ -4,6 +4,16 @@
 /// along with loading the presentation layer and initializing the system.
 ///////////////////////////////////////////////////////////////////////////80*/
 
+#pragma warning (disable:4505) // unreferenced local function was removed
+
+#ifndef _CRT_SECURE_NO_DEPRECATE
+#define _CRT_SECURE_NO_DEPRECATE
+#endif
+
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 /*////////////////
 //   Includes   //
 ////////////////*/
@@ -115,8 +125,8 @@ internal_function inline float nanos_to_seconds(int64_t nanos)
 /// @param window The window whose styles will be updated.
 internal_function void toggle_fullscreen(HWND window)
 {
-    DWORD style = GetWindowLong(window, GWL_STYLE);
-    if   (style & WS_OVERLAPPEDWINDOW)
+    LONG_PTR style = GetWindowLongPtr(window, GWL_STYLE);
+    if (style & WS_OVERLAPPEDWINDOW)
     {   // switch to a fullscreen-style window.
         MONITORINFO monitor_info = { sizeof(MONITORINFO)     };
         WINDOWPLACEMENT win_info = { sizeof(WINDOWPLACEMENT) };
@@ -124,15 +134,15 @@ internal_function void toggle_fullscreen(HWND window)
         {
             RECT rc = monitor_info.rcMonitor;
             Global_WindowPlacement = win_info;
-            SetWindowLong(window, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
-            SetWindowPos (window, HWND_TOP , rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            SetWindowLongPtr(window, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+            SetWindowPos(window, HWND_TOP , rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
         }
     }
     else
     {   // go back to windowed mode.
-        SetWindowLong(window, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+        SetWindowLongPtr(window, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
         SetWindowPlacement(window, &Global_WindowPlacement);
-        SetWindowPos (window, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        SetWindowPos(window, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
     }
 }
 
