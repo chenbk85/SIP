@@ -18,11 +18,16 @@
 #include "intrinsics.h"
 #include "atomic_fifo.h"
 
-#include "prcmdlist.cc"
-
 #include "runtime.cc"
+
 #include "filepath.cc"
-#include "iodriver.cc"
+#include "iobuffer.cc"
+#include "aiodriver.cc"
+#include "piodriver.cc"
+#include "vfsdriver.cc"
+#include "iodecoder.cc"
+
+#include "prcmdlist.cc"
 #include "presentation.cc"
 
 /*/////////////////
