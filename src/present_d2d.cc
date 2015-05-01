@@ -6,6 +6,8 @@
 /// http://blog.airesoft.co.uk/2014/05/windows-sdk-8-1-iso/#debug
 ///////////////////////////////////////////////////////////////////////////80*/
 
+#pragma warning (disable:4505) // unreferenced local function was removed
+
 /*////////////////
 //   Includes   //
 ////////////////*/
