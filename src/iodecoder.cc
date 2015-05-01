@@ -187,7 +187,7 @@ stream_decoder_t::stream_decoder_t(void)
     FirstByte(NULL),
     FinalByte(NULL), 
     ReadCursor(NULL), 
-    StatusFlags(STREAM_DECODE_STATUS_NONE), 
+    StatusFlags(STREAM_DECODE_STATUS_RESTART), 
     ErrorCode(STREAM_DECODE_ERROR_NONE), 
     EncodedData(NULL), 
     EncodedDataOffset(0), 

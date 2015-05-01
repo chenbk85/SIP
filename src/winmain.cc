@@ -34,8 +34,8 @@
 #include "iobuffer.cc"
 #include "aiodriver.cc"
 #include "piodriver.cc"
-#include "vfsdriver.cc"
 #include "iodecoder.cc"
+#include "vfsdriver.cc"
 
 #include "prcmdlist.cc"
 #include "presentation.cc"
@@ -223,6 +223,24 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     // it's not a fatal error if this can't be completed.
     trace_thread_id("main");
     win32_runtime_elevate();
+
+    vfs_mounts_t m;
+    vfs_mounts_create (m , 128);
+    for (size_t i = 0; i < 128; ++i)
+    {
+        vfs_mounts_insert(m, i * 2, (uint32_t) i);
+    }
+    for (size_t i = 0; i < 32 ; ++i)
+    {
+        vfs_mounts_remove(m, 128 - (i * 2));
+    }
+    for (size_t i = 0; i < 128; ++i)
+    {
+        TCHAR buf[5] = {};
+        _stprintf(buf, _T("%03Iu\n"), m.MountIds[i]); buf[4] = 0;
+        OutputDebugString(buf);
+    }
+    vfs_mounts_delete(m);
 
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
