@@ -224,24 +224,6 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     trace_thread_id("main");
     win32_runtime_elevate();
 
-    vfs_mounts_t m;
-    vfs_mounts_create (m , 128);
-    for (size_t i = 0; i < 128; ++i)
-    {
-        vfs_mounts_insert(m, i * 2, (uint32_t) i);
-    }
-    for (size_t i = 0; i < 32 ; ++i)
-    {
-        vfs_mounts_remove(m, 128 - (i * 2));
-    }
-    for (size_t i = 0; i < 128; ++i)
-    {
-        TCHAR buf[5] = {};
-        _stprintf(buf, _T("%03Iu\n"), m.MountIds[i]); buf[4] = 0;
-        OutputDebugString(buf);
-    }
-    vfs_mounts_delete(m);
-
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
     if (!create_file_list(&image_files, 0, 0) || !enumerate_files(&image_files, "images", "*.*", true))
@@ -275,8 +257,8 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     wnd_class.lpszClassName  =_T("HAPPI_WndClass");
     wnd_class.lpszMenuName   = NULL;
     wnd_class.lpfnWndProc    = MainWndProc;
-    wnd_class.hIcon          = NULL;
-    wnd_class.hIconSm        = NULL;
+    wnd_class.hIcon          = LoadIcon(0, IDI_APPLICATION);
+    wnd_class.hIconSm        = LoadIcon(0, IDI_APPLICATION);
     wnd_class.hCursor        = LoadCursor(0, IDC_ARROW);
     wnd_class.style          = CS_HREDRAW | CS_VREDRAW ;
     wnd_class.hbrBackground  = NULL;
