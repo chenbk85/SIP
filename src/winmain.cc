@@ -18,12 +18,15 @@
 //   Includes   //
 ////////////////*/
 #include <Windows.h>
+#include <objbase.h>
+#include <ShlObj.h>
+#include <tchar.h>
+
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <float.h>
-#include <tchar.h>
 
 #include "intrinsics.h"
 #include "atomic_fifo.h"
