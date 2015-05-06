@@ -579,4 +579,3 @@ inline bool spsc_fifo_b_produce(spsc_fifo_b_t<T> *fifo, T const &item)
 #undef  PLATFORM_ATOMIC_FIFO_DEFINED
 #define PLATFORM_ATOMIC_FIFO_DEFINED
 #endif /* !defined(ATOMIC_FIFO_H) */
-

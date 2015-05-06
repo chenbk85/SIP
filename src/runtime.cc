@@ -907,4 +907,3 @@ inline trace_scope_task_t::~trace_scope_task_t(void)
 {
     trace_leave_scope_task(Description, EnterTime);
 }
-
