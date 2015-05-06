@@ -37,10 +37,9 @@ struct vfs_mount_t;                    /// Data describing a file system mount p
 /// @summary Define the recognized categories of file system mount points.
 enum vfs_mount_type_e : int32_t
 {
-    VFS_MOUNT_TYPE_LOCAL          = 0, /// The mount point is a local device (attached SSD, etc.)
-    VFS_MOUNT_TYPE_REMOTE         = 1, /// The mount point is a non-local device (mapped drive, etc.)
-    VFS_MOUNT_TYPE_ARCHIVE        = 2, /// The mount point is backed by an archive file (ZIP, TAR, etc.)
-    VFS_MOUNT_TYPE_COUNT          = 3  /// The number of recognized file system mount point categories.
+    VFS_MOUNT_TYPE_DIRECTORY      = 0, /// The mount point is a filesystem directory.
+    VFS_MOUNT_TYPE_ARCHIVE        = 1, /// The mount point is backed by an archive file (ZIP, TAR, etc.)
+    VFS_MOUNT_TYPE_COUNT          = 2  /// The number of recognized file system mount point categories.
 };
 
 /// @summary Define the recognized types of file system entries. Mainly the 
@@ -84,9 +83,31 @@ enum vfs_file_flags_e : uint32_t
 /// @summary Defines identifiers for special folder paths. 
 enum vfs_known_path_e : int
 {
-    VFS_KNOWN_PATH_EXE_ROOT        = 0, /// The absolute path to the current executable, without filename.
-    VFS_KNOWN_PATH_DOC_ROOT        = 1, /// The absolute path to the user's documents folder.
-    VFS_KNOWN_PATH_HOME            = 2, /// The absolute path to the user's home directory.
+    VFS_KNOWN_PATH_EXECUTABLE       = 0,      /// The absolute path to the current executable, without filename.
+    VFS_KNOWN_PATH_USER_HOME        = 1,      /// The absolute path to the user's home directory.
+    VFS_KNOWN_PATH_USER_DESKTOP     = 2,      /// The absolute path to the user's desktop directory.
+    VFS_KNOWN_PATH_USER_DOCUMENTS   = 3,      /// The absolute path to the user's documents directory.
+    VFS_KNOWN_PATH_USER_DOWNLOADS   = 4,      /// The absolute path to the user's downloads directory.
+    VFS_KNOWN_PATH_USER_MUSIC       = 5,      /// The absolute path to the user's music directory.
+    VFS_KNOWN_PATH_USER_PICTURES    = 6,      /// The absolute path to the user's pictures directory.
+    VFS_KNOWN_PATH_USER_SAVE_GAMES  = 7,      /// The absolute path to the user's saved games directory.
+    VFS_KNOWN_PATH_USER_VIDEOS      = 8,      /// The absolute path to the user's videos directory.
+    VFS_KNOWN_PATH_USER_PREFERENCES = 9,      /// The absolute path to the user's local application data directory.
+    VFS_KNOWN_PATH_PUBLIC_DOCUMENTS = 10,     /// The absolute path to the public documents directory.
+    VFS_KNOWN_PATH_PUBLIC_DOWNLOADS = 11,     /// The absolute path to the public downloads directory.
+    VFS_KNOWN_PATH_PUBLIC_MUSIC     = 12,     /// The absolute path to the public music directory.
+    VFS_KNOWN_PATH_PUBLIC_PICTURES  = 13,     /// The absolute path to the public pictures directory.
+    VFS_KNOWN_PATH_PUBLIC_VIDEOS    = 14,     /// The absolute path to the public videos directory.
+    VFS_KNOWN_PATH_SYSTEM_FONTS     = 15,     /// The absolute path to the system fonts directory.
+};
+
+/// @summary Defines identifiers for the recognized types of stream decoders.
+/// A decoder hint can be specified when opening a stream to control the type
+/// of stream decoder that gets returned. 
+enum vfs_decocder_hint_e : int32_t
+{
+    VFS_DECODER_HINT_USE_DEFAULT  = 0, /// Let the mount point decide the decoder to use.
+    // ...
 };
 
 /// @summary Define the result codes that can be returned when opening a file.
@@ -104,10 +125,12 @@ enum vfs_open_result_e : int
 /// @param The mount point performing the file open.
 /// @param The path of the file to open, relative to the mount point root.
 /// @param One of vfs_file_usage_e specifying the intended use of the file.
+/// @param A combination of vfs_file_hint_e used to control how the file is opened.
+/// @param One of vfs_decoder_hint_e specifying the type of decoder to create.
 /// @param On return, this structure should be populated with the data necessary
 /// to access the file. If the file cannot be opened, set the OSError field.
 /// @return One of vfs_open_result_e specifying the result of the operation.
-typedef int  (*vfs_open_fn)(vfs_mount_t*, char const*, int32_t, uint32_t, vfs_file_t*);
+typedef int  (*vfs_open_fn)(vfs_mount_t*, char const*, int32_t, uint32_t, int32_t, vfs_file_t*);
 
 /// @summary Unmount the mount point. This function should close any open file 
 /// handles and free any resources allocated for the mount point, including the
@@ -119,7 +142,7 @@ typedef void (*vfs_unmount_fn)(vfs_mount_t*);
 /// returned by the mount point and returned to the VFS driver, which may then 
 /// pass the information on to the prioritized I/O driver to perform I/O ops.
 struct vfs_file_t
-{
+{   typedef stream_decoder_t          decoder_t;
     DWORD          OSError;       /// The reason the file could not be opened.
     DWORD          AccessMode;    /// The access mode flags used to open the file handle. See CreateFile.
     DWORD          ShareMode;     /// The sharing mode flags used to open the file handle. See CreateFile.
@@ -131,6 +154,7 @@ struct vfs_file_t
     int64_t        FileSize;      /// The runtime size of the file data, in bytes.
     uint32_t       FileHints;     /// A combination of vfs_file_hints_e.
     uint32_t       FileFlags;     /// A combination of vfs_file_flags_e.
+    decoder_t     *Decoder;       /// The stream decoder to use, for usages that read data.
 };
 
 /// @summary Represents a single mounted file system within the larger VFS.
@@ -164,7 +188,9 @@ struct vfs_mounts_t
 {
     size_t         Count;         /// The number of defined mount points.
     size_t         Capacity;      /// The number of slots of queue storage.
-    uintptr_t     *MountIds;      /// The set of application-defined mount identifiers.
+    uintptr_t     *MountIds;      /// The set of application-defined unique mount point identifiers.
+                                  /// Necessary because multiple mount points can be defined at the 
+                                  /// same root location, but with different priorities/order.
     vfs_mount_t   *MountData;     /// The set of mount point internal data and functions.
     uint32_t      *Priority;      /// The set of mount point priority values.
 };
@@ -183,6 +209,59 @@ struct vfs_driver_t
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
+/// @summary Compare two mount point roots to determine if they match.
+/// @param s1 A NULL-terminated UTF-8 string specifying the mount point identifier to match, with trailing slash '/'.
+/// @param s2 A NULL-terminated UTF-8 string specifying the mount point identifier to check, with trailing slash '/'.
+/// @return true if the mount point identifiers match.
+internal_function inline bool vfs_mount_point_match_exact(char const *s1, char const *s2)
+{   // use strcasecmp on Linux.
+    return _stricmp(s1, s2) == 0;
+}
+
+/// @summary Determine whether a path references an entry under a given mount point.
+/// @param mount A NULL-terminated UTF-8 string specifying the mount point root to match, with trailing slash '/'.
+/// @param path A NULL-terminated UTF-8 string specifying the path to check
+internal_function inline bool vfs_mount_point_match_start(char const *mount, char const *path)
+{   // use strncasecmp on Linux.
+    size_t  mount_len = strlen(mount);
+    return _strnicmp(mount, path, mount_len - 1) == 0;
+}
+
+/// @summary Helper function to convert a UTF-8 encoded string to the system native WCHAR.
+/// Free the returned buffer using the standard C library free() call. This function is 
+/// defined in the VFS because the functionality is needed everywhere. Non-file related 
+/// parts of the code should just stick to using UTF-8 where strings are required.
+/// @param str The NULL-terminated UTF-8 string to convert.
+/// @param size_chars On return, stores the length of the string in characters, not including NULL-terminator.
+/// @param size_bytes On return, stores the length of the string in bytes, including the NULL-terminator.
+/// @return The WCHAR string buffer, or NULL if the string could not be converted.
+internal_function WCHAR* vfs_utf8_to_native(char const *str, size_t &size_chars, size_t &size_bytes)
+{   
+    // figure out how much memory needs to be allocated, including NULL terminator.
+    int nchars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str, -1, NULL, 0);
+    if (nchars == 0)
+    {   // the path cannot be converted from UTF-8 to UCS-2.
+        size_chars = 0;
+        size_bytes = 0;
+        return NULL;
+    }
+    // store output values for the caller.
+    size_chars = nchars - 1;
+    size_bytes = nchars * sizeof(WCHAR);
+    // allocate buffer space for the wide character string.
+    WCHAR *pathbuf = NULL;
+    if   ((pathbuf = (WCHAR*) malloc(size_bytes)) == NULL)
+    {   // unable to allocate temporary memory for UCS-2 path.
+        return NULL;
+    }
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str, -1, pathbuf, nchars) == 0)
+    {   // the path cannot be converted from UTF-8 to UCS-2.
+        free(pathbuf);
+        return NULL;
+    }
+    return pathbuf;
+}
+
 /// @summary Unmount a mount point and free all associated resources.
 /// @param m The mount point being unmounted.
 internal_function void vfs_unmount_mountpoint(vfs_mount_t *m)
@@ -286,8 +365,8 @@ internal_function vfs_mount_t* vfs_mounts_insert(vfs_mounts_t &plist, uintptr_t 
         if (ins_idx < 0)
         {   // insert the item at the end of the list.
             ins_idx = plist.Count++;
-            plist.MountIds [ins_idx] = id;
-            plist.Priority [ins_idx] = priority;
+            plist.MountIds[ins_idx] = id;
+            plist.Priority[ins_idx] = priority;
         }
         else
         {   // shift the other list items down by one.
@@ -310,33 +389,36 @@ internal_function vfs_mount_t* vfs_mounts_insert(vfs_mounts_t &plist, uintptr_t 
     else return NULL;
 }
 
+/// @summary Removes a mount point at a given index within the prioritized mount point list.
+/// @param plist The prioritized mount point list to update.
+/// @param pos The zero-based index of the mount point to remove.
+internal_function void vfs_mounts_remove_at(vfs_mounts_t &plist, intptr_t pos)
+{
+    size_t dst = pos;
+    size_t src = pos + 1;
+    vfs_unmount_mountpoint(&plist.MountData[pos]);
+    // now shift all of the other array items up on top of the old item.
+    for (size_t i = pos, n = plist.Count - 1; i < n; ++i, ++dst, ++src)
+    {
+        plist.MountIds [dst] = plist.MountIds [src];
+        plist.MountData[dst] = plist.MountData[src];
+        plist.Priority [dst] = plist.Priority [src];
+    }
+    plist.Count--;
+}
+
 /// @summary Removes a mount point with a given ID from a prioritized mount list.
 /// @param plist The prioritized mount point list to update.
-/// @param id The unique, application mount point identifier of the mount point to remove.
-internal_function void vfs_mounts_remove(vfs_mounts_t &plist, uintptr_t id)
+/// @param mount_id The unique application identifier of the mount point to remove.
+internal_function void vfs_mounts_remove(vfs_mounts_t &plist, uintptr_t mount_id)
 {   // locate the index of the specified item in the ordered list.
-    intptr_t  pos =-1;
     for (size_t i = 0, n = plist.Count; i < n; ++i)
     {
-        if (plist.MountIds[i] == id)
-        {   
-            pos = intptr_t(i);
+        if (plist.MountIds[i] == mount_id)
+        {
+            vfs_mounts_remove_at(plist, intptr_t(i));
             break;
         }
-    }
-    if (pos >= 0)
-    {   // found the desired item so unmount it and free up resources.
-        size_t dst = pos;
-        size_t src = pos + 1;
-        vfs_unmount_mountpoint(&plist.MountData[pos]);
-        // now shift all of the other array items up on top of the old item.
-        for (size_t i = pos, n = plist.Count - 1; i < n; ++i, ++dst, ++src)
-        {
-            plist.MountIds [dst] = plist.MountIds [src];
-            plist.MountData[dst] = plist.MountData[src];
-            plist.Priority [dst] = plist.Priority [src];
-        }
-        plist.Count--;
     }
 }
 
@@ -380,7 +462,7 @@ internal_function bool vfs_known_path(WCHAR *buf, size_t buf_bytes, size_t &byte
 {
     switch (folder_id)
     {
-    case VFS_KNOWN_PATH_EXE_ROOT:
+    case VFS_KNOWN_PATH_EXECUTABLE:
         {   // zero out the path buffer, and retrieve the EXE path.
             size_t bufsiz = MAX_PATH_CHARS * sizeof(WCHAR);
             WCHAR *sysbuf = (WCHAR*) malloc(bufsiz);
@@ -400,24 +482,50 @@ internal_function bool vfs_known_path(WCHAR *buf, size_t buf_bytes, size_t &byte
                 {   // replace the trailing slash with a NULL terminator.
                     *bufitr  = 0;
                     break;
-                }  --bufitr; --bytes_needed;
+                }
+                --bytes_needed;
+                --bufitr; 
             }
             // finally, copy the path and directory name into the output buffer.
-            if (buf != NULL) memset(buf, 0 ,  buf_bytes);
-            else buf_bytes = 0;
-            if (buf_bytes >= bytes_needed)
+            if  (buf != NULL) memset(buf, 0 ,  buf_bytes);
+            else buf_bytes  = 0;
+            if  (buf_bytes >= bytes_needed)
             {   // the path will fit, so copy it over.
                 memcpy(buf, sysbuf, bytes_needed);
             }
             free(sysbuf);
             return true;
         }
-
-    case VFS_KNOWN_PATH_DOC_ROOT:
-        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Documents);
-
-    case VFS_KNOWN_PATH_HOME:
+    case VFS_KNOWN_PATH_USER_HOME:
         return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Profile);
+    case VFS_KNOWN_PATH_USER_DESKTOP:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Desktop);
+    case VFS_KNOWN_PATH_USER_DOCUMENTS:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Documents);
+    case VFS_KNOWN_PATH_USER_DOWNLOADS:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Downloads);
+    case VFS_KNOWN_PATH_USER_MUSIC:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Music);
+    case VFS_KNOWN_PATH_USER_PICTURES:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Pictures);
+    case VFS_KNOWN_PATH_USER_SAVE_GAMES:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_SavedGames);
+    case VFS_KNOWN_PATH_USER_VIDEOS:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Videos);
+    case VFS_KNOWN_PATH_USER_PREFERENCES:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_LocalAppData);
+    case VFS_KNOWN_PATH_PUBLIC_DOCUMENTS:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_PublicDocuments);
+    case VFS_KNOWN_PATH_PUBLIC_DOWNLOADS:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_PublicDownloads);
+    case VFS_KNOWN_PATH_PUBLIC_MUSIC:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_PublicMusic);
+    case VFS_KNOWN_PATH_PUBLIC_PICTURES:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_PublicPictures);
+    case VFS_KNOWN_PATH_PUBLIC_VIDEOS:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_PublicVideos);
+    case VFS_KNOWN_PATH_SYSTEM_FONTS:
+        return vfs_shell_folder_path(buf, buf_bytes, bytes_needed, FOLDERID_Fonts);
 
     default:
         break;
@@ -450,6 +558,30 @@ internal_function size_t vfs_physical_sector_size(HANDLE file)
     return result ? desc.BytesPerPhysicalSector : DefaultPhysicalSectorSize;
 }
 
+/// @summary Factory function to instantiate a stream decoder for a given usage.
+/// @param usage One of vfs_file_usage_e specifying the indended use of the file.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
+/// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @return A stream decoder instance, or NULL if the intended usage does not 
+/// require or support stream decoding.
+internal_function stream_decoder_t* vfs_create_decoder(int32_t usage, int32_t decoder_hint)
+{
+    if (usage != VFS_USAGE_STREAM_IN      && 
+        usage != VFS_USAGE_STREAM_IN_LOAD &&
+        usage != VFS_USAGE_MANUAL_IO)
+    {   // this usage does not need a decoder as reads are disallowed.
+        return NULL;
+    }
+
+    switch (decoder_hint)
+    {
+    case VFS_DECODER_HINT_USE_DEFAULT:
+        break;
+    default:
+        break;
+    }
+    return new stream_decoder_t();
+}
 
 /// @summary Opens a file for access. Information necessary to access the file 
 /// is written to the vfs_file_t structure. This function is called for each 
@@ -457,13 +589,15 @@ internal_function size_t vfs_physical_sector_size(HANDLE file)
 /// @param m The mount point performing the file open.
 /// @param path The path of the file to open, relative to the mount point root.
 /// @param usage One of vfs_file_usage_e specifying the intended use of the file.
-/// @param hints A combination of vfs_file_hint_e.
+/// @param file_hints A combination of vfs_file_hint_e.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
+/// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
 /// @param file On return, this structure should be populated with the data necessary
 /// to access the file. If the file cannot be opened, set the OSError field.
 /// @return One of vfs_open_result_e specifying the result of the operation.
-internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usage, uint32_t hints, vfs_file_t *file)
+internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
 {
-    vfs_mount_fs_t *fs      = (vfs_mount_fs_t*) m->State;
+    vfs_mount_fs_t *fs      = (vfs_mount_fs_t*)m->State;
     LARGE_INTEGER   fsize   = {0};
     HANDLE          hFile   = INVALID_HANDLE_VALUE;
     WCHAR          *pathbuf = NULL;
@@ -485,7 +619,7 @@ internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usag
         share  = FILE_SHARE_READ;
         create = OPEN_EXISTING;
         flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-        if (hints & VFS_FILE_HINT_UNBUFFERED) flags |= FILE_FLAG_NO_BUFFERING;
+        if (file_hints & VFS_FILE_HINT_UNBUFFERED) flags |= FILE_FLAG_NO_BUFFERING;
         break;
 
     case VFS_USAGE_STREAM_OUT:
@@ -500,7 +634,7 @@ internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usag
         share  = FILE_SHARE_READ;
         create = OPEN_ALWAYS;
         flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-        if (hints & VFS_FILE_HINT_UNBUFFERED) flags |= FILE_FLAG_NO_BUFFERING;
+        if (file_hints & VFS_FILE_HINT_UNBUFFERED) flags |= FILE_FLAG_NO_BUFFERING;
         break;
 
     default:
@@ -559,6 +693,7 @@ internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usag
     file->BaseSize   = fsize.QuadPart;
     file->FileSize   = fsize.QuadPart;
     file->FileFlags  = VFS_FILE_FLAG_EXPLICIT_CLOSE;
+    file->Decoder    = vfs_create_decoder(usage, decoder_hint);
     return VFS_OPEN_RESULT_SUCCESS;
 
 error_cleanup:
@@ -574,6 +709,7 @@ error_cleanup:
     file->BaseSize   = 0;
     file->FileSize   = 0;
     file->FileFlags  = VFS_FILE_FLAG_NONE;
+    file->Decoder    = NULL;
     return result;
 }
 
@@ -609,34 +745,92 @@ internal_function bool vfs_init_mount_fs(vfs_mount_t *m, WCHAR const *local_path
     // use CreateFile() to open the directory, then GetFileInformationByHandleEx
     // to retrieve the fully resolved path string.
     DWORD  share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    HANDLE hdir  = CreateFile(local_path, 0, share, NULL, OPEN_EXISTING, 0, NULL);
+    HANDLE hdir  = CreateFile(local_path, 0, share, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     if (hdir == INVALID_HANDLE_VALUE)
     {   // unable to open the directory; check GetLastError().
         free(fs);
         return false;
     }
-    size_t       bufsz = sizeof(DWORD) + (32 * 1024 * sizeof(WCHAR));
-    FILE_NAME_INFO *ni = (FILE_NAME_INFO*) malloc(bufsz);
-    ni->FileNameLength = 0;
-    if (GetFileInformationByHandleEx(hdir, FileNameInfo, ni,(DWORD)bufsz) == FALSE)
-    {   // unable to retrieve the file system entry name.
-        CloseHandle(hdir); free(fs);
-        return false;
-    }
+    DWORD  flags     = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    fs->LocalPathLen = GetFinalPathNameByHandle(hdir, fs->LocalPath, MAX_PATH_CHARS, flags);
     CloseHandle(hdir);
-
-    // copy the fully-resolved path into the LocalPath buffer. this path will 
-    // be used to resolve relative filenames into absolute filenames.
-    memset(fs->LocalPath, 0, sizeof(fs->LocalPath));
-    memcpy(fs->LocalPath, ni->FileName, ni->FileNameLength);
-    fs->LocalPathLen = ni->FileNameLength / sizeof(WCHAR);
-    free(ni);
 
     // set the function pointers, etc. on the mount point.
     m->State   = fs;
     m->open    = vfs_open_fs;
     m->unmount = vfs_unmount_fs;
     return true;
+}
+
+/// @summary Performs all of the common setup when creating a new mount point.
+/// @param driver The VFS driver instance the mount point is attached to.
+/// @param source_wide The NULL-terminated source directory or file path.
+/// @param source_attr The attributes of the source path, as returned by GetFileAttributes().
+/// @param mount_path The NULL-terminated UTF-8 string specifying the mount point root exposed externally.
+/// @param priority The priority of the mount point. Higher numeric values indicate higher priority.
+/// @param mount_id An application-defined unique identifier for the mount point. This is necessary
+/// if the application later wants to remove this specific mount point, but not any of the others 
+/// that are mounted with the same mount_path.
+/// @return true if the mount point was successfully installed.
+internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide, DWORD source_attr, char const *mount_path, uint32_t priority, uintptr_t mount_id)
+{   
+    vfs_mount_t *mount        = NULL;
+    size_t       mount_chars  = strlen(mount_path);
+    size_t       source_chars = wcslen(source_wide);
+    
+    // create the mount point record in the prioritized list. 
+    if ((mount = vfs_mounts_insert(driver->Mounts, mount_id, priority)) == NULL)
+    {   // unable to insert the mount point in the prioritized list.
+        return false;
+    }
+
+    // initialize the basic mount point properties:
+    mount->Identifier = mount_id;
+    mount->PIO  = driver->PIO;
+    mount->Root = NULL;
+
+    // create version of mount_path with trailing slash.
+    if (mount_chars && mount_path[mount_chars-1] != '/')
+    {   // it's necessary to append the trailing slash.
+        char  *r  = (char*)   malloc(mount_chars  + 2);
+        memcpy(r, mount_path, mount_chars);
+        r[mount_chars+0] = '/';
+        r[mount_chars+1] =  0 ;
+        mount->Root = r;
+    }
+    else
+    {   // the mount path has the trailing slash; copy the string.
+        char  *r  = (char*)   malloc(mount_chars  + 1);
+        memcpy(r, mount_path, mount_chars);
+        r[mount_chars] = 0;
+        mount->Root = r;
+    }
+
+    // initialize the mount point internals based on the source type.
+    if (source_attr & FILE_ATTRIBUTE_DIRECTORY)
+    {   // set up a filesystem-based mount point.
+        if (!vfs_init_mount_fs(mount, source_wide))
+        {   // remove the item we just added and clean up.
+            vfs_mounts_remove_at(driver->Mounts, driver->Mounts.Count-1);
+            free(mount->Root); mount->Root = NULL;
+            return false;
+        }
+        return true;
+    }
+    else
+    {   // this is an archive file. extract the file extension.
+        WCHAR *ext = source_wide + source_chars;
+        while (ext > source_wide)
+        {   // search for the final period character.
+            if (*ext == L'.')
+            {   // ext points to the first character of the extension.
+                ext++;
+                break;
+            }
+        }
+        // now a bunch of if (wcsicmp(ext, L"zip") { ... } etc.
+        return false;
+    }
 }
 
 /*////////////////////////
@@ -662,6 +856,108 @@ public_function void vfs_driver_close(vfs_driver_t *driver)
     driver->PIO = NULL;
 }
 
+/// @summary Creates a mount point backed by a well-known directory.
+/// @param driver The virtual file system driver.
+/// @param folder_id One of vfs_known_path_e specifying the well-known directory.
+/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the 
+/// mount point as exposed to the application code. Multiple mount points may share
+/// the same mount_path, but have different source_path, mount_id and priority values.
+/// @param priority The priority assigned to this specific mount point, with higher 
+/// numeric values corresponding to higher priority values.
+/// @param mount_id A unique application-defined identifier for the mount point. This
+/// identifier can be used to reference the specific mount point.
+/// @return true if the mount point was successfully created.
+public_function bool vfs_mount(vfs_driver_t *driver, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id)
+{   // retrieve the path specified by folder_id for use as the source path.
+    size_t buffer_bytes = MAX_PATH_CHARS * sizeof(WCHAR);
+    size_t source_bytes = 0;
+    DWORD  source_attr  = FILE_ATTRIBUTE_DIRECTORY;
+    WCHAR  source_wide[MAX_PATH_CHARS]; // 64KB - probably overkill
+    if (!vfs_known_path(source_wide, buffer_bytes, source_bytes, folder_id))
+    {   // unrecognized folder_id.
+        return false;
+    }
+    if (!vfs_setup_mount(driver, source_wide, source_attr, mount_path, priority, mount_id))
+    {   // unable to finish internal setup of the mount point.
+        return false;
+    }
+    return true;
+}
+
+/// @summary Creates a mount point backed by the specified archive file or directory.
+/// @param driver The virtual file system driver.
+/// @param source_path The NULL-terminated UTF-8 string specifying the path of the 
+/// file or directory that represents the root of the mount point.
+/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the 
+/// mount point as exposed to the application code. Multiple mount points may share
+/// the same mount_path, but have different source_path, mount_id and priority values.
+/// @param priority The priority assigned to this specific mount point, with higher 
+/// numeric values corresponding to higher priority values.
+/// @param mount_id A unique application-defined identifier for the mount point. This
+/// identifier can be used to reference the specific mount point.
+/// @return true if the mount point was successfully created.
+public_function bool vfs_mount(vfs_driver_t *driver, char const *source_path, char const *mount_path, uint32_t priority, uintptr_t mount_id)
+{   // convert the source path to a wide character string once during mounting.
+    size_t source_chars = 0;
+    size_t source_bytes = 0;
+    DWORD  source_attr  = 0;
+    WCHAR *source_wide  = NULL;
+    if   ((source_wide  = vfs_utf8_to_native(source_path, source_chars, source_bytes)) == NULL)
+    {   // unable to convert UTF-8 to wide character string.
+        return false;
+    }
+
+    // determine whether the source path is a directory or a file.
+    // TODO(rlk): GetFileAttributes() won't work (GetLastError() => ERROR_BAD_NETPATH)
+    // in that case that source_path is the root of a network share. maybe fix this.
+    if ((source_attr = GetFileAttributesW(source_wide)) == INVALID_FILE_ATTRIBUTES)
+    {   // the source path must exist. mount fails.
+        free(source_wide);
+        return false;
+    }
+    if (!vfs_setup_mount(driver, source_wide, source_attr, mount_path, priority, mount_id))
+    {   // unable to finish internal setup of the mount point.
+        free(source_wide);
+        return false;
+    }
+    return true;
+}
+
+
+/// @summary Removes a mount point associated with a specific application mount point identifier.
+/// @param driver The virtual file system driver.
+/// @param mount_id The application-defined mount point identifer, as supplied to vfs_mount().
+public_function void vfs_unmount(vfs_driver_t *driver, uintptr_t mount_id)
+{
+    vfs_mounts_remove(driver->Mounts, mount_id);
+}
+
+/// @summary Deletes all mount points attached to a given root path.
+/// @param driver The virtual file system driver.
+/// @param mount_path A NULL-terminated UTF-8 string specifying the mount point root, 
+/// as was supplied to vfs_mount(). All mount points that were mounted to this path will be deleted.
+public_function void vfs_unmount_all(vfs_driver_t *driver, char const *mount_path)
+{   // create version of mount_path with trailing slash.
+    size_t len        = strlen(mount_path);
+    char  *mount_root = (char*)mount_path;
+    if (len > 0 && mount_path[len-1]  != '/')
+    {   // allocate a temporary buffer on the stack.
+        mount_root = (char*)alloca(len + 2);
+        memcpy(mount_root , mount_path , len);
+        mount_root[len]   = '/';
+        mount_root[len+1] = 0;
+    }
+    // search for matches and remove items in reverse.
+    // this minimizes data movement and simplifies logic.
+    for (intptr_t i = driver->Mounts.Count - 1; i >= 0; --i)
+    {
+        if (vfs_mount_point_match_exact(driver->Mounts.MountData[i].Root, mount_root))
+        {   // the mount point paths match, so remove this item.
+            vfs_mounts_remove_at(driver->Mounts, i);
+        }
+    }
+}
+
 /*public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, int64_t &file_size)
 {
     // TODO(rlk): resolve path to a VFS mount point.
@@ -671,4 +967,5 @@ public_function void vfs_driver_close(vfs_driver_t *driver)
     // - set the buffer allocator to use (internal or global).
     // - looking like the VFS driver should own the global allocator and app can configure it.
     // TODO(rlk): this should be a stream-in once type of load.
+    // TODO(rlk): in addition to returning a stream_decoder_t, also return a stream_control_t.
 }*/
