@@ -167,6 +167,7 @@ struct vfs_mount_t
     pio_driver_t  *PIO;           /// The prioritized I/O driver interface.
     void          *State;         /// State data associated with the mount point.
     char          *Root;          /// The mount point path exposed to the VFS.
+    size_t         RootLen;       /// The number of bytes that make up the mount point path.
     vfs_open_fn    open;          /// Open a file handle.
     vfs_unmount_fn unmount;       /// Close file handles and free memory.
 };
@@ -200,6 +201,7 @@ struct vfs_driver_t
 {
     pio_driver_t  *PIO;           /// The prioritized I/O driver interface.
     vfs_mounts_t   Mounts;        /// The set of active mount points.
+    SRWLOCK        MountsLock;    /// The slim reader/writer lock protecting the list of mount points.
 };
 
 /*///////////////
@@ -220,11 +222,13 @@ internal_function inline bool vfs_mount_point_match_exact(char const *s1, char c
 
 /// @summary Determine whether a path references an entry under a given mount point.
 /// @param mount A NULL-terminated UTF-8 string specifying the mount point root to match, with trailing slash '/'.
-/// @param path A NULL-terminated UTF-8 string specifying the path to check
-internal_function inline bool vfs_mount_point_match_start(char const *mount, char const *path)
+/// @param path A NULL-terminated UTF-8 string specifying the path to check.
+/// @param len The number of bytes to compare from mount.
+/// @return true if the path is under the mount point.
+internal_function inline bool vfs_mount_point_match_start(char const *mount, char const *path, size_t len)
 {   // use strncasecmp on Linux.
-    size_t  mount_len = strlen(mount);
-    return _strnicmp(mount, path, mount_len - 1) == 0;
+    if (len == 0) len = strlen(mount);
+    return _strnicmp(mount, path, len - 1) == 0;
 }
 
 /// @summary Helper function to convert a UTF-8 encoded string to the system native WCHAR.
@@ -775,34 +779,37 @@ internal_function bool vfs_init_mount_fs(vfs_mount_t *m, WCHAR const *local_path
 internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide, DWORD source_attr, char const *mount_path, uint32_t priority, uintptr_t mount_id)
 {   
     vfs_mount_t *mount        = NULL;
-    size_t       mount_chars  = strlen(mount_path);
+    size_t       mount_bytes  = strlen(mount_path);
     size_t       source_chars = wcslen(source_wide);
     
-    // create the mount point record in the prioritized list. 
+    // create the mount point record in the prioritized list.
+    AcquireSRWLockExclusive(&driver->MountsLock);
     if ((mount = vfs_mounts_insert(driver->Mounts, mount_id, priority)) == NULL)
     {   // unable to insert the mount point in the prioritized list.
+        ReleaseSRWLockExclusive(&driver->MountsLock);
         return false;
     }
 
     // initialize the basic mount point properties:
     mount->Identifier = mount_id;
-    mount->PIO  = driver->PIO;
-    mount->Root = NULL;
+    mount->PIO        = driver->PIO;
+    mount->Root       = NULL;
+    mount->RootLen    = mount_bytes;
 
     // create version of mount_path with trailing slash.
-    if (mount_chars && mount_path[mount_chars-1] != '/')
+    if (mount_bytes && mount_path[mount_bytes-1] != '/')
     {   // it's necessary to append the trailing slash.
-        char  *r  = (char*)   malloc(mount_chars  + 2);
-        memcpy(r, mount_path, mount_chars);
-        r[mount_chars+0] = '/';
-        r[mount_chars+1] =  0 ;
+        char  *r  = (char*)   malloc(mount_bytes  + 2);
+        memcpy(r, mount_path, mount_bytes);
+        r[mount_bytes+0] = '/';
+        r[mount_bytes+1] =  0 ;
         mount->Root = r;
     }
     else
     {   // the mount path has the trailing slash; copy the string.
-        char  *r  = (char*)   malloc(mount_chars  + 1);
-        memcpy(r, mount_path, mount_chars);
-        r[mount_chars] = 0;
+        char  *r  = (char*)   malloc(mount_bytes  + 1);
+        memcpy(r, mount_path, mount_bytes);
+        r[mount_bytes] = 0;
         mount->Root = r;
     }
 
@@ -812,9 +819,11 @@ internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide,
         if (!vfs_init_mount_fs(mount, source_wide))
         {   // remove the item we just added and clean up.
             vfs_mounts_remove_at(driver->Mounts, driver->Mounts.Count-1);
+            ReleaseSRWLockExclusive(&driver->MountsLock);
             free(mount->Root); mount->Root = NULL;
             return false;
         }
+        ReleaseSRWLockExclusive(&driver->MountsLock);
         return true;
     }
     else
@@ -829,8 +838,35 @@ internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide,
             }
         }
         // now a bunch of if (wcsicmp(ext, L"zip") { ... } etc.
+        // TODO(rlk): need to make sure to release MountsLock.
+        ReleaseSRWLockExclusive(&driver->MountsLock);
         return false;
     }
+}
+
+internal_function int vfs_resolve_and_open_file(vfs_driver_t *driver, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file, char const **relative_path)
+{   // iterate over the mount points, which are stored in priority order.
+    AcquireSRWLockShared(&driver->MountsLock);
+    int          result  = VFS_OPEN_RESULT_NOT_FOUND;
+    vfs_mount_t *mounts  = driver->Mounts.MountData;
+    for (size_t i = 0; i < driver->Mounts.Count; ++i)
+    {
+        vfs_mount_t  *m  = &mounts[i];
+        if (vfs_mount_point_match_start(m->Root, path, m->RootLen))
+        {   // attempt to open the file on the mount point.
+            if ((result = m->open(m, path + m->RootLen, usage, file_hints, decoder_hint, file)) == VFS_OPEN_RESULT_SUCCESS)
+            {   // the file was successfully opened, so we're done.
+                if (relative_path != NULL)
+                {
+                    *relative_path = path + m->RootLen;
+                }
+                ReleaseSRWLockShared(&driver->MountsLock);
+                return VFS_OPEN_RESULT_SUCCESS;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&driver->MountsLock);
+    return result;
 }
 
 /*////////////////////////
@@ -843,6 +879,7 @@ internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide,
 public_function DWORD vfs_driver_open(vfs_driver_t *driver, pio_driver_t *pio)
 {
     driver->PIO = pio;
+    InitializeSRWLock(&driver->MountsLock);
     vfs_mounts_create(driver->Mounts, 128);
     return ERROR_SUCCESS;
 }
@@ -929,7 +966,9 @@ public_function bool vfs_mount(vfs_driver_t *driver, char const *source_path, ch
 /// @param mount_id The application-defined mount point identifer, as supplied to vfs_mount().
 public_function void vfs_unmount(vfs_driver_t *driver, uintptr_t mount_id)
 {
+    AcquireSRWLockExclusive(&driver->MountsLock);
     vfs_mounts_remove(driver->Mounts, mount_id);
+    ReleaseSRWLockExclusive(&driver->MountsLock);
 }
 
 /// @summary Deletes all mount points attached to a given root path.
@@ -949,6 +988,7 @@ public_function void vfs_unmount_all(vfs_driver_t *driver, char const *mount_pat
     }
     // search for matches and remove items in reverse.
     // this minimizes data movement and simplifies logic.
+    AcquireSRWLockExclusive(&driver->MountsLock);
     for (intptr_t i = driver->Mounts.Count - 1; i >= 0; --i)
     {
         if (vfs_mount_point_match_exact(driver->Mounts.MountData[i].Root, mount_root))
@@ -956,6 +996,7 @@ public_function void vfs_unmount_all(vfs_driver_t *driver, char const *mount_pat
             vfs_mounts_remove_at(driver->Mounts, i);
         }
     }
+    ReleaseSRWLockExclusive(&driver->MountsLock);
 }
 
 /*public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, int64_t &file_size)
