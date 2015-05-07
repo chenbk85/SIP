@@ -227,6 +227,15 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     trace_thread_id("main");
     win32_runtime_elevate();
 
+    vfs_driver_t     vfs;
+    vfs_driver_open(&vfs, NULL);
+    vfs_mount(&vfs, VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
+    vfs_mount(&vfs, VFS_KNOWN_PATH_PUBLIC_DOCUMENTS, "/doc", 0, 1);
+    vfs_save_file(&vfs, "/doc/test_save.txt", "This is a test (user)...\n", 25);
+    vfs_unmount(&vfs, 0); // remove user documents mount
+    vfs_save_file(&vfs, "/doc/test_save.txt", "This is a test (public)...\n", 27);
+    vfs_driver_close(&vfs);
+
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
     if (!create_file_list(&image_files, 0, 0) || !enumerate_files(&image_files, "images", "*.*", true))

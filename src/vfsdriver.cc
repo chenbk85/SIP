@@ -25,7 +25,19 @@
 /////////////////*/
 /// @summary Define the maximum number of characters that can appear in a path
 /// string. Since each character is two bytes, this amounts to a total of 64KB.
-local_persist size_t const MAX_PATH_CHARS = (32 * 1024);
+local_persist size_t const MAX_PATH_CHARS        = (32  * 1024);
+
+/// @summary Define the size of the stream buffer allocated by the VFS driver.
+/// This buffer is divided into fixed-size chunks.
+local_persist size_t const STREAM_BUFFER_SIZE    = (16  * 1024 * 1024); // 16MB
+
+/// @summary Define the size of a single chunk used for streaming data into 
+/// memory from disk. Streaming data out to disk uses a different chunk size.
+local_persist size_t const STREAM_IN_CHUNK_SIZE  = (256 * 1024);        // 256KB
+
+/// @summary Define the size of a single chunk used for streaming data out 
+/// from memory to disk. This must be a multiple of the system page size.
+local_persist size_t const STREAM_OUT_CHUNK_SIZE = (64  * 1024);        // 64KB
 
 /*///////////////////
 //   Local Types   //
@@ -68,7 +80,7 @@ enum vfs_file_usage_e : int32_t
     VFS_USAGE_STREAM_IN           = 0, /// The file will be opened for manual stream-in control (read-only).
     VFS_USAGE_STREAM_IN_LOAD      = 1, /// The file will be streamed into memory and then closed (read-only).
     VFS_USAGE_STREAM_OUT          = 2, /// The file will be created or overwritten (write-only). 
-    VFS_USAGE_MANUAL_IO           = 3, /// The file will be opened for manual I/O.
+    VFS_USAGE_MANUAL_IO           = 3, /// The file will be opened for manual I/O (read-write).
 };
 
 /// @summary Defines status bits that may be set on opened files. These flags are
@@ -110,33 +122,43 @@ enum vfs_decocder_hint_e : int32_t
     // ...
 };
 
-/// @summary Define the result codes that can be returned when opening a file.
-enum vfs_open_result_e : int
-{
-    VFS_OPEN_RESULT_SUCCESS       = 0, /// The file was opened successfully.
-    VFS_OPEN_RESULT_NOT_FOUND     = 1, /// The file was not found; open failed.
-    VFS_OPEN_RESULT_OSERROR       = 2, /// The file exists, but could not be opened. Check OSError. 
-    VFS_OPEN_RESULT_UNSUPPORTED   = 3, /// The vfs_file_usage_e specified is not supported.
-};
-
-/// @summary Opens a file for access. Information necessary to access the file 
-/// is written to the vfs_file_t structure. This function is called for each 
-/// mount point, in priority order, until one is successful at opening the file
+/// @summary Synchronously opens a file for access. Information necessary to 
+/// access the file is written to the vfs_file_t structure. This function is
+/// called for each mount point, in priority order, until one either returns 
+/// ERROR_SUCCESS or an error code other than ERROR_NOT_SUPPORTED.
 /// @param The mount point performing the file open.
 /// @param The path of the file to open, relative to the mount point root.
 /// @param One of vfs_file_usage_e specifying the intended use of the file.
 /// @param A combination of vfs_file_hint_e used to control how the file is opened.
-/// @param One of vfs_decoder_hint_e specifying the type of decoder to create.
+/// @param One of vfs_decoder_hint_e specifying the preferred decoder type,
+/// or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
 /// @param On return, this structure should be populated with the data necessary
 /// to access the file. If the file cannot be opened, set the OSError field.
-/// @return One of vfs_open_result_e specifying the result of the operation.
-typedef int  (*vfs_open_fn)(vfs_mount_t*, char const*, int32_t, uint32_t, int32_t, vfs_file_t*);
+/// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
+typedef DWORD (*vfs_open_fn)(vfs_mount_t*, char const*, int32_t, uint32_t, int32_t, vfs_file_t*);
+
+/// @summary Atomically and synchronously writes a file. If the file exists, its
+/// contents are overwritten; otherwise a new file is created. This operation is
+/// generally not supported by archive-based mount points.
+/// @param The mount point performing the file save.
+/// @param The path of the file to save, relative to the mount point root.
+/// @param The buffer containing the data to write to the file.
+/// @param The number of bytes to copy from the buffer into the file.
+/// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
+typedef DWORD (*vfs_save_fn)(vfs_mount_t*, char const*, void const*, int64_t);
+
+/// @summary Queries a mount point to determine whether it supports the specified usage.
+/// @param The mount point being queried.
+/// @param One of vfs_file_usage_e specifying the intended usage of the file.
+/// @param One of vfs_decoder_hint_t specifying the type of decoder desired.
+/// @return Either ERROR_SUCCESS or ERROR_NOT_SUPPORTED.
+typedef DWORD (*vfs_support_fn)(vfs_mount_t*, int32_t, int32_t);
 
 /// @summary Unmount the mount point. This function should close any open file 
 /// handles and free any resources allocated for the mount point, including the
 /// memory allocated for the vfs_mount_t::State field.
 /// @param The mount point being unmounted.
-typedef void (*vfs_unmount_fn)(vfs_mount_t*);
+typedef void  (*vfs_unmount_fn)(vfs_mount_t*);
 
 /// @summary Defines the information about an open file. This information is 
 /// returned by the mount point and returned to the VFS driver, which may then 
@@ -169,7 +191,9 @@ struct vfs_mount_t
     char          *Root;          /// The mount point path exposed to the VFS.
     size_t         RootLen;       /// The number of bytes that make up the mount point path.
     vfs_open_fn    open;          /// Open a file handle.
+    vfs_save_fn    save;          /// Atomically save a file.
     vfs_unmount_fn unmount;       /// Close file handles and free memory.
+    vfs_support_fn supports;      /// Test mount point feature support.
 };
 
 /// @summary Defines the internal state data associated with a filesystem mount point.
@@ -198,10 +222,11 @@ struct vfs_mounts_t
 
 /// @summary Maintains all of the state for a virtual file system driver.
 struct vfs_driver_t
-{
+{   typedef io_buffer_allocator_t     iobuf_alloc_t;
     pio_driver_t  *PIO;           /// The prioritized I/O driver interface.
     vfs_mounts_t   Mounts;        /// The set of active mount points.
     SRWLOCK        MountsLock;    /// The slim reader/writer lock protecting the list of mount points.
+    iobuf_alloc_t  StreamBuffer;  /// The global buffer used for streaming files into memory.
 };
 
 /*///////////////
@@ -441,9 +466,10 @@ internal_function bool vfs_shell_folder_path(WCHAR *buf, size_t buf_bytes, size_
         if (buf != NULL)  memset(buf, 0, buf_bytes);
         else buf_bytes =  0;
         bytes_needed   = (wcslen(sysbuf) + 1) * sizeof(WCHAR);
-        if (buf_bytes >=  bytes_needed)
+        if (buf_bytes >= (bytes_needed + 1))
         {   // the path will fit, so copy it over.
             memcpy(buf, sysbuf, bytes_needed);
+            buf[bytes_needed] = 0;
         }
         CoTaskMemFree(sysbuf);
         return true;
@@ -577,6 +603,8 @@ internal_function stream_decoder_t* vfs_create_decoder(int32_t usage, int32_t de
         return NULL;
     }
 
+    // TODO(rlk): eventually there will be several different decoder types.
+    // the caller should be able to explicitly request any one of them.
     switch (decoder_hint)
     {
     case VFS_DECODER_HINT_USE_DEFAULT:
@@ -587,32 +615,60 @@ internal_function stream_decoder_t* vfs_create_decoder(int32_t usage, int32_t de
     return new stream_decoder_t();
 }
 
-/// @summary Opens a file for access. Information necessary to access the file 
-/// is written to the vfs_file_t structure. This function is called for each 
-/// mount point, in priority order, until one is successful at opening the file
+/// @summary Generate a Windows API-ready file path for a given filesystem mount.
+/// @param fs Internal data for the filesystem mount, specifying the mount root.
+/// @param relative_path The portion of the virtual_path specified relative to the mount point.
+/// @return The API-ready system path, or NULL. Free the returned buffer using free().
+internal_function WCHAR* vfs_make_system_path_fs(vfs_mount_fs_t *fs, char const *relative_path)
+{
+    WCHAR  *pathbuf = NULL;
+    size_t  offset  = fs->LocalPathLen;
+    int     nchars  = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, NULL, 0);
+    // convert the virtual_path from UTF-8 to UCS-2, which Windows requires.
+    if (nchars == 0)
+    {   // the path cannot be converted from UTF-8 to UCS-2.
+        return NULL;
+    }
+    if ((pathbuf = (WCHAR*) malloc((nchars + fs->LocalPathLen + 1) * sizeof(WCHAR))) == NULL)
+    {   // unable to allocate memory for UCS-2 path.
+        return NULL;
+    }
+    // start with the local root, and then append the relative path portion.
+    memcpy(pathbuf, fs->LocalPath, fs->LocalPathLen * sizeof(WCHAR));
+    pathbuf[fs->LocalPathLen] = L'\\';
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, &pathbuf[fs->LocalPathLen+1], nchars) == 0)
+    {   // the path cannot be converted from UTF-8 to UCS-2.
+        free(pathbuf);
+        return NULL;
+    }
+    return pathbuf;
+}
+
+/// @summary Synchronously opens a file for access. Information necessary to 
+/// access the file is written to the vfs_file_t structure. This function is
+/// called for each mount point, in priority order, until one either returns 
+/// ERROR_SUCCESS or an error code other than ERROR_NOT_SUPPORTED.
 /// @param m The mount point performing the file open.
 /// @param path The path of the file to open, relative to the mount point root.
 /// @param usage One of vfs_file_usage_e specifying the intended use of the file.
-/// @param file_hints A combination of vfs_file_hint_e.
+/// @param file_hints A combination of vfs_file_hint_e used to control how the file is opened.
 /// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
 /// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
 /// @param file On return, this structure should be populated with the data necessary
 /// to access the file. If the file cannot be opened, set the OSError field.
-/// @return One of vfs_open_result_e specifying the result of the operation.
-internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
+/// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
+internal_function DWORD vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
 {
     vfs_mount_fs_t *fs      = (vfs_mount_fs_t*)m->State;
     LARGE_INTEGER   fsize   = {0};
+    WCHAR          *pathbuf = vfs_make_system_path_fs(fs, path);
     HANDLE          hFile   = INVALID_HANDLE_VALUE;
-    WCHAR          *pathbuf = NULL;
+    DWORD           result  = ERROR_NOT_SUPPORTED;
     DWORD           access  = 0;
     DWORD           share   = 0;
     DWORD           create  = 0;
     DWORD           flags   = 0;
     size_t          ssize   = 0;
-    size_t          offset  = fs->LocalPathLen * sizeof(WCHAR);
-    int             nchars  = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    int             result  = VFS_OPEN_RESULT_UNSUPPORTED;
 
     // figure out access flags, share modes, etc. based on the intended usage.
     switch (usage)
@@ -642,27 +698,7 @@ internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usag
         break;
 
     default:
-        result = VFS_OPEN_RESULT_UNSUPPORTED;
-        goto error_cleanup;
-    }
-
-    // convert the path from UTF-8 to UCS-2, which Windows requires.
-    if (nchars == 0)
-    {   // the path cannot be converted from UTF-8 to UCS-2.
-        result = VFS_OPEN_RESULT_OSERROR;
-        goto error_cleanup;
-    }
-    if ((pathbuf = (WCHAR*) malloc((nchars + fs->LocalPathLen + 1) * sizeof(WCHAR))) == NULL)
-    {   // unable to allocate temporary memory for UCS-2 path.
-        result = VFS_OPEN_RESULT_OSERROR;
-        goto error_cleanup;
-    }
-    // start with the local root, and then append the relative path portion.
-    memcpy(pathbuf, fs->LocalPath,  fs->LocalPathLen * sizeof(WCHAR));
-    pathbuf[offset] = L'\\'; offset++;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, &pathbuf[offset], nchars) == 0)
-    {   // the path cannot be converted from UTF-8 to UCS-2.
-        result = VFS_OPEN_RESULT_OSERROR;
+        result = ERROR_NOT_SUPPORTED;
         goto error_cleanup;
     }
 
@@ -670,8 +706,7 @@ internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usag
     hFile = CreateFile(pathbuf, access, share, NULL, create, flags, NULL);
     if (hFile == INVALID_HANDLE_VALUE)
     {   // the file cannot be opened.
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) result = VFS_OPEN_RESULT_NOT_FOUND;
-        else result = VFS_OPEN_RESULT_OSERROR;
+        result = GetLastError();
         goto error_cleanup;
     }
 
@@ -679,7 +714,7 @@ internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usag
     ssize = vfs_physical_sector_size(hFile);
     if (!GetFileSizeEx(hFile, &fsize))
     {   // the file size cannot be retrieved.
-        result = VFS_OPEN_RESULT_OSERROR;
+        result = GetLastError();
         goto error_cleanup;
     }
 
@@ -698,23 +733,185 @@ internal_function int vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usag
     file->FileSize   = fsize.QuadPart;
     file->FileFlags  = VFS_FILE_FLAG_EXPLICIT_CLOSE;
     file->Decoder    = vfs_create_decoder(usage, decoder_hint);
-    return VFS_OPEN_RESULT_SUCCESS;
+    return ERROR_SUCCESS;
 
 error_cleanup:
     if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
     if (pathbuf != NULL) free(pathbuf);
-    file->OSError    = GetLastError();
-    file->AccessMode = access;
-    file->ShareMode  = share;
-    file->OpenFlags  = flags;
-    file->Fildes     = INVALID_HANDLE_VALUE;
-    file->SectorSize = 0;
-    file->BaseOffset = 0;
-    file->BaseSize   = 0;
-    file->FileSize   = 0;
-    file->FileFlags  = VFS_FILE_FLAG_NONE;
-    file->Decoder    = NULL;
+    file->OSError     =  result;
+    file->AccessMode  =  access;
+    file->ShareMode   =  share;
+    file->OpenFlags   =  flags;
+    file->Fildes      =  INVALID_HANDLE_VALUE;
+    file->SectorSize  =  0;
+    file->BaseOffset  =  0;
+    file->BaseSize    =  0;
+    file->FileSize    =  0;
+    file->FileFlags   =  VFS_FILE_FLAG_NONE;
+    file->Decoder     =  NULL;
     return result;
+}
+
+/// @summary Atomically and synchronously writes a file. If the file exists, its
+/// contents are overwritten; otherwise a new file is created. This operation is
+/// generally not supported by archive-based mount points.
+/// @param m The mount point performing the file save.
+/// @param path The path of the file to save, relative to the mount point root.
+/// @param data The buffer containing the data to write to the file.
+/// @param size The number of bytes to copy from the buffer into the file.
+/// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
+internal_function DWORD vfs_save_fs(vfs_mount_t *m, char const *path, void const *data, int64_t size)
+{
+    FILE_END_OF_FILE_INFO eof;
+    FILE_ALLOCATION_INFO  sec;
+    vfs_mount_fs_t        *fs = (vfs_mount_fs_t*)m->State;
+    uint8_t const     *buffer = (uint8_t const *)data;
+    SYSTEM_INFO sysinfo       = {0};
+    HANDLE      fd            = INVALID_HANDLE_VALUE;
+    DWORD       mem_flags     = MEM_RESERVE  | MEM_COMMIT;
+    DWORD       mem_protect   = PAGE_READWRITE;
+    DWORD       access        = GENERIC_READ | GENERIC_WRITE;
+    DWORD       share         = FILE_SHARE_READ;
+    DWORD       create        = CREATE_ALWAYS;
+    DWORD       flags         = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING;
+    WCHAR      *file_path     = NULL;
+    size_t      file_path_len = 0;
+    WCHAR      *temp_path     = NULL;
+    WCHAR      *temp_ext      = NULL;
+    size_t      temp_ext_len  = 0;
+    DWORD       page_size     = 4096;
+    int64_t     file_size     = 0;
+    uint8_t    *sector_buffer = NULL;
+    size_t      sector_count  = 0;
+    int64_t     sector_bytes  = 0;
+    size_t      sector_over   = 0;
+    size_t      sector_size   = 0;
+    DWORD       error         = ERROR_SUCCESS;
+
+    // get the system page size, and allocate a single-page buffer. to support
+    // unbuffered I/O, the buffer must be allocated on a sector-size boundary
+    // and must also be a multiple of the physical disk sector size. allocating
+    // a virtual memory page using VirtualAlloc will satisfy these constraints.
+    GetNativeSystemInfo(&sysinfo);
+    page_size     = sysinfo.dwPageSize;
+    sector_buffer = (uint8_t*) VirtualAlloc(NULL, page_size, mem_flags, mem_protect);
+    if (sector_buffer == NULL)
+    {   // unable to allocate the overage buffer; check GetLastError().
+        goto error_cleanup;
+    }
+
+    // generate a temporary filename in the same location as the output file.
+    // this prevents the file from being copied when it is moved, which happens
+    // if the temp file isn't on the same volume as the output file.
+    if ((file_path = vfs_make_system_path_fs(fs, path)) == NULL)
+    {   // unable to allocate the output path buffer.
+        error = ERROR_OUTOFMEMORY;
+        goto error_cleanup;
+    }
+    temp_ext_len   =  4; // wcslen(L".tmp")
+    file_path_len  =  wcslen(file_path);
+    if ((temp_path = (WCHAR*) malloc((file_path_len + temp_ext_len + 1) * sizeof(WCHAR))) == NULL)
+    {   // unable to allocate temporary path memory.
+        error = ERROR_OUTOFMEMORY;
+        goto error_cleanup;
+    }
+    temp_ext  = temp_path + file_path_len;
+    memcpy(temp_path, file_path, file_path_len   * sizeof(WCHAR));
+    memcpy(temp_ext , L".tmp"  ,(temp_ext_len+1) * sizeof(WCHAR));
+
+    // create the temporary file, and get the physical disk sector size.
+    // pre-allocate storage for the file contents, which should improve performance.
+    if ((fd = CreateFile(temp_path, access, share, NULL, create, flags, NULL)) == INVALID_HANDLE_VALUE)
+    {   // unable to create the new file; check GetLastError().
+        goto error_cleanup;
+    }
+    sector_size = vfs_physical_sector_size(fd);
+    file_size   = align_up(size, sector_size);
+    sec.AllocationSize.QuadPart = file_size;
+    SetFileInformationByHandle(fd, FileAllocationInfo , &sec, sizeof(sec));
+
+    // copy the data extending into the tail sector into the overage buffer.
+    sector_count = size_t (size / sector_size);
+    sector_bytes = int64_t(sector_size) * sector_count;
+    sector_over  = size_t (size - sector_bytes);
+    if (sector_over > 0)
+    {   // buffer the overlap amount. note that the page will have been zeroed.
+        memcpy(sector_buffer, &buffer[sector_bytes], sector_over);
+    }
+
+    // write the data to the file.
+    if (sector_bytes > 0)
+    {   // write the bulk of the data, if the data is > 1 sector.
+        int64_t amount = 0;
+        DWORD   nwrite = 0;
+        while  (amount < sector_bytes)
+        {
+            DWORD n =(sector_bytes - amount) < 0xFFFFFFFFU ? DWORD(sector_bytes - amount) : 0xFFFFFFFFU;
+            WriteFile(fd, &buffer[amount], n, &nwrite, NULL);
+            amount += nwrite;
+        }
+    }
+    if (sector_over > 0)
+    {   // write the remaining sector-sized chunk of data.
+        DWORD n = (DWORD) sector_size;
+        DWORD w = (DWORD) 0;
+        WriteFile(fd, sector_buffer, n, &w, NULL);
+    }
+
+    // set the correct end-of-file marker.
+    eof.EndOfFile.QuadPart = size;
+    SetFileInformationByHandle(fd, FileEndOfFileInfo, &eof, sizeof(eof));
+    SetFileValidData(fd, eof.EndOfFile.QuadPart);
+
+    // close the file, and move it to the destination path.
+    CloseHandle(fd); fd = INVALID_HANDLE_VALUE;
+    if (!MoveFileEx(temp_path, file_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {   // the file could not be moved into place; check GetLastError().
+        goto error_cleanup;
+    }
+
+    // clean up our temporary buffers; we're done.
+    free(temp_path);
+    free(file_path);
+    VirtualFree(sector_buffer, 0, MEM_RELEASE);
+    return ERROR_SUCCESS;
+
+error_cleanup:
+    if (error == ERROR_SUCCESS)     error = GetLastError();
+    if (fd != INVALID_HANDLE_VALUE) CloseHandle(fd);
+    if (temp_path     != NULL)      DeleteFile(temp_path);
+    if (temp_path     != NULL)      free(temp_path);
+    if (file_path     != NULL)      free(file_path);
+    if (sector_buffer != NULL)      VirtualFree(sector_buffer, 0, MEM_RELEASE);
+    return error;
+}
+
+/// @summary Queries a mount point to determine whether it supports the specified usage.
+/// @param m The mount point being queried.
+/// @param usage One of vfs_file_usage_e specifying the intended usage of the file.
+/// @param decoder_hint One of vfs_decoder_hint_t specifying the type of decoder desired.
+/// @return Either ERROR_SUCCESS or ERROR_NOT_SUPPORTED.
+internal_function DWORD vfs_support_fs(vfs_mount_t *m, int32_t usage, int32_t decoder_hint)
+{
+    switch (usage)
+    {
+    case VFS_USAGE_STREAM_IN:
+    case VFS_USAGE_STREAM_IN_LOAD:
+    case VFS_USAGE_STREAM_OUT:
+    case VFS_USAGE_MANUAL_IO:
+        break;
+    default:
+        return ERROR_NOT_SUPPORTED;
+    }
+
+    switch (decoder_hint)
+    {
+    case VFS_DECODER_HINT_USE_DEFAULT:
+        break;
+    default:
+        break;
+    }
+    return ERROR_SUCCESS;
 }
 
 /// @summary Unmount the mount point. This function should close any open file 
@@ -727,9 +924,11 @@ internal_function void vfs_unmount_fs(vfs_mount_t *m)
     {   // free internal state data.
         free(m->State);
     }
-    m->State   = NULL;
-    m->open    = NULL;
-    m->unmount = NULL;
+    m->State      = NULL;
+    m->open       = NULL;
+    m->save       = NULL;
+    m->unmount    = NULL;
+    m->supports   = NULL;
 }
 
 /// @summary Initialize a filesystem-based mountpoint.
@@ -760,9 +959,11 @@ internal_function bool vfs_init_mount_fs(vfs_mount_t *m, WCHAR const *local_path
     CloseHandle(hdir);
 
     // set the function pointers, etc. on the mount point.
-    m->State   = fs;
-    m->open    = vfs_open_fs;
-    m->unmount = vfs_unmount_fs;
+    m->State    = fs;
+    m->open     = vfs_open_fs;
+    m->save     = vfs_save_fs;
+    m->unmount  = vfs_unmount_fs;
+    m->supports = vfs_support_fs;
     return true;
 }
 
@@ -844,25 +1045,98 @@ internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide,
     }
 }
 
-internal_function int vfs_resolve_and_open_file(vfs_driver_t *driver, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file, char const **relative_path)
+/// @summary Opens a file for access. Information necessary to access the file 
+/// is written to the vfs_file_t structure. This function tests each mount point
+/// matching the path, in priority order, until one is successful at opening the 
+/// file or all matching mount points have been tested.
+/// @param driver The virtual file system driver to query.
+/// @param path The absolute virtual path of the file to open.
+/// @param usage One of vfs_file_usage_e specifying the intended use of the file.
+/// @param file_hints A combination of vfs_file_hint_e.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
+/// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @param file On return, this structure should be populated with the data necessary
+/// to access the file. If the file cannot be opened, check the OSError field.
+/// @param relative_path On return, this pointer is updated to point into path, 
+/// at the start of the portion of the path representing the path to the file, 
+/// relative to the mount point root path.
+/// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED, or an OS error code.
+internal_function DWORD vfs_resolve_and_open_file(vfs_driver_t *driver, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file, char const **relative_path)
 {   // iterate over the mount points, which are stored in priority order.
     AcquireSRWLockShared(&driver->MountsLock);
-    int          result  = VFS_OPEN_RESULT_NOT_FOUND;
+    DWORD        result  = ERROR_NOT_SUPPORTED;
     vfs_mount_t *mounts  = driver->Mounts.MountData;
     for (size_t i = 0; i < driver->Mounts.Count; ++i)
     {
         vfs_mount_t  *m  = &mounts[i];
         if (vfs_mount_point_match_start(m->Root, path, m->RootLen))
         {   // attempt to open the file on the mount point.
-            if ((result = m->open(m, path + m->RootLen, usage, file_hints, decoder_hint, file)) == VFS_OPEN_RESULT_SUCCESS)
+            DWORD openrc = ERROR_NOT_SUPPORTED;
+            if  ((openrc = m->open(m, path + m->RootLen + 1, usage, file_hints, decoder_hint, file)) == ERROR_SUCCESS)
             {   // the file was successfully opened, so we're done.
                 if (relative_path != NULL)
                 {
-                    *relative_path = path + m->RootLen;
+                    *relative_path = path + m->RootLen  + 1;
                 }
                 ReleaseSRWLockShared(&driver->MountsLock);
-                return VFS_OPEN_RESULT_SUCCESS;
+                return ERROR_SUCCESS;
             }
+            if (openrc == ERROR_NOT_SUPPORTED)
+            {   // continue checking downstream mount points.
+                // one of them might support the operation.
+                continue;
+            }
+            else if (openrc == ERROR_NOT_FOUND)
+            {   // continue checking downstream mount points.
+                // one of them might be able to open the file.
+                result  = ERROR_NOT_FOUND;
+                continue;
+            }
+            else
+            {   // an actual error was returned; push it upstream.
+                ReleaseSRWLockShared(&driver->MountsLock);
+                return openrc;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&driver->MountsLock);
+    return result;
+}
+
+/// @summary Atomically and synchronously writes a file. If the file exists, its
+/// contents are overwritten; otherwise a new file is created. This operation is
+/// generally not supported by archive-based mount points. This function tests 
+/// each mount point matching the path, in priority order, until one is successful
+/// at saving the file or until all matching mount points have been tested.
+/// @param driver The virtual file system driver.
+/// @param path The virtual path of the file to save.
+/// @param buffer The buffer containing the data to write to the file.
+/// @param amount The number of bytes to copy from the buffer into the file.
+/// @param relative_path On return, this pointer is updated to point into path, 
+/// at the start of the portion of the path representing the path to the file, 
+/// relative to the mount point root path.
+/// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
+internal_function DWORD vfs_resolve_and_save_file(vfs_driver_t *driver, char const *path, void const *buffer, int64_t amount, char const **relative_path)
+{   // iterate over the mount points, which are stored in priority order.
+    AcquireSRWLockShared(&driver->MountsLock);
+    DWORD        result  = ERROR_NOT_SUPPORTED;
+    vfs_mount_t *mounts  = driver->Mounts.MountData;
+    for (size_t i = 0; i < driver->Mounts.Count; ++i)
+    {
+        vfs_mount_t  *m  = &mounts[i];
+        if (vfs_mount_point_match_start(m->Root, path, m->RootLen))
+        {   // attempt to save the file on the mount point.
+            DWORD openrc = ERROR_NOT_SUPPORTED;
+            if  ((openrc = m->save(m, path + m->RootLen + 1, buffer, amount)) == ERROR_SUCCESS)
+            {   // the file was successfully opened, so we're done.
+                if (relative_path != NULL)
+                {
+                    *relative_path = path + m->RootLen  + 1;
+                }
+                ReleaseSRWLockShared(&driver->MountsLock);
+                return ERROR_SUCCESS;
+            }
+            else result = openrc;
         }
     }
     ReleaseSRWLockShared(&driver->MountsLock);
@@ -881,6 +1155,7 @@ public_function DWORD vfs_driver_open(vfs_driver_t *driver, pio_driver_t *pio)
     driver->PIO = pio;
     InitializeSRWLock(&driver->MountsLock);
     vfs_mounts_create(driver->Mounts, 128);
+    driver->StreamBuffer.reserve(STREAM_BUFFER_SIZE, STREAM_IN_CHUNK_SIZE);
     return ERROR_SUCCESS;
 }
 
@@ -889,6 +1164,7 @@ public_function DWORD vfs_driver_open(vfs_driver_t *driver, pio_driver_t *pio)
 /// @param driver The virtual file system driver to clean up.
 public_function void vfs_driver_close(vfs_driver_t *driver)
 {
+    driver->StreamBuffer.release();
     vfs_mounts_delete(driver->Mounts);
     driver->PIO = NULL;
 }
@@ -960,7 +1236,6 @@ public_function bool vfs_mount(vfs_driver_t *driver, char const *source_path, ch
     return true;
 }
 
-
 /// @summary Removes a mount point associated with a specific application mount point identifier.
 /// @param driver The virtual file system driver.
 /// @param mount_id The application-defined mount point identifer, as supplied to vfs_mount().
@@ -999,13 +1274,49 @@ public_function void vfs_unmount_all(vfs_driver_t *driver, char const *mount_pat
     ReleaseSRWLockExclusive(&driver->MountsLock);
 }
 
-/*public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, int64_t &file_size)
+/// @summary Saves a file to disk. If the file exists, it is overwritten. This
+/// operation is performed entirely synchronously and will block the calling
+/// thread until the file is written. The file is guaranteed to have been either
+/// written successfully, or not at all.
+/// @param driver The virtual file system driver to use for path resolution.
+/// @param path The virtual path of the file to write.
+/// @param data The contents of the file.
+/// @param size The number of bytes to read from data and write to the file.
+/// @return true if the operation was successful.
+public_function bool vfs_save_file(vfs_driver_t *driver, char const *path, void const *data, int64_t size)
 {
+    return SUCCEEDED(vfs_resolve_and_save_file(driver, path, data, size, NULL));
+}
+
+/*public_function stream_control_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, int32_t decoder_hint, int64_t &file_size)
+{
+    char const *relative_path = NULL;
+    vfs_file_t  file_info;
+    int         open_result   = vfs_resolve_and_open_file(
+        driver, path, 
+        VFS_USAGE_STREAM_IN_LOAD, 
+        VFS_FILE_HINT_UNBUFFERED, 
+        decoder_hint, 
+        &file_info, &relative_path);
+
+    if (open_result == VFS_OPEN_RESULT_SUCCESS)
+    {   // file loads go through the VFS driver buffer.
+        file_info.Decoder->BufferAllocator = &driver->StreamBuffer;
+        stream_control_t *control = new stream_control_t();
+        control->SID = id;
+        control->PIO = driver->PIO;
+        control->Decoder = file_info.Decoder;
+        control->EncodedSize = file_info.BaseSize;
+        control->DecodedSize = file_info.FileSize;
+        // TODO(rlk): push a request to the PIO driver.
+        return control;
+    }
+    else return NULL; // TODO(rlk): Figure out error reporting.
     // TODO(rlk): resolve path to a VFS mount point.
     // - mount has a fn ptr bool resolve_type(path, out_type).
     // TODO(rlk): create the appropriate type of decoder.
     // - for now, always just the base stream_decoder_t.
-    // - set the buffer allocator to use (internal or global).
+    // - set the buffer allocator to use (&driver->StreamBuffer).
     // - looking like the VFS driver should own the global allocator and app can configure it.
     // TODO(rlk): this should be a stream-in once type of load.
     // TODO(rlk): in addition to returning a stream_decoder_t, also return a stream_control_t.

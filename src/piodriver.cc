@@ -20,10 +20,27 @@
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
+struct stream_decoder_t;       /// Forward-declare; defined in iobuffer.cc.
+
 /// @summary Maintains all of the state for the prioritized I/O driver.
 struct pio_driver_t
 {
-    aio_driver_t *aio_d;   /// The asynchronous I/O driver interface.
+    aio_driver_t     *AIO;     /// The asynchronous I/O driver interface.
+};
+
+struct stream_control_t
+{
+    void pause(void);          /// Pause reading of the stream, but don't close the file.
+    void resume(void);         /// Resume reading of a paused stream.
+    void rewind(void);         /// Resume reading the stream from the beginning.
+    void seek(int64_t offset); /// Seek to a specified location and resume streaming.
+    void stop(void);           /// Stop streaming the file and close it.
+
+    uintptr_t         SID;          /// The application-defined stream identifier.
+    pio_driver_t     *PIO;          /// The prioritized I/O driver interface.
+    stream_decoder_t *Decoder;      /// The decoder used to read stream data.
+    int64_t           EncodedSize;  /// The number of bytes of data as stored.
+    int64_t           DecodedSize;  /// The number of bytes of data when decoded, if known.
 };
 
 /*///////////////
@@ -52,7 +69,7 @@ internal_function int pio_driver_main(pio_driver_t *driver)
 /// @return ERROR_SUCCESS on success, or an error code returned by GetLastError() on failure.
 public_function DWORD pio_driver_open(pio_driver_t *driver, aio_driver_t *aio)
 {
-    driver->aio_d = aio;
+    driver->AIO = aio;
     return ERROR_SUCCESS;
 }
 
@@ -60,7 +77,7 @@ public_function DWORD pio_driver_open(pio_driver_t *driver, aio_driver_t *aio)
 /// @param driver The prioritized I/O driver state to clean up.
 public_function void pio_driver_close(pio_driver_t *driver)
 {
-    driver->aio_d = NULL;
+    driver->AIO = NULL;
 }
 
 /// @summary Executes a single AIO driver update in polling mode. The kernel
