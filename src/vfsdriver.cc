@@ -71,6 +71,8 @@ enum vfs_file_hint_e  : uint32_t
 {
     VFS_FILE_HINT_NONE            = (0 << 0), /// No special hints are specified.
     VFS_FILE_HINT_UNBUFFERED      = (1 << 0), /// Prefer to perform I/O directly to/from user buffers.
+    VFS_FILE_HINT_ASYNCHRONOUS    = (1 << 1), /// All I/O operations will be performed asynchronously.
+    VFS_FILE_HINT_TRUNCATE        = (1 << 2), /// If the file exists, existing contents are overwritten.
 };
 
 /// @summary Defines the intended usage when opening a file, which in turn defines 
@@ -593,7 +595,8 @@ internal_function size_t vfs_physical_sector_size(HANDLE file)
 /// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
 /// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
 /// @return A stream decoder instance, or NULL if the intended usage does not 
-/// require or support stream decoding.
+/// require or support stream decoding. The reference count of the stream decoder 
+/// is zero; it is up to higher-level code to manage the reference count.
 internal_function stream_decoder_t* vfs_create_decoder(int32_t usage, int32_t decoder_hint)
 {
     if (usage != VFS_USAGE_STREAM_IN      && 
@@ -679,22 +682,25 @@ internal_function DWORD vfs_open_fs(vfs_mount_t *m, char const *path, int32_t us
         share  = FILE_SHARE_READ;
         create = OPEN_EXISTING;
         flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-        if (file_hints & VFS_FILE_HINT_UNBUFFERED) flags |= FILE_FLAG_NO_BUFFERING;
+        if (file_hints & VFS_FILE_HINT_UNBUFFERED)   flags |= FILE_FLAG_NO_BUFFERING;
         break;
 
     case VFS_USAGE_STREAM_OUT:
         access = GENERIC_READ | GENERIC_WRITE;
         share  = FILE_SHARE_READ;
         create = CREATE_ALWAYS;
-        flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED;
+        flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
+        if (file_hints & VFS_FILE_HINT_UNBUFFERED)   flags |= FILE_FLAG_NO_BUFFERING;
         break;
 
     case VFS_USAGE_MANUAL_IO:
         access = GENERIC_READ | GENERIC_WRITE;
         share  = FILE_SHARE_READ;
         create = OPEN_ALWAYS;
-        flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-        if (file_hints & VFS_FILE_HINT_UNBUFFERED) flags |= FILE_FLAG_NO_BUFFERING;
+        flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
+        if (file_hints & VFS_FILE_HINT_UNBUFFERED)   flags |= FILE_FLAG_NO_BUFFERING;
+        if (file_hints & VFS_FILE_HINT_ASYNCHRONOUS) flags |= FILE_FLAG_OVERLAPPED;
+        if (file_hints & VFS_FILE_HINT_TRUNCATE)     create = CREATE_ALWAYS;
         break;
 
     default:
@@ -731,6 +737,7 @@ internal_function DWORD vfs_open_fs(vfs_mount_t *m, char const *path, int32_t us
     file->BaseOffset = 0;
     file->BaseSize   = fsize.QuadPart;
     file->FileSize   = fsize.QuadPart;
+    file->FileHints  = file_hints;
     file->FileFlags  = VFS_FILE_FLAG_EXPLICIT_CLOSE;
     file->Decoder    = vfs_create_decoder(usage, decoder_hint);
     return ERROR_SUCCESS;
@@ -747,6 +754,7 @@ error_cleanup:
     file->BaseOffset  =  0;
     file->BaseSize    =  0;
     file->FileSize    =  0;
+    file->FileHints   =  file_hints;
     file->FileFlags   =  VFS_FILE_FLAG_NONE;
     file->Decoder     =  NULL;
     return result;
@@ -1143,6 +1151,24 @@ internal_function DWORD vfs_resolve_and_save_file(vfs_driver_t *driver, char con
     return result;
 }
 
+/// @summary Safely close a file handle.
+/// @param file_info Information about an open file, as returned by vfs_mount_t::open().
+internal_function void vfs_close_file(vfs_file_t *file_info)
+{   // only close the file handle if it should be closed.
+    // files located within archives typically do not set this flag.
+    if (file_info->Fildes != INVALID_HANDLE_VALUE && 
+        file_info->FileFlags & VFS_FILE_FLAG_EXPLICIT_CLOSE)
+    {
+        CloseHandle(file_info->Fildes);
+    }
+    if (file_info->Decoder != NULL)
+    {
+        file_info->Decoder->release();
+    }
+    file_info->Fildes  = INVALID_HANDLE_VALUE;
+    file_info->Decoder = NULL;
+}
+
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
@@ -1283,9 +1309,120 @@ public_function void vfs_unmount_all(vfs_driver_t *driver, char const *mount_pat
 /// @param data The contents of the file.
 /// @param size The number of bytes to read from data and write to the file.
 /// @return true if the operation was successful.
-public_function bool vfs_save_file(vfs_driver_t *driver, char const *path, void const *data, int64_t size)
+public_function bool vfs_put_file(vfs_driver_t *driver, char const *path, void const *data, int64_t size)
 {
     return SUCCEEDED(vfs_resolve_and_save_file(driver, path, data, size, NULL));
+}
+
+/// @summary Load the entire contents of a file from disk. This operation is 
+/// performed entirely synchronously and will block the calling thread until 
+/// the entire file has been read. This function cannot read files larger 
+/// than 4GB. Large files must use the streaming interface.
+/// @param driver The virtual file system driver to use for path resolution.
+/// @param path The virtual path of the file to load.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
+/// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @return The stream decoder that can be used to access the file data. When 
+/// finished accessing the file data, call the stream_decoder_t::release() method
+/// to delete the stream decoder instance.
+public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const *path, int32_t decoder_hint)
+{   // open the file and retrieve relevant information.
+    vfs_file_t  file_info;
+    char const *relpath = NULL;
+    int32_t     usage       = VFS_USAGE_MANUAL_IO;
+    uint32_t    file_hints  = VFS_FILE_HINT_UNBUFFERED;
+    DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
+    if (FAILED (open_result)) return NULL;
+
+    // add a reference to the decoder while we're using it:
+    file_info.Decoder->addref();
+
+    // files larger than 4GB cannot be loaded this way; they must be streamed in.
+    // typically you would want to do that anyway, so this is not a problem.
+    if (file_info.BaseSize > (UINT32_MAX - sizeof(uint32_t)))
+    {   // this file is too large to be loaded into memory all at once.
+        vfs_close_file(&file_info);
+        return NULL;
+    }
+
+    // move the file pointer to the beginning of the logical file.
+    // TODO(rlk): archive implementations need to CreateFile so that
+    // the file handle gets properly duplicated. the archive does not
+    // need to be re-parsed, but the EXPLICIT_CLOSE flag should be 
+    // specified. alternatively, we could just say that this interface
+    // is not to be used from multiple threads simultaneously...
+    LARGE_INTEGER start_pos;
+    start_pos.QuadPart =  file_info.BaseOffset;
+    if (!SetFilePointerEx(file_info.Fildes, start_pos, NULL, FILE_BEGIN))
+    {   // can't seek to the start of the file; don't proceed with reading.
+        vfs_close_file(&file_info);
+        return NULL;
+    }
+
+    // initialize the buffer allocator internal to the stream decoder.
+    // it will hold a single buffer with the entire file contents, plus
+    // an extra four zero bytes at the end, in case the resulting 
+    // encoded data is passed to a string processing function.
+    size_t    file_size = (size_t) (file_info.BaseSize + sizeof(uint32_t));
+    stream_decoder_t *d = file_info.Decoder;
+    if (!d->InternalAllocator.reserve(file_size, file_size))
+    {   // unable to allocate the necessary buffer space.
+        vfs_close_file(&file_info);
+        return NULL;
+    }
+
+    // the stream decoder will use its internal buffer allocator.
+    d->BufferAllocator = &d->InternalAllocator;
+
+    // grab the buffer and add the zero bytes at the end.
+    DWORD     buffer_n =(DWORD    ) d->BufferAllocator->AllocSize;
+    uint8_t  *buffer_p =(uint8_t *) d->BufferAllocator->get_buffer();
+    uint32_t *buffer_z =(uint32_t*)(buffer_p + (file_size - sizeof(uint32_t)));
+    *buffer_z = 0U;
+
+    // synchronously read the file in 1MB chunks. for archive files, 
+    // this may end up reading slightly more data than the actual 
+    // size of the file, but only the actual size of the file is 
+    // exposed to the caller in the returned stream decoder.
+    DWORD   error   = ERROR_SUCCESS;
+    DWORD   amount  = 0;
+    while  (amount  < file_info.FileSize)
+    {
+        DWORD nread = 0;
+        DWORD rsize = 1024U * 1024U;
+        if (rsize   > buffer_n - amount)
+        {   // read only up to the available buffer space.
+            rsize   = buffer_n - amount;
+        }
+        if (ReadFile(file_info.Fildes, &buffer_p[amount], rsize, &nread, NULL))
+        {   // the synchronous read completed successfully.
+            amount += nread;
+        }
+        else
+        {   // an error occurred; save the error code.
+            error   = GetLastError();
+            break;
+        }
+    }
+
+    // now enqueue a completed read request in the stream decoder queue.
+    fifo_node_t<aio_result_t> *result  = fifo_allocator_get(&d->AIOResultAlloc);
+    result->Item.Fildes     =  file_info.Fildes;
+    result->Item.OSError    =  error;
+    if (SUCCEEDED(error))      result->Item.DataAmount = (uint32_t)file_info.FileSize;
+    else                       result->Item.DataAmount = (uint32_t)0;
+    result->Item.FileOffset =  0;
+    result->Item.DataBuffer =  buffer_p;
+    result->Item.Identifier = (uintptr_t)path;
+    result->Item.FileType   =  0;
+    result->Item.StatusFlags=  STREAM_DECODE_STATUS_ENDOFSTREAM;
+    result->Item.Priority   =  0;
+    spsc_fifo_u_produce(&d->AIOResultQueue, result);
+
+    // add a reference for the caller (ref count = 2)
+    // release the reference for the VFS driver (ref count = 1)
+    d->addref(); vfs_close_file(&file_info);
+    return d;
 }
 
 /*public_function stream_control_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, int32_t decoder_hint, int64_t &file_size)

@@ -36,8 +36,8 @@
 #include "filepath.cc"
 #include "iobuffer.cc"
 #include "aiodriver.cc"
-#include "piodriver.cc"
 #include "iodecoder.cc"
+#include "piodriver.cc"
 #include "vfsdriver.cc"
 
 #include "prcmdlist.cc"
@@ -231,9 +231,33 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     vfs_driver_open(&vfs, NULL);
     vfs_mount(&vfs, VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
     vfs_mount(&vfs, VFS_KNOWN_PATH_PUBLIC_DOCUMENTS, "/doc", 0, 1);
-    vfs_save_file(&vfs, "/doc/test_save.txt", "This is a test (user)...\n", 25);
+    vfs_put_file(&vfs, "/doc/test_save.txt", "This is a test (user)...\n", 25);
     vfs_unmount(&vfs, 0); // remove user documents mount
-    vfs_save_file(&vfs, "/doc/test_save.txt", "This is a test (public)...\n", 27);
+    vfs_put_file(&vfs, "/doc/test_save.txt", "This is a test (public)...\n", 27);
+    vfs_mount(&vfs, VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
+    stream_decoder_t *d1 = vfs_get_file(&vfs, "/doc/test_save.txt", VFS_DECODER_HINT_USE_DEFAULT);
+    if (d1 != NULL)
+    {   // here's how you read data from the stream.
+        while (!d1->atend())
+        {   // refill the stream with available data.
+            switch (d1->refill(d1))
+            {
+            case STREAM_REFILL_RESULT_START:
+                break; // begin reading decoded data.
+            case STREAM_REFILL_RESULT_YIELD:
+                continue; // try and refill again later.
+            case STREAM_REFILL_RESULT_ERROR:
+                break; // check d1->ErrorCode.
+            }
+            // read as much decoded data as possible.
+            while  (d1->ReadCursor != d1->FinalByte)
+            {
+                char ch     = (char) *d1->ReadCursor++;
+                char buf[2] = {ch, 0};
+                OutputDebugStringA(buf);
+            }
+        }
+    }
     vfs_driver_close(&vfs);
 
     // get a list of all files in the images subdirectory. these files will be 
