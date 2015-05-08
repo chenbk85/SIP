@@ -55,12 +55,17 @@ enum stream_decode_status_e : uint32_t
 /// implementation performs no decoding at all. Derived decoder types may 
 /// add additional buffers (for decompressed data, for example) and custom 
 /// buffer refill functions. The refill field is a function pointer, which 
-/// allows basic state machines to be implemented.
+/// allows basic state machines to be implemented. The stream decoder is 
+/// reference counted, as typically one reference is held by the I/O driver
+/// streaming data into the decoder, and another is held by the parser 
+/// reading data from the decoder.
 struct stream_decoder_t
 {
     stream_decoder_t(void);                       /// Initialize the decoder. No buffer allocator is selected.
     virtual ~stream_decoder_t(void);              /// Free resources owned by the stream decoder.
 
+    intptr_t       addref (void);                 /// Increment the reference count by one.
+    intptr_t       release(void);                 /// Decrement the reference count by one, possibly auto-delete.
     size_t         amount (void) const;           /// Get the number of decoded bytes available.
     bool           atend  (void) const;           /// Test the current status flags for ENDOFSTREAM.
     void*          nextbuf(void);                 /// Dequeue the next queued encoded data buffer, if any.
@@ -82,6 +87,7 @@ struct stream_decoder_t
     aio_result_queue_t     AIOResultQueue;        /// The SPSC FIFO to which the AIO driver posts read results.
     io_buffer_allocator_t *BufferAllocator;       /// The active I/O buffer allocator; may not be &InternalAllocator.
     io_buffer_allocator_t  InternalAllocator;     /// The (possibly unused) internal I/O buffer allocator.
+    std::atomic<intptr_t>  ReferenceCount;        /// The reference count used for lifetime management.
 };
 
 /*///////////////
@@ -192,7 +198,8 @@ stream_decoder_t::stream_decoder_t(void)
     EncodedData(NULL), 
     EncodedDataOffset(0), 
     EncodedDataSize(0), 
-    BufferAllocator(NULL)
+    BufferAllocator(NULL), 
+    ReferenceCount(0)
 {
     aio_create_result_queue(&AIOResultQueue, &AIOResultAlloc);
 }
@@ -202,6 +209,23 @@ stream_decoder_t::stream_decoder_t(void)
 stream_decoder_t::~stream_decoder_t(void)
 {
     aio_delete_result_queue(&AIOResultQueue, &AIOResultAlloc);
+}
+
+/// @summary Retains a reference to the stream decoder instance.
+/// @return The new reference count.
+inline intptr_t stream_decoder_t::addref(void)
+{
+    return ReferenceCount.fetch_add(1) + 1;
+}
+
+/// @summary Releases a reference to the stream decoder instance.
+/// If the reference count reaches zero, the decoder is deleted.
+/// @return The new reference count.
+inline intptr_t stream_decoder_t::release(void)
+{
+    intptr_t n = ReferenceCount.fetch_sub(1) - 1;
+    if (n <= 0)  delete this;
+    return n;
 }
 
 /// @summary Calculate the number of bytes available for reading before the 
