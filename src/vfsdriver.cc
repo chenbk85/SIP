@@ -366,7 +366,7 @@ internal_function vfs_mount_t* vfs_mounts_insert(vfs_mounts_t &plist, uintptr_t 
     if (plist.Count < plist.Capacity)
     {   // perform a binary search of the priority list to 
         // determine where this new item should be inserted. 
-        intptr_t ins_idx  =-1;
+        intptr_t ins_idx  = 0;
         intptr_t min_idx  = 0;
         intptr_t max_idx  = intptr_t(plist.Count  - 1);
         while   (min_idx <= max_idx)
@@ -384,7 +384,7 @@ internal_function vfs_mount_t* vfs_mounts_insert(vfs_mounts_t &plist, uintptr_t 
                 }
                 break;
             }
-            else if (priority < p_b)
+            else if (priority > p_b)
             {   // continue searching the lower half of the range.
                 max_idx = mid - 1;
             }
@@ -393,9 +393,9 @@ internal_function vfs_mount_t* vfs_mounts_insert(vfs_mounts_t &plist, uintptr_t 
                 min_idx = mid + 1;
             }
         }
-        if (ins_idx < 0)
+        if (ins_idx == plist.Count)
         {   // insert the item at the end of the list.
-            ins_idx = plist.Count++;
+            ins_idx =  plist.Count++;
             plist.MountIds[ins_idx] = id;
             plist.Priority[ins_idx] = priority;
         }
