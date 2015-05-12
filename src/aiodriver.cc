@@ -53,7 +53,6 @@ struct aio_result_t
     int64_t         FileOffset;   /// The absolute byte offset of the start of the operation, or 0.
     void           *DataBuffer;   /// The source or target buffer, or NULL.
     uintptr_t       Identifier;   /// The application-defined ID for the file.
-    uint64_t        FileType;     /// The application-defined type ID for the file.
     uint32_t        StatusFlags;  /// The application-defined status flags for the operation.
     uint32_t        Priority;     /// The application-defined priority value for the operation.
 };
@@ -72,7 +71,6 @@ struct aio_request_t
     int64_t         FileOffset;   /// The absolute byte offset of the start of the operation, or 0.
     void           *DataBuffer;   /// The source or target buffer, or NULL.
     uintptr_t       Identifier;   /// The application-defined ID for the file. Passthrough.
-    uint64_t        FileType;     /// The application-defined type ID for the file. Passthrough.
     uint32_t        StatusFlags;  /// The application-defined status flags for the operation. Passthrough.
     uint32_t        Priority;     /// The application-defined priority value for the operation. Passthrough.
     result_alloc_t *ResultAlloc;  /// The FIFO node allocator for the result queue. Required.
@@ -127,7 +125,6 @@ internal_function DWORD aio_driver_post_result(aio_request_t const &cmd, DWORD o
     res.FileOffset    = cmd.FileOffset;
     res.DataBuffer    = cmd.DataBuffer;
     res.Identifier    = cmd.Identifier;
-    res.FileType      = cmd.FileType;
     res.StatusFlags   = cmd.StatusFlags;
     res.Priority      = cmd.Priority;
     spsc_fifo_u_produce(cmd.ResultQueue, node);
