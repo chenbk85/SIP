@@ -1383,10 +1383,10 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
     result->Item.OSError    =  error;
     if (SUCCEEDED(error))      result->Item.DataAmount = (uint32_t)file_info.FileSize;
     else                       result->Item.DataAmount = (uint32_t)0;
+    result->Item.DataActual =  result->Item.DataAmount;
     result->Item.FileOffset =  0;
     result->Item.DataBuffer =  buffer_p;
     result->Item.Identifier = (uintptr_t)path;
-    result->Item.FileType   =  0;
     result->Item.StatusFlags=  STREAM_DECODE_STATUS_ENDOFSTREAM;
     result->Item.Priority   =  0;
     spsc_fifo_u_produce(&d->AIOResultQueue, result);
@@ -1430,16 +1430,15 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
 
     // push the stream-in request down to the PIO driver.
     pio_sti_request_t iocmd;
-    iocmd.Identifier        = id;
-    iocmd.StreamDecoder     = file_info.Decoder;
-    iocmd.Fildes            = file_info.Fildes;
-    iocmd.SectorSize        = file_info.SectorSize;
-    iocmd.BaseOffset        = file_info.BaseOffset;
-    iocmd.BaseSize          = file_info.BaseSize;
-    iocmd.IntervalNs        = 0;
-    iocmd.StreamFlags       = PIO_STREAM_IN_FLAGS_LOAD;
-    iocmd.BasePriority      = priority;
-    if (file_info.FileFlags & VFS_FILE_FLAG_EXPLICIT_CLOSE) iocmd.StreamFlags |= PIO_STREAM_IN_FLAGS_CLOSE_FD;
+    iocmd.Identifier   = id;
+    iocmd.StreamDecoder= file_info.Decoder;
+    iocmd.Fildes       = file_info.Fildes;
+    iocmd.SectorSize   = file_info.SectorSize;
+    iocmd.BaseOffset   = file_info.BaseOffset;
+    iocmd.BaseSize     = file_info.BaseSize;
+    iocmd.IntervalNs   = 0;
+    iocmd.StreamFlags  = PIO_STREAM_IN_FLAGS_LOAD;
+    iocmd.BasePriority = priority;
     pio_driver_stream_in(driver->PIO, iocmd);
     
     // add a decoder reference for the caller:

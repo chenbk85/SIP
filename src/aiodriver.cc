@@ -50,6 +50,7 @@ struct aio_result_t
     HANDLE          Fildes;       /// The file descriptor of the file.
     DWORD           OSError;      /// The error code returned by the operation, or ERROR_SUCCESS.
     uint32_t        DataAmount;   /// The amount of data transferred.
+    uint32_t        DataActual;   /// The amount of data that's valid to read.
     int64_t         FileOffset;   /// The absolute byte offset of the start of the operation, or 0.
     void           *DataBuffer;   /// The source or target buffer, or NULL.
     uintptr_t       Identifier;   /// The application-defined ID for the file.
@@ -66,15 +67,16 @@ struct aio_request_t
     typedef fifo_allocator_t<res_t>   result_alloc_t;
     int32_t         CommandType;  /// The AIO command type, one of aio_command_type_e.
     HANDLE          Fildes;       /// The file descriptor of the file. Required.
-    uint32_t        DataAmount;   /// The amount of data to transfer, or 0.
+    uint32_t        DataAmount;   /// The amount of data to transfer, or 0. Subject to alignment requirements.
+    uint32_t        DataActual;   /// The amount of data that's actually valid. Not subject to alignment requirements.
     int64_t         BaseOffset;   /// The absolute byte offset of the start of the file, or 0.
     int64_t         FileOffset;   /// The absolute byte offset of the start of the operation, or 0.
     void           *DataBuffer;   /// The source or target buffer, or NULL.
     uintptr_t       Identifier;   /// The application-defined ID for the file. Passthrough.
-    uint32_t        StatusFlags;  /// The application-defined status flags for the operation. Passthrough.
-    uint32_t        Priority;     /// The application-defined priority value for the operation. Passthrough.
     result_alloc_t *ResultAlloc;  /// The FIFO node allocator for the result queue. Required.
     result_queue_t *ResultQueue;  /// The SPSC unbounded FIFO that will receive the result of the operation. Required.
+    uint32_t        StatusFlags;  /// The application-defined status flags for the operation. Passthrough.
+    uint32_t        Priority;     /// The application-defined priority value for the operation. Passthrough.
 };
 
 /// @summary Defines the data associated with the asynchronous I/O (AIO) driver.
@@ -122,6 +124,7 @@ internal_function DWORD aio_driver_post_result(aio_request_t const &cmd, DWORD o
     res.Fildes        = cmd.Fildes;
     res.OSError       = oserr;
     res.DataAmount    = amount;
+    res.DataActual    = cmd.DataActual;
     res.FileOffset    = cmd.FileOffset;
     res.DataBuffer    = cmd.DataBuffer;
     res.Identifier    = cmd.Identifier;
@@ -172,13 +175,13 @@ internal_function DWORD aio_driver_close_and_rename(aio_request_t &cmd)
     FILE_END_OF_FILE_INFO eof;
 
     // get the absolute path of the temporary file (the source file).
-    ncharsp = GetFinalPathNameByHandle_Func(cmd.Fildes, NULL, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    ncharsp = GetFinalPathNameByHandle(cmd.Fildes, NULL, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     source  = (WCHAR*) malloc(ncharsp * sizeof(WCHAR));
     if (ncharsp == 0 || source == NULL)
     {   // couldn't allocate the temporary buffer for the source path.
         goto error_cleanup;
     }
-    GetFinalPathNameByHandle_Func(cmd.Fildes, source, ncharsp, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    GetFinalPathNameByHandle(cmd.Fildes, source, ncharsp, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
 
     // is the temporary file being deleted, or is it being moved?
     if (target == NULL)
@@ -194,7 +197,7 @@ internal_function DWORD aio_driver_close_and_rename(aio_request_t &cmd)
     eof.EndOfFile.QuadPart = lsize;
     ssize = physical_sector_size(cmd.Fildes);
     psize = align_up(cmd.FileOffset, ssize);
-    SetFileInformationByHandle_Func(cmd.Fildes, FileEndOfFileInfo, &eof, sizeof(eof));
+    SetFileInformationByHandle(cmd.Fildes, FileEndOfFileInfo, &eof, sizeof(eof));
     SetFileValidData(cmd.Fildes, eof.EndOfFile.QuadPart); // requires elevate_process_privileges().
 
     // close the open file handle, and move the file into place.
@@ -321,7 +324,7 @@ internal_function size_t aio_driver_poll_ev(aio_driver_t *driver, DWORD timeout,
     ULONG const N = WINDOWS_AIO_MAX_ACTIVE;
     OVERLAPPED_ENTRY events[N];
     ULONG nevents = 0;
-    BOOL  iocpres = GetQueuedCompletionStatusEx_Func(driver->AIOContext, events, N, &nevents, timeout, FALSE);
+    BOOL  iocpres = GetQueuedCompletionStatusEx(driver->AIOContext, events, N, &nevents, timeout, FALSE);
     if (iocpres  && nevents > 0)
     {   // kernel AIO reported one or more ready events.
         for (size_t i = 0,  n = (size_t) nevents; i < n; ++i)

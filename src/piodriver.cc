@@ -619,6 +619,7 @@ internal_function int pio_driver_main(pio_driver_t *driver)
             aio_op.CommandType  = AIO_COMMAND_CLOSE;
             aio_op.Fildes       = driver->StreamInState[i].Fildes;
             aio_op.DataAmount   = 0;
+            aio_op.DataActual   = 0;
             aio_op.BaseOffset   = driver->StreamInState[i].BaseOffset;
             aio_op.FileOffset   = driver->StreamInState[i].ReadOffset;
             aio_op.DataBuffer   = NULL;

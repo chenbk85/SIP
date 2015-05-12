@@ -288,12 +288,12 @@ void* stream_decoder_t::nextbuf(void)
     uint8_t     *io_buffer = NULL;
     if (spsc_fifo_u_consume(&AIOResultQueue,io_result))
     {   // update internal state for the new buffer.
-        if (io_result.DataBuffer != NULL && io_result.DataAmount > 0)
+        if (io_result.DataBuffer != NULL && io_result.DataActual > 0)
         {   // some data was returned from a read.
             io_buffer         = (uint8_t*)  io_result.DataBuffer;
             EncodedData       = io_buffer;
             EncodedDataOffset = 0;
-            EncodedDataSize   = io_result.DataAmount;
+            EncodedDataSize   = io_result.DataActual;
             StatusFlags       = io_result.StatusFlags;
             if (SUCCEEDED(io_result.OSError))
             {   // clear the current error code.
