@@ -523,17 +523,18 @@ internal_function void pio_sti_priority_queue_pop(pio_sti_priority_queue_t &pq)
 /// @return An overall priority value for the stream.
 internal_function inline uint32_t pio_stream_in_priority(pio_sti_priority_t const &data, uint64_t now_time)
 {
-    uint32_t const NEED_NOW = 4000000;                    // due immediately cutoff, in nanoseconds.
-    uint32_t basep = data.BasePriority * (INT_MAX / 256); // at most, INT_MAX.
-    int64_t  delta = data.NextDeadline - now_time;       // how long until next delivery deadline - may be negative.
-    uint32_t boost = delta >= NEED_NOW ? (INT_MAX / delta) * NEED_NOW : INT_MAX; // deadline boost similar to 1/x.
-    return  (basep + boost);
+    int64_t  const NEED_NOW = 4000000;                    // due immediately cutoff, in nanoseconds.
+    int64_t  basep = data.BasePriority * (INT_MAX / 256); // at most, INT_MAX.
+    int64_t  delta = data.NextDeadline - now_time;        // how long until next delivery deadline - may be negative.
+    int64_t  boost = delta >= NEED_NOW ? (INT_MAX / delta) * NEED_NOW : INT_MAX; // deadline boost similar to 1/x.
+    return  uint32_t(basep  + boost);
 }
 
 /// @summary Dequeues the results of any completed stream-out operations for a given PIO driver. This frees any resources allocated by the driver for writes.
 /// @param driver The prioritized I/O driver state.
 internal_function void pio_process_completed_stream_out(pio_driver_t *driver)
 {
+    UNREFERENCED_PARAMETER(driver);
     /*aio_result_t result;
     while (spsc_fifo_u_consume(&driver->StreamOutQueue, result))
     {
@@ -580,61 +581,85 @@ internal_function bool pio_sti_state_list_ensure(pio_driver_t *driver, size_t ca
     else return true;
 }
 
+/// @summary Submit buffered commands from the prioritized I/O command list to the asynchronous I/O driver.
+/// @param driver The prioritized I/O driver maintaining the buffered I/O command list.
+/// @return true if the asynchronous I/O driver queue still has space.
+internal_function bool pio_driver_submit_to_aio(pio_driver_t *driver)
+{
+    aio_driver_t             *aio       = driver->AIO;
+    pio_aio_priority_queue_t &aio_queue = driver->AIODriverQueue;
+    aio_request_t             aio_op;
+    while (pio_aio_priority_queue_top(aio_queue, aio_op))
+    {
+        if (aio_driver_submit(aio, aio_op))
+        {   // command submitted successfully; keep processing.
+            pio_aio_priority_queue_pop(aio_queue);
+        }
+        else
+        {   // the AIO driver queue is full; halt submission.
+            return false;
+        }
+    }
+    return true; // maybe still space in the AIO driver queue.
+}
+
 /// @summary Implements the per-tick entry point for the prioritized I/O driver. Ultimately, this builds a priority queue of pending I/O operations and pushes them down to the asynchronous I/O driver for processing.
 /// @param driver The prioritized I/O driver state.
-/// @return Zero to continue running, or non-zero if a shutdown signal was received.
-internal_function int pio_driver_main(pio_driver_t *driver)
+internal_function void pio_driver_main(pio_driver_t *driver)
 {
-    pio_sti_request_t  openrq;
-    aio_request_t      explicit_aio, aio_op;
-    aio_request_t     *aio_request = NULL;
-    uint64_t           tick_time   = pio_driver_nanotime(driver);
-    size_t             i, n;
+    uint64_t tick_time = pio_driver_nanotime(driver);
 
     // process all completion events received from the AIO driver.
     // pio_process_completed_stream_out(pio);
 
+    // push all pending stream-in closes directly to the AIO driver.
+    for (size_t i = 0, n = driver->StreamInCount; i < n; ++i)
+    {   
+        uintptr_t        id = driver->StreamInId[i];
+        pio_sti_state_t &si = driver->StreamInState[i];
+        // check for streams with a 'close pending' status.
+        if (si.StatusFlags & PIO_STREAM_IN_STATUS_CLOSE)
+        {   // addref the stream decoder to account for the pending AIO operation.
+            // push a stream close operation to the AIO driver.
+            aio_request_t aio_op;
+            aio_op.CommandType  = AIO_COMMAND_CLOSE;
+            aio_op.Fildes       = si.Fildes;
+            aio_op.DataAmount   = 0;
+            aio_op.DataActual   = 0;
+            aio_op.BaseOffset   = si.BaseOffset;
+            aio_op.FileOffset   = si.ReadOffset;
+            aio_op.DataBuffer   = NULL;
+            aio_op.Identifier   = id;
+            aio_op.StatusFlags  = STREAM_DECODE_STATUS_ENDOFSTREAM;
+            aio_op.Priority     = 0;
+            aio_op.ResultAlloc  =&si.StreamDecoder->AIOResultAlloc;
+            aio_op.ResultQueue  =&si.StreamDecoder->AIOResultQueue;
+            if (aio_driver_submit(driver->AIO, aio_op))
+            {   // mark the stream as having been closed. it will be
+                // removed from the active list in the loop below.
+                si.StatusFlags &= ~PIO_STREAM_IN_STATUS_CLOSE;
+                si.StatusFlags |=  PIO_STREAM_IN_STATUS_CLOSED;
+                // addref the decoder to account for the outstanding close.
+                si.StreamDecoder->addref();
+            }
+            else return; // the AIO driver queue is full. nothing to do.
+        }
+    }
+
     // remove all closed streams from the active stream-in list.
-    for (i = 0; i < driver->StreamInCount; /* empty */)
+    for (size_t i = 0; i < driver->StreamInCount; /* empty */)
     {
         if (driver->StreamInState[i].StatusFlags & PIO_STREAM_IN_STATUS_CLOSED)
         {   // the prioritized I/O driver no longer needs access to the decoder.
             driver->StreamInState[i].StreamDecoder->release();
-            // swap the last item in the list into this slot.
-            driver->StreamInPriority[i] = driver->StreamInPriority[driver->StreamInCount-1];
-            driver->StreamInState[i]    = driver->StreamInState[driver->StreamInCount-1];
-            driver->StreamInId[i]       = driver->StreamInId[driver->StreamInCount-1];
-            driver->StreamInCount--;
+            // swap the last item in the list into slot 'i'.
+            size_t  last_index          = driver->StreamInCount - 1;
+            driver->StreamInPriority[i] = driver->StreamInPriority[last_index];
+            driver->StreamInState   [i] = driver->StreamInState   [last_index];
+            driver->StreamInId      [i] = driver->StreamInId      [last_index];
+            driver->StreamInCount       = last_index;
         }
         else ++i; // check the next stream.
-    }
-
-    // push all pending stream-in closes directly to the AIO driver.
-    for (i = 0, n = driver->StreamInCount; i < n; ++i)
-    {   // check for streams with a 'close pending' status.
-        if (driver->StreamInState[i].StatusFlags & PIO_STREAM_IN_STATUS_CLOSE)
-        {   // addref the stream decoder to account for the pending AIO operation.
-            driver->StreamInState[i].StreamDecoder->addref();
-            // push a stream close operation to the AIO driver.
-            aio_op.CommandType  = AIO_COMMAND_CLOSE;
-            aio_op.Fildes       = driver->StreamInState[i].Fildes;
-            aio_op.DataAmount   = 0;
-            aio_op.DataActual   = 0;
-            aio_op.BaseOffset   = driver->StreamInState[i].BaseOffset;
-            aio_op.FileOffset   = driver->StreamInState[i].ReadOffset;
-            aio_op.DataBuffer   = NULL;
-            aio_op.Identifier   = driver->StreamInId[i];
-            aio_op.StatusFlags  = STREAM_DECODE_STATUS_ENDOFSTREAM;
-            aio_op.Priority     = 0;
-            aio_op.ResultAlloc  =&driver->StreamInState[i].StreamDecoder->AIOResultAlloc;
-            aio_op.ResultQueue  =&driver->StreamInState[i].StreamDecoder->AIOResultQueue;
-            if (aio_driver_submit(driver->AIO, aio_op))
-            {   // mark the stream as having been closed.
-                driver->StreamInState[i].StatusFlags &= ~PIO_STREAM_IN_STATUS_CLOSE;
-                driver->StreamInState[i].StatusFlags |=  PIO_STREAM_IN_STATUS_CLOSED;
-            }
-            else return 0; // the AIO driver queue is full. nothing to do.
-        }
     }
 
     // push all pending explicit I/O requests to the I/O operations queue.
@@ -650,28 +675,38 @@ internal_function int pio_driver_main(pio_driver_t *driver)
     }*/
 
     // dequeue all pending stream-in opens and insert them into the list of active stream-ins.
+    pio_sti_request_t  openrq;
     while (mpsc_fifo_u_consume(&driver->STIPendingQueue, openrq))
     {
-        size_t i = driver->StreamInCount;
-        pio_sti_state_list_ensure(driver, driver->StreamInCount + 1);
-        driver->StreamInId[i]   = openrq.Identifier;
-        driver->StreamInState[i].StatusFlags     = PIO_STREAM_IN_STATUS_NONE;
-        driver->StreamInState[i].StreamFlags     = openrq.StreamFlags;
-        driver->StreamInState[i].Fildes          = openrq.Fildes;
-        driver->StreamInState[i].BaseOffset      = openrq.BaseOffset;
-        driver->StreamInState[i].BaseSize        = openrq.BaseSize;
-        driver->StreamInState[i].ReadOffset      = 0;
-        driver->StreamInState[i].StreamDecoder   = openrq.StreamDecoder;
-        driver->StreamInPriority[i].BasePriority = openrq.BasePriority;
-        driver->StreamInPriority[i].DataInterval = openrq.IntervalNs;
-        driver->StreamInPriority[i].NextDeadline = tick_time + openrq.IntervalNs;
-        driver->StreamInPriority[i].StreamOrder  = driver->StreamIndex++;
-        driver->StreamInCount++;
+        size_t  list_index    = driver->StreamInCount;
+        if (pio_sti_state_list_ensure(driver, driver->StreamInCount + 1))
+        {
+            driver->StreamInId[list_index] = openrq.Identifier;
+
+            pio_sti_state_t &si = driver->StreamInState[list_index];
+            si.StatusFlags   = PIO_STREAM_IN_STATUS_NONE;
+            si.StreamFlags   = openrq.StreamFlags;
+            si.Fildes        = openrq.Fildes;
+            si.BaseOffset    = openrq.BaseOffset;
+            si.BaseSize      = openrq.BaseSize;
+            si.ReadOffset    = 0;
+            si.StreamDecoder = openrq.StreamDecoder;
+
+            pio_sti_priority_t &sp = driver->StreamInPriority[list_index];
+            sp.BasePriority  = openrq.BasePriority;
+            sp.DataInterval  = openrq.IntervalNs;
+            sp.NextDeadline  = tick_time + openrq.IntervalNs;
+            sp.StreamOrder   = driver->StreamIndex++;
+
+            driver->StreamInCount++;
+        }
+        else return; // memory allocation failed. try again later.
     }
 
     // update the overall priority value for the stream, and populate the priority queue.
+    // the priority queue is completely rebuilt each tick to account for added streams.
     pio_sti_priority_queue_clear(driver->STIActiveQueue);
-    for (i = 0, n = driver->StreamInCount; i < n; ++i)
+    for (size_t i = 0, n = driver->StreamInCount; i < n; ++i)
     {
         uint32_t pv = pio_stream_in_priority(driver->StreamInPriority[i], tick_time);
         uint32_t so = driver->StreamInPriority[i].StreamOrder;
@@ -685,82 +720,93 @@ internal_function int pio_driver_main(pio_driver_t *driver)
     // generate stream-in read operations for active streams in priority order.
     // this loop will continue to generate operations for the highest-priority
     // stream until one of the following conditions is satisfied:
-    // 1. The AIO driver queue is full.
-    // 2. There are no more active stream-in files.
-    // 3. The stream is out of buffer space, in which case we move to the next stream.
+    // 1. There are no more active stream-in files.
+    // 2. The stream is out of buffer space.
+    // 3. The AIO driver queue is full.
     for ( ; ; )
     {
         intptr_t index;
         uint32_t priority;
         bool     end_of_stream = false;
         if (pio_sti_priority_queue_top(driver->STIActiveQueue, index, priority))
-        {   // save off the computed priority value for the stream.
-            // attempt to reserve a buffer for this new read operation.
-            stream_decoder_t *decoder= driver->StreamInState[index].StreamDecoder;
-            uint32_t bufsz = (uint32_t)decoder->BufferAllocator->AllocSize;
-            void    *rdbuf =  decoder->BufferAllocator->get_buffer();
-            if (rdbuf == NULL)
+        {   // attempt to reserve a buffer for the read operation.
+            uintptr_t         id = driver->StreamInId   [index];
+            pio_sti_state_t  &si = driver->StreamInState[index];
+            void *rdbuf  =    si.StreamDecoder->BufferAllocator->get_buffer();
+            if   (rdbuf == NULL)
             {   // no buffer space. pop this stream and continue with the next.
                 pio_sti_priority_queue_pop(driver->STIActiveQueue);
                 continue;
             }
 
-            // attempt to reserve a slot in the I/O operations queue.
-            if ((aio_request = pio_aio_priority_queue_put(driver->AIODriverQueue, priority)) != NULL)
-            {   // calculate the file offset after this read operation has completed.
-                int64_t start_offset = driver->StreamInState[index].ReadOffset;
-                int64_t final_offset = driver->StreamInState[index].ReadOffset + bufsz;
-                driver->StreamInState[index].ReadOffset = final_offset;
-                // fill out the (already enqueued) request to the AIO driver.
-                aio_request->CommandType = AIO_COMMAND_READ;
-                aio_request->Fildes      = driver->StreamInState[index].Fildes;
-                aio_request->DataAmount  = bufsz;
-                aio_request->BaseOffset  = driver->StreamInState[index].BaseOffset;
-                aio_request->FileOffset  = start_offset;
-                aio_request->DataBuffer  = rdbuf;
-                aio_request->Identifier  = driver->StreamInId[index];
-                aio_request->StatusFlags = STREAM_DECODE_STATUS_NONE; // restart, end-of-stream
-                aio_request->Priority    = priority;
-                aio_request->ResultAlloc =&decoder->AIOResultAlloc;
-                aio_request->ResultQueue =&decoder->AIOResultQueue;
-                if (start_offset == 0)
-                {   // restarting the read of the stream, so tell the decoder to reset.
-                    aio_request->StatusFlags |= STREAM_DECODE_STATUS_RESTART;
-                }
-                if (final_offset >= driver->StreamInState[index].BaseSize)
-                {   // handle end-of-stream, either by restarting the stream or marking it for close.
-                    if (driver->StreamInState[index].StreamFlags &  PIO_STREAM_IN_FLAGS_LOAD)
-                    {   // if it's a one-shot, mark the stream as pending close.
-                        driver->StreamInState[index].StatusFlags |= PIO_STREAM_IN_STATUS_CLOSE;
-                        aio_request->StatusFlags |= STREAM_DECODE_STATUS_ENDOFSTREAM;
-                    }
-                    else
-                    {   // otherwise, rewind the stream to the beginning.
-                        driver->StreamInState[index].ReadOffset = 0;
-                    }
-                    pio_sti_priority_queue_pop(driver->STIActiveQueue);
-                    end_of_stream = true;
-                }
-                // add a stream decoder reference for the newly enqueued operation.
-                driver->StreamInState[index].StreamDecoder->addref();
-                // if end-of-stream was reached, continue with the next file.
-                if (end_of_stream) continue;
+            // calculate the file offset after this read operation has completed, 
+            // and determine if this read reaches or exceeds the end-of-file offset.
+            uint32_t data_actual  = 0;
+            uint32_t data_amount  =(uint32_t) si.StreamDecoder->BufferAllocator->AllocSize;
+            int64_t  file_size    = si.BaseSize;
+            int64_t  start_offset = si.ReadOffset;
+            int64_t  final_offset = si.ReadOffset + data_amount;
+            uint32_t status_flags = STREAM_DECODE_STATUS_NONE;
+
+            if (start_offset == 0)
+            {   // this read operation is the first for the stream.
+                status_flags |= STREAM_DECODE_STATUS_RESTART;
+            }
+            if (final_offset  < file_size)
+            {   // this read operation does not reach or exceed the end of the file.
+                data_actual   = 0;
+                si.ReadOffset = final_offset;
+                end_of_stream = false;
             }
             else
-            {   // the I/O operations queue is full. return the buffer.
-                decoder->BufferAllocator->put_buffer(rdbuf);
-                goto push_io_ops_to_aio_driver;
+            {   // this read operation reaches the end of the file.
+                // compute the amount of data that's actually valid,
+                // even though the read operation may transfer more.
+                pio_sti_priority_queue_pop(driver->STIActiveQueue);
+                data_actual   = uint32_t(file_size - start_offset);
+                end_of_stream = true;
+                if (si.StreamFlags  & PIO_STREAM_IN_FLAGS_LOAD)
+                {   // this is a load-once stream; mark it pending close.
+                    si.StatusFlags |= PIO_STREAM_IN_STATUS_CLOSE;
+                    si.ReadOffset   = final_offset;
+                }
+                else
+                {   // this is a controlled stream, so loop back to the beginning.
+                    si.ReadOffset   = 0;
+                }
+            }
+
+            // fill out the request to the asynchronous I/O driver.
+            // the AIO driver holds a reference to the stream decoder
+            // queues. this reference is released when the I/O buffer 
+            // is returned (which happens during the decoding process.)
+            aio_request_t *aio_read = pio_aio_priority_queue_put(driver->AIODriverQueue, priority);
+            aio_read->CommandType   = AIO_COMMAND_READ;
+            aio_read->Fildes        = si.Fildes;
+            aio_read->DataAmount    = data_amount;
+            aio_read->DataActual    = data_actual;
+            aio_read->BaseOffset    = si.BaseOffset;
+            aio_read->FileOffset    = start_offset;
+            aio_read->DataBuffer    = rdbuf;
+            aio_read->Identifier    = id;
+            aio_read->StatusFlags   = status_flags;
+            aio_read->Priority      = priority;
+            aio_read->ResultAlloc   =&si.StreamDecoder->AIOResultAlloc;
+            aio_read->ResultQueue   =&si.StreamDecoder->AIOResultQueue;
+            si.StreamDecoder->addref();
+
+            // if end-of-stream was reached, continue with the next file.
+            if (end_of_stream)
+            {   // flush out to the asynchronous I/O driver. if the AIO 
+                // driver queue is full, end the update; otherwise, 
+                // continue on to the next highest-priority stream.
+                if (pio_driver_submit_to_aio(driver)) continue;
+                else return;
             }
         }
-        else goto push_io_ops_to_aio_driver; // no more active streams.
+        else break; // no more active streams.
     }
-
-push_io_ops_to_aio_driver:
-    while (pio_aio_priority_queue_top(driver->AIODriverQueue, aio_op))
-    {   if (aio_driver_submit(driver->AIO, aio_op))
-            pio_aio_priority_queue_pop(driver->AIODriverQueue);
-    }
-    return 0;
+    pio_driver_submit_to_aio(driver);
 }
 
 /*////////////////////////
