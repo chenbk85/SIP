@@ -271,16 +271,14 @@ void* stream_decoder_t::nextbuf(void)
         EncodedData       = NULL;
         EncodedDataOffset = 0;
         EncodedDataSize   = 0;
-        // release a single reference held by the producer.
-        this->release();
     }
 
     // if this buffer indicated that a stream restart is coming, reset state.
     if (StatusFlags &   STREAM_DECODE_STATUS_RESTART)
     {   // also clear the restart status so we don't reset multiple times.
         StatusFlags &= ~STREAM_DECODE_STATUS_RESTART;
-        this->reset();
         StatusFlags  =  STREAM_DECODE_STATUS_NONE;
+        this->reset();
     }
 
     // now attempt to dequeue the next pending AIO result and update internal state.
@@ -312,6 +310,8 @@ void* stream_decoder_t::nextbuf(void)
             ErrorCode   = ERROR_HANDLE_EOF;
             StatusFlags = STREAM_DECODE_STATUS_ENDOFSTREAM;
         }
+        // a queue entry was consumed, so release a reference.
+        this->release();
     }
     return io_buffer; // NULL if no additional data is available.
 }
