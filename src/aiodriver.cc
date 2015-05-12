@@ -43,6 +43,15 @@ enum aio_command_type_e : int32_t
     AIO_COMMAND_COUNT       = 5   /// The number of recognized commands.
 };
 
+/// @summary Define bitflags that are used to specify file handle close 
+/// behavior when an asynchronous I/O operation has completed.
+enum aio_close_flags_e : uint32_t
+{
+    AIO_CLOSE_FLAGS_NONE    = (0 << 0), /// Do not close the underlying file handle.
+    AIO_CLOSE_ON_ERROR      = (1 << 0), /// Close the underlying file handle if an error occurs.
+    AIO_CLOSE_ON_COMPLETE   = (1 << 1), /// Close the underlying file handle when the request has completed.
+};
+
 /// @summary Defines the data associated with a completed AIO operation. The
 /// operation may have completed successfully, or may have completed in error.
 struct aio_result_t
@@ -66,6 +75,7 @@ struct aio_request_t
     typedef spsc_fifo_u_t   <res_t>   result_queue_t;
     typedef fifo_allocator_t<res_t>   result_alloc_t;
     int32_t         CommandType;  /// The AIO command type, one of aio_command_type_e.
+    uint32_t        CloseFlags;   /// A combination of aio_close_flags_e.
     HANDLE          Fildes;       /// The file descriptor of the file. Required.
     uint32_t        DataAmount;   /// The amount of data to transfer, or 0. Subject to alignment requirements.
     uint32_t        DataActual;   /// The amount of data that's actually valid. Not subject to alignment requirements.
@@ -118,7 +128,7 @@ typedef fifo_allocator_t<void*>         aio_return_alloc_t;
 /// @param amount The number of bytes transferred, or 0.
 /// @return The input value oserr.
 internal_function DWORD aio_driver_post_result(aio_request_t const &cmd, DWORD oserr, uint32_t amount)
-{
+{   // post the operation result to the result queue specified in the request.
     fifo_node_t<aio_result_t> *node = fifo_allocator_get(cmd.ResultAlloc);
     aio_result_t &res = node->Item;
     res.Fildes        = cmd.Fildes;
@@ -131,6 +141,15 @@ internal_function DWORD aio_driver_post_result(aio_request_t const &cmd, DWORD o
     res.StatusFlags   = cmd.StatusFlags;
     res.Priority      = cmd.Priority;
     spsc_fifo_u_produce(cmd.ResultQueue, node);
+    // close the underlying file handle, if requested.
+    if (cmd.CloseFlags != AIO_CLOSE_FLAGS_NONE)
+    {
+        if ( ((cmd.CloseFlags & AIO_CLOSE_ON_COMPLETE) != 0) ||
+            (((cmd.CloseFlags & AIO_CLOSE_ON_ERROR   ) != 0) && FAILED(oserr)) )
+        {   // the close condition has been satisfied.
+            CloseHandle(cmd.Fildes);
+        }
+    }
     return oserr;
 }
 
@@ -152,7 +171,7 @@ internal_function DWORD aio_driver_flush_file(aio_request_t &cmd)
 /// @return Either ERROR_SUCCESS or the result of calling GetLastError().
 internal_function DWORD aio_driver_close_file(aio_request_t &cmd)
 {   // close the file descriptors associated with the file.
-    CloseHandle(cmd.Fildes);
+    cmd.CloseFlags |= AIO_CLOSE_ON_COMPLETE;
     // generate the completion result and push it to the queue.
     return aio_driver_post_result(cmd, ERROR_SUCCESS, 0);
 }
