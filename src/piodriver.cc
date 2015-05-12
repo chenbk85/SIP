@@ -165,9 +165,9 @@ struct pio_driver_t
 /// @return The current timestamp value, in nanoseconds.
 internal_function inline uint64_t pio_driver_nanotime(pio_driver_t *driver)
 {
-    uint64_t const SEC_TO_NANOSEC = 1000000000ULL;
-    LARGE_INTEGER  counts; QueryPerformanceCounter(&counts);
-    return (SEC_TO_NANOSEC * (uint64_t(counts.QuadPart) / uint64_t(driver->ClockFrequency.QuadPart)));
+    uint64_t const  SEC_TO_NANOSEC = 1000000000ULL;
+    LARGE_INTEGER   counts; QueryPerformanceCounter(&counts);
+    return uint64_t(SEC_TO_NANOSEC * (double(counts.QuadPart) / double(driver->ClockFrequency.QuadPart)));
 }
 
 /// @summary Perform a comparison between two elements in an I/O operation priority queue.
@@ -562,12 +562,12 @@ internal_function bool pio_sti_state_list_ensure(pio_driver_t *driver, size_t ca
     {   // resize the internal lists for maintaining stream-in state.
         size_t oldc = driver->StreamInCapacity;
         size_t newc = (oldc < 1024) ? (oldc * 2) : (oldc + 1024);
-        if (capacity > newc)  newc =  capacity;
+        if (capacity > newc)  newc  =  capacity;
 
         // re-allocate the existing buffers with the larger capacity.
-        pio_sti_priority_t   *np   = (pio_sti_priority_t*)realloc(driver->StreamInPriority, newc * sizeof(pio_sti_priority_t));
-        pio_sti_state_t      *ns   = (pio_sti_state_t   *)realloc(driver->StreamInState   , newc * sizeof(pio_sti_state_t));
-        uintptr_t            *ni   = (uintptr_t         *)realloc(driver->StreamInId      , newc * sizeof(uintptr_t));
+        pio_sti_priority_t   *np    =(pio_sti_priority_t*)realloc(driver->StreamInPriority, newc * sizeof(pio_sti_priority_t));
+        pio_sti_state_t      *ns    =(pio_sti_state_t   *)realloc(driver->StreamInState   , newc * sizeof(pio_sti_state_t));
+        uintptr_t            *ni    =(uintptr_t         *)realloc(driver->StreamInId      , newc * sizeof(uintptr_t));
         if (np != NULL) driver->StreamInPriority = np;
         if (ns != NULL) driver->StreamInState    = ns;
         if (ni != NULL) driver->StreamInId       = ni;
@@ -678,29 +678,26 @@ internal_function void pio_driver_main(pio_driver_t *driver)
     pio_sti_request_t  openrq;
     while (mpsc_fifo_u_consume(&driver->STIPendingQueue, openrq))
     {
-        size_t  list_index    = driver->StreamInCount;
-        if (pio_sti_state_list_ensure(driver, driver->StreamInCount + 1))
-        {
-            driver->StreamInId[list_index] = openrq.Identifier;
+        size_t  list_index = driver->StreamInCount;
+        pio_sti_state_list_ensure(driver, driver->StreamInCount + 1);
+        driver->StreamInId[list_index] = openrq.Identifier;
 
-            pio_sti_state_t &si = driver->StreamInState[list_index];
-            si.StatusFlags   = PIO_STREAM_IN_STATUS_NONE;
-            si.StreamFlags   = openrq.StreamFlags;
-            si.Fildes        = openrq.Fildes;
-            si.BaseOffset    = openrq.BaseOffset;
-            si.BaseSize      = openrq.BaseSize;
-            si.ReadOffset    = 0;
-            si.StreamDecoder = openrq.StreamDecoder;
+        pio_sti_state_t &si = driver->StreamInState[list_index];
+        si.StatusFlags   = PIO_STREAM_IN_STATUS_NONE;
+        si.StreamFlags   = openrq.StreamFlags;
+        si.Fildes        = openrq.Fildes;
+        si.BaseOffset    = openrq.BaseOffset;
+        si.BaseSize      = openrq.BaseSize;
+        si.ReadOffset    = 0;
+        si.StreamDecoder = openrq.StreamDecoder;
 
-            pio_sti_priority_t &sp = driver->StreamInPriority[list_index];
-            sp.BasePriority  = openrq.BasePriority;
-            sp.DataInterval  = openrq.IntervalNs;
-            sp.NextDeadline  = tick_time + openrq.IntervalNs;
-            sp.StreamOrder   = driver->StreamIndex++;
+        pio_sti_priority_t &sp = driver->StreamInPriority[list_index];
+        sp.BasePriority  = openrq.BasePriority;
+        sp.DataInterval  = openrq.IntervalNs;
+        sp.NextDeadline  = tick_time + openrq.IntervalNs;
+        sp.StreamOrder   = driver->StreamIndex++;
 
-            driver->StreamInCount++;
-        }
-        else return; // memory allocation failed. try again later.
+        driver->StreamInCount++;
     }
 
     // update the overall priority value for the stream, and populate the priority queue.
@@ -747,16 +744,13 @@ internal_function void pio_driver_main(pio_driver_t *driver)
             int64_t  start_offset = si.ReadOffset;
             int64_t  final_offset = si.ReadOffset + data_amount;
             uint32_t status_flags = STREAM_DECODE_STATUS_NONE;
+            uint32_t close_flags  = AIO_CLOSE_FLAGS_NONE;
 
-            if (start_offset == 0)
-            {   // this read operation is the first for the stream.
-                status_flags |= STREAM_DECODE_STATUS_RESTART;
-            }
             if (final_offset  < file_size)
             {   // this read operation does not reach or exceed the end of the file.
-                data_actual   = 0;
                 si.ReadOffset = final_offset;
                 end_of_stream = false;
+                data_actual   = data_amount;
             }
             else
             {   // this read operation reaches the end of the file.
@@ -767,12 +761,15 @@ internal_function void pio_driver_main(pio_driver_t *driver)
                 end_of_stream = true;
                 if (si.StreamFlags  & PIO_STREAM_IN_FLAGS_LOAD)
                 {   // this is a load-once stream; mark it pending close.
-                    si.StatusFlags |= PIO_STREAM_IN_STATUS_CLOSE;
                     si.ReadOffset   = final_offset;
+                    si.StatusFlags |= PIO_STREAM_IN_STATUS_CLOSED;
+                    status_flags   |= STREAM_DECODE_STATUS_ENDOFSTREAM;
+                    close_flags    |= AIO_CLOSE_ON_COMPLETE;
                 }
                 else
                 {   // this is a controlled stream, so loop back to the beginning.
                     si.ReadOffset   = 0;
+                    status_flags   |= STREAM_DECODE_STATUS_RESTART;
                 }
             }
 
@@ -782,6 +779,7 @@ internal_function void pio_driver_main(pio_driver_t *driver)
             // is returned (which happens during the decoding process.)
             aio_request_t *aio_read = pio_aio_priority_queue_put(driver->AIODriverQueue, priority);
             aio_read->CommandType   = AIO_COMMAND_READ;
+            aio_read->CloseFlags    = close_flags;
             aio_read->Fildes        = si.Fildes;
             aio_read->DataAmount    = data_amount;
             aio_read->DataActual    = data_actual;
@@ -854,8 +852,27 @@ public_function void pio_driver_close(pio_driver_t *driver)
 /// @param request The stream-in request specifying information about the file.
 public_function void pio_driver_stream_in(pio_driver_t *driver, pio_sti_request_t const &request)
 {
+    aio_driver_t *aio = driver->AIO;
+
+    // associate the file handle to the I/O completion port.
+    // TODO(rlk): this is crappy...it should be handled by the
+    // VFS layer, but the VFS driver doesn't have a handle to 
+    // the AIO driver. should it happen at the VFS layer, or PIO?
+    if (CreateIoCompletionPort(request.Fildes, aio->AIOContext, 0, 0) != aio->AIOContext)
+    {   // the file handle could not be associated with the IOCP.
+        OutputDebugString(_T("ERROR: Unable to associate file handle with I/O completion port.\n"));
+    }
+
+    // immediately complete requests that execute synchronously; 
+    // don't post a completion port notification to the IOCP.
+    UCHAR flags = FILE_SKIP_COMPLETION_PORT_ON_SUCCESS;
+    SetFileCompletionNotificationModes(request.Fildes, flags);
+
+    // post the request to start the file streaming into memory.
+    // this request will be picked up in pio_driver_main().
     fifo_node_t<pio_sti_request_t> *n = fifo_allocator_get(&driver->STIPendingAlloc);
-    n->Item  =  request;
+    n->Item = request;
+    n->Item.StreamDecoder->addref();
     mpsc_fifo_u_produce(&driver->STIPendingQueue, n);
 }
 
