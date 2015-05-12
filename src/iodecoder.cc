@@ -271,13 +271,15 @@ void* stream_decoder_t::nextbuf(void)
         EncodedData       = NULL;
         EncodedDataOffset = 0;
         EncodedDataSize   = 0;
+        // release a single reference held by the producer.
+        this->release();
     }
 
     // if this buffer indicated that a stream restart is coming, reset state.
     if (StatusFlags &   STREAM_DECODE_STATUS_RESTART)
     {   // also clear the restart status so we don't reset multiple times.
         StatusFlags &= ~STREAM_DECODE_STATUS_RESTART;
-        reset();
+        this->reset();
         StatusFlags  =  STREAM_DECODE_STATUS_NONE;
     }
 

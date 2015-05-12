@@ -253,7 +253,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             while  (d1->ReadCursor != d1->FinalByte)
             {
                 char ch     = (char) *d1->ReadCursor++;
-                char buf[2] = {ch, 0};
+                char buf[2] = {ch,0};
                 OutputDebugStringA(buf);
             }
         }

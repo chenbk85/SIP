@@ -162,6 +162,27 @@ typedef DWORD (*vfs_support_fn)(vfs_mount_t*, int32_t, int32_t);
 /// @param The mount point being unmounted.
 typedef void  (*vfs_unmount_fn)(vfs_mount_t*);
 
+/// TODO(rlk): should move stream_decoder_t into this file? probably not.
+struct stream_control_t
+{
+    void pause(void);               /// Pause reading of the stream, but don't close the file.
+    void resume(void);              /// Resume reading of a paused stream.
+    void rewind(void);              /// Resume reading the stream from the beginning.
+    void seek(int64_t offset);      /// Seek to a specified location and resume streaming.
+    void stop(void);                /// Stop streaming the file and close it.
+
+    uintptr_t         SID;          /// The application-defined stream identifier.
+    pio_driver_t     *PIO;          /// The prioritized I/O driver interface.
+    stream_decoder_t *Decoder;      /// The decoder used to read stream data.
+    int64_t           EncodedSize;  /// The number of bytes of data as stored.
+    int64_t           DecodedSize;  /// The number of bytes of data when decoded, if known.
+};
+
+struct stream_writer_t
+{
+    uintptr_t         SID;          /// The application-defined stream identifier.
+};
+
 /// @summary Defines the information about an open file. This information is 
 /// returned by the mount point and returned to the VFS driver, which may then 
 /// pass the information on to the prioritized I/O driver to perform I/O ops.
@@ -258,10 +279,7 @@ internal_function inline bool vfs_mount_point_match_start(char const *mount, cha
     return _strnicmp(mount, path, len - 1) == 0;
 }
 
-/// @summary Helper function to convert a UTF-8 encoded string to the system native WCHAR.
-/// Free the returned buffer using the standard C library free() call. This function is 
-/// defined in the VFS because the functionality is needed everywhere. Non-file related 
-/// parts of the code should just stick to using UTF-8 where strings are required.
+/// @summary Helper function to convert a UTF-8 encoded string to the system native WCHAR. Free the returned buffer using the standard C library free() call. This function is defined in the VFS because the functionality is needed everywhere. Non-file related parts of the code should just stick to using UTF-8 where strings are required.
 /// @param str The NULL-terminated UTF-8 string to convert.
 /// @param size_chars On return, stores the length of the string in characters, not including NULL-terminator.
 /// @param size_bytes On return, stores the length of the string in bytes, including the NULL-terminator.
@@ -456,8 +474,7 @@ internal_function void vfs_mounts_remove(vfs_mounts_t &plist, uintptr_t mount_id
 /// @summary Retrieve a system known folder path using SHGetKnownFolderPath.
 /// @param buf The buffer to which the path will be copied.
 /// @param buf_bytes The maximum number of bytes that can be written to buf.
-/// @param bytes_needed On return, this location stores the number of bytes 
-/// required to store the path string, including the zero terminator.
+/// @param bytes_needed On return, this location stores the number of bytes required to store the path string, including the zero terminator.
 /// @param folder_id The Windows Shell known folder identifier.
 /// @return true if the requested path was retrieved.
 internal_function bool vfs_shell_folder_path(WCHAR *buf, size_t buf_bytes, size_t &bytes_needed, REFKNOWNFOLDERID folder_id)
@@ -486,8 +503,7 @@ internal_function bool vfs_shell_folder_path(WCHAR *buf, size_t buf_bytes, size_
 /// @summary Retrieve a special system folder path.
 /// @param buf The buffer to which the path will be copied.
 /// @param buf_bytes The maximum number of bytes that can be written to buf.
-/// @param bytes_needed On return, this location stores the number of bytes 
-/// required to store the path string, including the zero terminator.
+/// @param bytes_needed On return, this location stores the number of bytes required to store the path string, including the zero terminator.
 /// @param folder_id One of vfs_known_folder_e identifying the folder.
 /// @return true if the requested path was retrieved.
 internal_function bool vfs_known_path(WCHAR *buf, size_t buf_bytes, size_t &bytes_needed, int folder_id)
@@ -581,22 +597,14 @@ internal_function size_t vfs_physical_sector_size(HANDLE file)
     query.QueryType  = PropertyStandardQuery;
     query.PropertyId = StorageAccessAlignmentProperty;
     DWORD bytes = 0;
-    BOOL result = DeviceIoControl(
-        file,
-        IOCTL_STORAGE_QUERY_PROPERTY,
-        &query, sizeof(query),
-        &desc , sizeof(desc),
-        &bytes, NULL);
+    BOOL result = DeviceIoControl(file, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), &desc , sizeof(desc), &bytes, NULL);
     return result ? desc.BytesPerPhysicalSector : DefaultPhysicalSectorSize;
 }
 
 /// @summary Factory function to instantiate a stream decoder for a given usage.
 /// @param usage One of vfs_file_usage_e specifying the indended use of the file.
-/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
-/// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
-/// @return A stream decoder instance, or NULL if the intended usage does not 
-/// require or support stream decoding. The reference count of the stream decoder 
-/// is zero; it is up to higher-level code to manage the reference count.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @return A stream decoder instance, or NULL if the intended usage does not require or support stream decoding. The reference count of the stream decoder is zero; it is up to higher-level code to manage the reference count.
 internal_function stream_decoder_t* vfs_create_decoder(int32_t usage, int32_t decoder_hint)
 {
     if (usage != VFS_USAGE_STREAM_IN      && 
@@ -644,21 +652,23 @@ internal_function WCHAR* vfs_make_system_path_fs(vfs_mount_fs_t *fs, char const 
         free(pathbuf);
         return NULL;
     }
+    // normalize the directory separator characters to the system default.
+    // on Windows, this is not strictly necessary, but on other OS's it is.
+    for (size_t i = offset + 1, n = offset + nchars; i < n; ++i)
+    {
+        if (pathbuf[i] == L'/')
+            pathbuf[i]  = L'\\';
+    }
     return pathbuf;
 }
 
-/// @summary Synchronously opens a file for access. Information necessary to 
-/// access the file is written to the vfs_file_t structure. This function is
-/// called for each mount point, in priority order, until one either returns 
-/// ERROR_SUCCESS or an error code other than ERROR_NOT_SUPPORTED.
+/// @summary Synchronously opens a file for access. Information necessary to access the file is written to the vfs_file_t structure. This function is called for each mount point, in priority order, until one either returns ERROR_SUCCESS or an error code other than ERROR_NOT_SUPPORTED.
 /// @param m The mount point performing the file open.
 /// @param path The path of the file to open, relative to the mount point root.
 /// @param usage One of vfs_file_usage_e specifying the intended use of the file.
 /// @param file_hints A combination of vfs_file_hint_e used to control how the file is opened.
-/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
-/// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
-/// @param file On return, this structure should be populated with the data necessary
-/// to access the file. If the file cannot be opened, set the OSError field.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @param file On return, this structure should be populated with the data necessary to access the file. If the file cannot be opened, set the OSError field.
 /// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
 internal_function DWORD vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
 {
@@ -760,9 +770,7 @@ error_cleanup:
     return result;
 }
 
-/// @summary Atomically and synchronously writes a file. If the file exists, its
-/// contents are overwritten; otherwise a new file is created. This operation is
-/// generally not supported by archive-based mount points.
+/// @summary Atomically and synchronously writes a file. If the file exists, its contents are overwritten; otherwise a new file is created. This operation is generally not supported by archive-based mount points.
 /// @param m The mount point performing the file save.
 /// @param path The path of the file to save, relative to the mount point root.
 /// @param data The buffer containing the data to write to the file.
@@ -922,9 +930,7 @@ internal_function DWORD vfs_support_fs(vfs_mount_t *m, int32_t usage, int32_t de
     return ERROR_SUCCESS;
 }
 
-/// @summary Unmount the mount point. This function should close any open file 
-/// handles and free any resources allocated for the mount point, including the
-/// memory allocated for the vfs_mount_t::State field.
+/// @summary Unmount the mount point. This function should close any open file handles and free any resources allocated for the mount point, including the memory allocated for the vfs_mount_t::State field.
 /// @param m The mount point being unmounted.
 internal_function void vfs_unmount_fs(vfs_mount_t *m)
 {
@@ -941,8 +947,7 @@ internal_function void vfs_unmount_fs(vfs_mount_t *m)
 
 /// @summary Initialize a filesystem-based mountpoint.
 /// @param m The mountpoint instance to initialize.
-/// @param local_path The NULL-terminated string specifying the local path that 
-/// functions as the root of the mount point. This directory must exist.
+/// @param local_path The NULL-terminated string specifying the local path that functions as the root of the mount point. This directory must exist.
 /// @return true if the mount point was initialized successfully.
 internal_function bool vfs_init_mount_fs(vfs_mount_t *m, WCHAR const *local_path)
 {
@@ -981,9 +986,7 @@ internal_function bool vfs_init_mount_fs(vfs_mount_t *m, WCHAR const *local_path
 /// @param source_attr The attributes of the source path, as returned by GetFileAttributes().
 /// @param mount_path The NULL-terminated UTF-8 string specifying the mount point root exposed externally.
 /// @param priority The priority of the mount point. Higher numeric values indicate higher priority.
-/// @param mount_id An application-defined unique identifier for the mount point. This is necessary
-/// if the application later wants to remove this specific mount point, but not any of the others 
-/// that are mounted with the same mount_path.
+/// @param mount_id An application-defined unique identifier for the mount point. This is necessary if the application later wants to remove this specific mount point, but not any of the others that are mounted with the same mount_path.
 /// @return true if the mount point was successfully installed.
 internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide, DWORD source_attr, char const *mount_path, uint32_t priority, uintptr_t mount_id)
 {   
@@ -1053,21 +1056,14 @@ internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide,
     }
 }
 
-/// @summary Opens a file for access. Information necessary to access the file 
-/// is written to the vfs_file_t structure. This function tests each mount point
-/// matching the path, in priority order, until one is successful at opening the 
-/// file or all matching mount points have been tested.
+/// @summary Opens a file for access. Information necessary to access the file is written to the vfs_file_t structure. This function tests each mount point matching the path, in priority order, until one is successful at opening the file or all matching mount points have been tested.
 /// @param driver The virtual file system driver to query.
 /// @param path The absolute virtual path of the file to open.
 /// @param usage One of vfs_file_usage_e specifying the intended use of the file.
 /// @param file_hints A combination of vfs_file_hint_e.
-/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
-/// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
-/// @param file On return, this structure should be populated with the data necessary
-/// to access the file. If the file cannot be opened, check the OSError field.
-/// @param relative_path On return, this pointer is updated to point into path, 
-/// at the start of the portion of the path representing the path to the file, 
-/// relative to the mount point root path.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @param file On return, this structure should be populated with the data necessary to access the file. If the file cannot be opened, check the OSError field.
+/// @param relative_path On return, this pointer is updated to point into path, at the start of the portion of the path representing the path to the file, relative to the mount point root path.
 /// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED, or an OS error code.
 internal_function DWORD vfs_resolve_and_open_file(vfs_driver_t *driver, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file, char const **relative_path)
 {   // iterate over the mount points, which are stored in priority order.
@@ -1084,7 +1080,7 @@ internal_function DWORD vfs_resolve_and_open_file(vfs_driver_t *driver, char con
             {   // the file was successfully opened, so we're done.
                 if (relative_path != NULL)
                 {
-                    *relative_path = path + m->RootLen  + 1;
+                    *relative_path =  path + m->RootLen + 1;
                 }
                 ReleaseSRWLockShared(&driver->MountsLock);
                 return ERROR_SUCCESS;
@@ -1111,18 +1107,12 @@ internal_function DWORD vfs_resolve_and_open_file(vfs_driver_t *driver, char con
     return result;
 }
 
-/// @summary Atomically and synchronously writes a file. If the file exists, its
-/// contents are overwritten; otherwise a new file is created. This operation is
-/// generally not supported by archive-based mount points. This function tests 
-/// each mount point matching the path, in priority order, until one is successful
-/// at saving the file or until all matching mount points have been tested.
+/// @summary Atomically and synchronously writes a file. If the file exists, its contents are overwritten; otherwise a new file is created. This operation is generally not supported by archive-based mount points. This function tests each mount point matching the path, in priority order, until one is successful at saving the file or until all matching mount points have been tested.
 /// @param driver The virtual file system driver.
 /// @param path The virtual path of the file to save.
 /// @param buffer The buffer containing the data to write to the file.
 /// @param amount The number of bytes to copy from the buffer into the file.
-/// @param relative_path On return, this pointer is updated to point into path, 
-/// at the start of the portion of the path representing the path to the file, 
-/// relative to the mount point root path.
+/// @param relative_path On return, this pointer is updated to point into path, at the start of the portion of the path representing the path to the file, relative to the mount point root path.
 /// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
 internal_function DWORD vfs_resolve_and_save_file(vfs_driver_t *driver, char const *path, void const *buffer, int64_t amount, char const **relative_path)
 {   // iterate over the mount points, which are stored in priority order.
@@ -1139,7 +1129,7 @@ internal_function DWORD vfs_resolve_and_save_file(vfs_driver_t *driver, char con
             {   // the file was successfully opened, so we're done.
                 if (relative_path != NULL)
                 {
-                    *relative_path = path + m->RootLen  + 1;
+                    *relative_path =  path + m->RootLen + 1;
                 }
                 ReleaseSRWLockShared(&driver->MountsLock);
                 return ERROR_SUCCESS;
@@ -1198,13 +1188,9 @@ public_function void vfs_driver_close(vfs_driver_t *driver)
 /// @summary Creates a mount point backed by a well-known directory.
 /// @param driver The virtual file system driver.
 /// @param folder_id One of vfs_known_path_e specifying the well-known directory.
-/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the 
-/// mount point as exposed to the application code. Multiple mount points may share
-/// the same mount_path, but have different source_path, mount_id and priority values.
-/// @param priority The priority assigned to this specific mount point, with higher 
-/// numeric values corresponding to higher priority values.
-/// @param mount_id A unique application-defined identifier for the mount point. This
-/// identifier can be used to reference the specific mount point.
+/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the mount point as exposed to the application code. Multiple mount points may share the same mount_path, but have different source_path, mount_id and priority values.
+/// @param priority The priority assigned to this specific mount point, with higher numeric values corresponding to higher priority values.
+/// @param mount_id A unique application-defined identifier for the mount point. This identifier can be used to reference the specific mount point.
 /// @return true if the mount point was successfully created.
 public_function bool vfs_mount(vfs_driver_t *driver, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id)
 {   // retrieve the path specified by folder_id for use as the source path.
@@ -1225,15 +1211,10 @@ public_function bool vfs_mount(vfs_driver_t *driver, int folder_id, char const *
 
 /// @summary Creates a mount point backed by the specified archive file or directory.
 /// @param driver The virtual file system driver.
-/// @param source_path The NULL-terminated UTF-8 string specifying the path of the 
-/// file or directory that represents the root of the mount point.
-/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the 
-/// mount point as exposed to the application code. Multiple mount points may share
-/// the same mount_path, but have different source_path, mount_id and priority values.
-/// @param priority The priority assigned to this specific mount point, with higher 
-/// numeric values corresponding to higher priority values.
-/// @param mount_id A unique application-defined identifier for the mount point. This
-/// identifier can be used to reference the specific mount point.
+/// @param source_path The NULL-terminated UTF-8 string specifying the path of the file or directory that represents the root of the mount point.
+/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the mount point as exposed to the application code. Multiple mount points may share the same mount_path, but have different source_path, mount_id and priority values.
+/// @param priority The priority assigned to this specific mount point, with higher numeric values corresponding to higher priority values.
+/// @param mount_id A unique application-defined identifier for the mount point. This identifier can be used to reference the specific mount point.
 /// @return true if the mount point was successfully created.
 public_function bool vfs_mount(vfs_driver_t *driver, char const *source_path, char const *mount_path, uint32_t priority, uintptr_t mount_id)
 {   // convert the source path to a wide character string once during mounting.
@@ -1300,10 +1281,7 @@ public_function void vfs_unmount_all(vfs_driver_t *driver, char const *mount_pat
     ReleaseSRWLockExclusive(&driver->MountsLock);
 }
 
-/// @summary Saves a file to disk. If the file exists, it is overwritten. This
-/// operation is performed entirely synchronously and will block the calling
-/// thread until the file is written. The file is guaranteed to have been either
-/// written successfully, or not at all.
+/// @summary Saves a file to disk. If the file exists, it is overwritten. This operation is performed entirely synchronously and will block the calling thread until the file is written. The file is guaranteed to have been either written successfully, or not at all.
 /// @param driver The virtual file system driver to use for path resolution.
 /// @param path The virtual path of the file to write.
 /// @param data The contents of the file.
@@ -1314,17 +1292,11 @@ public_function bool vfs_put_file(vfs_driver_t *driver, char const *path, void c
     return SUCCEEDED(vfs_resolve_and_save_file(driver, path, data, size, NULL));
 }
 
-/// @summary Load the entire contents of a file from disk. This operation is 
-/// performed entirely synchronously and will block the calling thread until 
-/// the entire file has been read. This function cannot read files larger 
-/// than 4GB. Large files must use the streaming interface.
+/// @summary Load the entire contents of a file from disk. This operation is performed entirely synchronously and will block the calling thread until the entire file has been read. This function cannot read files larger than 4GB. Large files must use the streaming interface.
 /// @param driver The virtual file system driver to use for path resolution.
 /// @param path The virtual path of the file to load.
-/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder 
-/// type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
-/// @return The stream decoder that can be used to access the file data. When 
-/// finished accessing the file data, call the stream_decoder_t::release() method
-/// to delete the stream decoder instance.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @return The stream decoder that can be used to access the file data. When finished accessing the file data, call the stream_decoder_t::release() method to delete the stream decoder instance.
 public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const *path, int32_t decoder_hint)
 {   // open the file and retrieve relevant information.
     vfs_file_t  file_info;
@@ -1424,6 +1396,61 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
     d->addref(); vfs_close_file(&file_info);
     return d;
 }
+
+/// @summary Asynchronously loads a file by streaming it into memory as quickly as possible.
+/// @param driver The virtual file system driver used to resolve the file path.
+/// @param path A NULL-terminated UTF-8 string specifying the virtual file path.
+/// @param id An application-defined identifier for the stream.
+/// @param priority The priority value for the load, with higher numeric values representing higher priority.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @param control If non-NULL, on return, this structure is initialized with information necessary to control streaming of the file.
+/// @return The stream decoder that can be used to access the file data. When finished accessing the file data, call the stream_decoder_t::release() method to delete the stream decoder instance.
+public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t decoder_hint, stream_control_t *control)
+{   // open the file and retrieve relevant information.
+    vfs_file_t  file_info;
+    char const *relpath = NULL;
+    int32_t     usage       = VFS_USAGE_STREAM_IN_LOAD;
+    uint32_t    file_hints  = VFS_FILE_HINT_UNBUFFERED | VFS_FILE_HINT_ASYNCHRONOUS;
+    DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
+    if (FAILED (open_result)) return NULL;
+
+    // the decoder allocates buffer space from the I/O system pool.
+    file_info.Decoder->BufferAllocator = &driver->StreamBuffer;
+    
+    // initialize the stream control structure for the caller.
+    if (control != NULL)
+    {   // the stream control interface holds a reference to the decoder.
+        control->SID         = id;
+        control->PIO         = driver->PIO;
+        control->EncodedSize = file_info.BaseSize;
+        control->DecodedSize = file_info.FileSize;
+        control->Decoder     = file_info.Decoder;
+        control->Decoder->addref();
+    }
+
+    // push the stream-in request down to the PIO driver.
+    pio_sti_request_t iocmd;
+    iocmd.Identifier        = id;
+    iocmd.StreamDecoder     = file_info.Decoder;
+    iocmd.Fildes            = file_info.Fildes;
+    iocmd.SectorSize        = file_info.SectorSize;
+    iocmd.BaseOffset        = file_info.BaseOffset;
+    iocmd.BaseSize          = file_info.BaseSize;
+    iocmd.IntervalNs        = 0;
+    iocmd.StreamFlags       = PIO_STREAM_IN_FLAGS_LOAD;
+    iocmd.BasePriority      = priority;
+    if (file_info.FileFlags & VFS_FILE_FLAG_EXPLICIT_CLOSE) iocmd.StreamFlags |= PIO_STREAM_IN_FLAGS_CLOSE_FD;
+    pio_driver_stream_in(driver->PIO, iocmd);
+    
+    // add a decoder reference for the caller:
+    file_info.Decoder->addref();
+    return file_info.Decoder;
+}
+
+/*public_function stream_control_t* vfs_stream_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t decoder_hint, size_t chunk_size, uint64_t interval_ns)
+{
+    // this function is responsible for setting up the stream decoder's buffer allocator.
+}*/
 
 /*public_function stream_control_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, int32_t decoder_hint, int64_t &file_size)
 {
