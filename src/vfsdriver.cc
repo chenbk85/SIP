@@ -1141,13 +1141,12 @@ internal_function DWORD vfs_resolve_and_save_file(vfs_driver_t *driver, char con
     return result;
 }
 
-/// @summary Safely close a file handle.
-/// @param file_info Information about an open file, as returned by vfs_mount_t::open().
+/// @summary Closes the underlying file handle and releases the VFS driver's 
+/// reference to the underlying stream decoder. For internal use only.
+/// @param file_info Internal information relating to the file to close.
 internal_function void vfs_close_file(vfs_file_t *file_info)
-{   // only close the file handle if it should be closed.
-    // files located within archives typically do not set this flag.
-    if (file_info->Fildes != INVALID_HANDLE_VALUE && 
-        file_info->FileFlags & VFS_FILE_FLAG_EXPLICIT_CLOSE)
+{
+    if (file_info->Fildes != INVALID_HANDLE_VALUE)
     {
         CloseHandle(file_info->Fildes);
     }
@@ -1390,9 +1389,10 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
     result->Item.StatusFlags=  STREAM_DECODE_STATUS_ENDOFSTREAM;
     result->Item.Priority   =  0;
     spsc_fifo_u_produce(&d->AIOResultQueue, result);
+    d->addref(); // release()'d on the decoder thread.
 
-    // add a reference for the caller (ref count = 2)
-    // release the reference for the VFS driver (ref count = 1)
+    // add a reference for the caller (ref count = 4)
+    // release the reference for the VFS driver (ref count = 3)
     d->addref(); vfs_close_file(&file_info);
     return d;
 }
@@ -1408,7 +1408,7 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
 public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t decoder_hint, stream_control_t *control)
 {   // open the file and retrieve relevant information.
     vfs_file_t  file_info;
-    char const *relpath = NULL;
+    char const *relpath     = NULL;
     int32_t     usage       = VFS_USAGE_STREAM_IN_LOAD;
     uint32_t    file_hints  = VFS_FILE_HINT_UNBUFFERED | VFS_FILE_HINT_ASYNCHRONOUS;
     DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
@@ -1425,7 +1425,7 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
         control->EncodedSize = file_info.BaseSize;
         control->DecodedSize = file_info.FileSize;
         control->Decoder     = file_info.Decoder;
-        control->Decoder->addref();
+        control->Decoder->addref(); // =1
     }
 
     // push the stream-in request down to the PIO driver.
@@ -1439,10 +1439,10 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
     iocmd.IntervalNs   = 0;
     iocmd.StreamFlags  = PIO_STREAM_IN_FLAGS_LOAD;
     iocmd.BasePriority = priority;
-    pio_driver_stream_in(driver->PIO, iocmd);
+    pio_driver_stream_in(driver->PIO, iocmd); // =1 or =2
     
     // add a decoder reference for the caller:
-    file_info.Decoder->addref();
+    file_info.Decoder->addref(); // =2 or =3
     return file_info.Decoder;
 }
 
