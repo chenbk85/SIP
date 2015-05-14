@@ -525,6 +525,22 @@ public_function void aio_driver_wait(aio_driver_t *driver, DWORD timeout)
     aio_driver_main(driver, timeout);
 }
 
+/// @summary Prepare a file handle to perform asynchronous I/O operations.
+/// @param driver The asynchronous I/O driver state.
+/// @param fd The handle of the file to prepare for asynchronous I/O.
+/// @return ERROR_SUCCESS, or a system error code.
+public_function DWORD aio_driver_prepare(aio_driver_t *driver, HANDLE fd)
+{   // associate the file handle to the I/O completion port.
+    if (CreateIoCompletionPort(fd, driver->AIOContext, 0, 0) != driver->AIOContext)
+    {   // the file handle could not be associated with the IOCP.
+        return GetLastError();
+    }
+    // immediately complete requests that execute synchronously;
+    // don't post a completion port notification to the IOCP.
+    SetFileCompletionNotificationModes(fd, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
+    return ERROR_SUCCESS;
+}
+
 /// @summary Submits a single command to the AIO driver. The command will not
 /// be processed any sooner than the next update tick. This function can only
 /// be called safely from a single thread (typically the PIO thread.)
