@@ -33,7 +33,7 @@ local_persist size_t const STREAM_BUFFER_SIZE    = (16  * 1024 * 1024); // 16MB
 
 /// @summary Define the size of a single chunk used for streaming data into 
 /// memory from disk. Streaming data out to disk uses a different chunk size.
-local_persist size_t const STREAM_IN_CHUNK_SIZE  = (256 * 1024);        // 256KB
+local_persist size_t const STREAM_IN_CHUNK_SIZE  = (128 * 1024);        // 256KB
 
 /// @summary Define the size of a single chunk used for streaming data out 
 /// from memory to disk. This must be a multiple of the system page size.
@@ -162,9 +162,13 @@ typedef DWORD (*vfs_support_fn)(vfs_mount_t*, int32_t, int32_t);
 /// @param The mount point being unmounted.
 typedef void  (*vfs_unmount_fn)(vfs_mount_t*);
 
-/// TODO(rlk): should move stream_decoder_t into this file? probably not.
+/// @summary Provides an interface to control playback of a stream. The stream
+/// controller holds a reference to the associated stream decoder.
 struct stream_control_t
 {
+    stream_control_t(void);         /// Construct unattached stream controller.
+    ~stream_control_t(void);        /// Release decoder reference.
+
     void pause(void);               /// Pause reading of the stream, but don't close the file.
     void resume(void);              /// Resume reading of a paused stream.
     void rewind(void);              /// Resume reading the stream from the beginning.
@@ -246,6 +250,7 @@ struct vfs_mounts_t
 /// @summary Maintains all of the state for a virtual file system driver.
 struct vfs_driver_t
 {   typedef io_buffer_allocator_t     iobuf_alloc_t;
+    aio_driver_t  *AIO;           /// The asynchronous I/O driver interface.
     pio_driver_t  *PIO;           /// The prioritized I/O driver interface.
     vfs_mounts_t   Mounts;        /// The set of active mount points.
     SRWLOCK        MountsLock;    /// The slim reader/writer lock protecting the list of mount points.
@@ -259,6 +264,63 @@ struct vfs_driver_t
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
+/// @summary Constructs an unattached stream control interface.
+stream_control_t::stream_control_t(void)
+    : 
+    SID(0), 
+    PIO(NULL), 
+    Decoder(NULL), 
+    EncodedSize(0), 
+    DecodedSize(0)
+{
+    /* empty */
+}
+
+/// @summary Releases references held by the stream control interface.
+stream_control_t::~stream_control_t(void)
+{
+    if (Decoder != NULL)
+    {   // release the reference held by the control interface.
+        Decoder->release();
+    }
+    SID = 0;
+    PIO = NULL;
+    Decoder = NULL;
+}
+
+/// @summary Pauses reading of the stream.
+void stream_control_t::pause(void)
+{
+    pio_driver_pause_stream(PIO, SID);
+}
+
+/// @summary Resumes reading of the stream from the pause position.
+void stream_control_t::resume(void)
+{
+    pio_driver_resume_stream(PIO, SID);
+}
+
+/// @summary Resumes reading of the stream from the beginning.
+void stream_control_t::rewind(void)
+{
+    pio_driver_resume_stream(PIO, SID);
+}
+
+/// @summary Resumes reading of the stream from the specified byte offset.
+/// @param offset The absolute byte offset within the stream. The offset 
+/// will be rounded down to the nearest even multiple of the physical 
+/// disk sector size.
+void stream_control_t::seek(int64_t offset)
+{
+    pio_driver_seek_stream(PIO, SID, offset);
+}
+
+/// @summary Stops reading the stream and closes the underlying file handle.
+void stream_control_t::stop(void)
+{
+    pio_driver_stop_stream(PIO, SID);
+}
+
 /// @summary Compare two mount point roots to determine if they match.
 /// @param s1 A NULL-terminated UTF-8 string specifying the mount point identifier to match, with trailing slash '/'.
 /// @param s2 A NULL-terminated UTF-8 string specifying the mount point identifier to check, with trailing slash '/'.
@@ -1163,13 +1225,15 @@ internal_function void vfs_close_file(vfs_file_t *file_info)
 ////////////////////////*/
 /// @summary Initializes a new virtual file system driver.
 /// @param driver The virtual file system driver to initialize.
+/// @param aio The asynchronous I/O driver to use for I/O operations.
 /// @param pio The prioritized I/O driver to use for I/O operations.
 /// @return ERROR_SUCCESS on success, or an error code returned by GetLastError() on failure.
-public_function DWORD vfs_driver_open(vfs_driver_t *driver, pio_driver_t *pio)
+public_function DWORD vfs_driver_open(vfs_driver_t *driver, aio_driver_t *aio, pio_driver_t *pio)
 {
+    driver->AIO = aio;
     driver->PIO = pio;
     InitializeSRWLock(&driver->MountsLock);
-    vfs_mounts_create(driver->Mounts, 128);
+    vfs_mounts_create( driver->Mounts, 128);
     driver->StreamBuffer.reserve(STREAM_BUFFER_SIZE, STREAM_IN_CHUNK_SIZE);
     return ERROR_SUCCESS;
 }
@@ -1182,6 +1246,7 @@ public_function void vfs_driver_close(vfs_driver_t *driver)
     driver->StreamBuffer.release();
     vfs_mounts_delete(driver->Mounts);
     driver->PIO = NULL;
+    driver->AIO = NULL;
 }
 
 /// @summary Creates a mount point backed by a well-known directory.
@@ -1413,6 +1478,12 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
     uint32_t    file_hints  = VFS_FILE_HINT_UNBUFFERED | VFS_FILE_HINT_ASYNCHRONOUS;
     DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
     if (FAILED (open_result)) return NULL;
+    DWORD       asio_result = aio_driver_prepare(driver->AIO, file_info.Fildes);
+    if (FAILED (asio_result))
+    {   // could not associate the file handle with the I/O completion port.
+        vfs_close_file(&file_info);
+        return NULL;
+    }
 
     // the decoder allocates buffer space from the I/O system pool.
     file_info.Decoder->BufferAllocator = &driver->StreamBuffer;
@@ -1449,38 +1520,4 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
 /*public_function stream_control_t* vfs_stream_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t decoder_hint, size_t chunk_size, uint64_t interval_ns)
 {
     // this function is responsible for setting up the stream decoder's buffer allocator.
-}*/
-
-/*public_function stream_control_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, int32_t decoder_hint, int64_t &file_size)
-{
-    char const *relative_path = NULL;
-    vfs_file_t  file_info;
-    int         open_result   = vfs_resolve_and_open_file(
-        driver, path, 
-        VFS_USAGE_STREAM_IN_LOAD, 
-        VFS_FILE_HINT_UNBUFFERED, 
-        decoder_hint, 
-        &file_info, &relative_path);
-
-    if (open_result == VFS_OPEN_RESULT_SUCCESS)
-    {   // file loads go through the VFS driver buffer.
-        file_info.Decoder->BufferAllocator = &driver->StreamBuffer;
-        stream_control_t *control = new stream_control_t();
-        control->SID = id;
-        control->PIO = driver->PIO;
-        control->Decoder = file_info.Decoder;
-        control->EncodedSize = file_info.BaseSize;
-        control->DecodedSize = file_info.FileSize;
-        // TODO(rlk): push a request to the PIO driver.
-        return control;
-    }
-    else return NULL; // TODO(rlk): Figure out error reporting.
-    // TODO(rlk): resolve path to a VFS mount point.
-    // - mount has a fn ptr bool resolve_type(path, out_type).
-    // TODO(rlk): create the appropriate type of decoder.
-    // - for now, always just the base stream_decoder_t.
-    // - set the buffer allocator to use (&driver->StreamBuffer).
-    // - looking like the VFS driver should own the global allocator and app can configure it.
-    // TODO(rlk): this should be a stream-in once type of load.
-    // TODO(rlk): in addition to returning a stream_decoder_t, also return a stream_control_t.
 }*/

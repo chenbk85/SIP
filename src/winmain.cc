@@ -227,15 +227,22 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     trace_thread_id("main");
     win32_runtime_elevate();
 
+    aio_driver_t     aio;
+    aio_driver_open(&aio);
+
+    pio_driver_t     pio;
+    pio_driver_open(&pio, &aio);
+
     vfs_driver_t     vfs;
-    vfs_driver_open(&vfs, NULL);
+    vfs_driver_open(&vfs, &aio, &pio);
     vfs_mount(&vfs, VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
     vfs_mount(&vfs, VFS_KNOWN_PATH_PUBLIC_DOCUMENTS, "/doc", 0, 1);
     vfs_put_file(&vfs, "/doc/test_save.txt", "This is a test (user)...\n", 25);
     vfs_unmount(&vfs, 0); // remove user documents mount
     vfs_put_file(&vfs, "/doc/test_save.txt", "This is a test (public)...\n", 27);
     vfs_mount(&vfs, VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
-    stream_decoder_t *d1 = vfs_get_file(&vfs, "/doc/test_save.txt", VFS_DECODER_HINT_USE_DEFAULT);
+    uint64_t stns = pio_driver_nanotime(&pio);
+    stream_decoder_t *d1 = vfs_load_file(&vfs, "/doc/video.mp4", 0, 0, VFS_DECODER_HINT_USE_DEFAULT, NULL);
     if (d1 != NULL)
     {   // here's how you read data from the stream.
         while (!d1->atend())
@@ -245,6 +252,8 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             case STREAM_REFILL_RESULT_START:
                 break; // begin reading decoded data.
             case STREAM_REFILL_RESULT_YIELD:
+                pio_driver_poll(&pio);
+                aio_driver_poll(&aio);
                 continue; // try and refill again later.
             case STREAM_REFILL_RESULT_ERROR:
                 break; // check d1->ErrorCode.
@@ -253,12 +262,20 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             while  (d1->ReadCursor != d1->FinalByte)
             {
                 char ch     = (char) *d1->ReadCursor++;
-                char buf[2] = {ch,0};
-                OutputDebugStringA(buf);
+                //char buf[2] = {ch,0};
+                //OutputDebugStringA(buf);
             }
+            pio_driver_poll(&pio);
+            aio_driver_poll(&aio);
         }
+        d1->release();
     }
+    uint64_t etns = pio_driver_nanotime(&pio);
+    uint64_t dtns = etns - stns;
+    double   dts  = (double) dtns / (double) 1000000000ULL;
     vfs_driver_close(&vfs);
+    pio_driver_close(&pio);
+    aio_driver_close(&aio);
 
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
