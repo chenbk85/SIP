@@ -124,6 +124,65 @@ enum vfs_decocder_hint_e : int32_t
     // ...
 };
 
+/// @summary Defines the recognized types of entries in a tarball. 
+/// Vendor extensions may additionally have a type 'A'-'Z'.
+enum tar_entry_type_e : char
+{
+    TAR_ENTRY_TYPE_FILE      = 0, /// The entry represents a regular file.
+    TAR_ENTRY_TYPE_HARDLINK  = 1, /// The entry represents a hard link.
+    TAR_ENTRY_TYPE_SYMLINK   = 2, /// The entry represents a symbolic link.
+    TAR_ENTRY_TYPE_CHARACTER = 3, /// The entry represents a character device file.
+    TAR_ENTRY_TYPE_BLOCK     = 4, /// The entry represents a block device file.
+    TAR_ENTRY_TYPE_DIRECTORY = 5, /// The entry represents a directory.
+    TAR_ENTRY_TYPE_FIFO      = 6, /// The entry represents a named pipe file.
+    TAR_ENTRY_TYPE_CONTIGUOUS= 7, /// The entry represents a contiguous file.
+    TAR_ENTRY_TYPE_GMETA     ='g',/// The entry is a global extended header with metadata.
+    TAR_ENTRY_TYPE_XMETA     ='x' /// The entry is an extended header with metadata for the next file.
+};
+
+#pragma pack(push, 1)
+/// @summary Defines the fields of the base TAR header as they exist in the file.
+struct tar_header_encoded_t
+{
+    char           FileName[100]; /// The filename, with no path information.
+    char           FileMode[8];   /// The octal file mode value.
+    char           OwnerUID[8];   /// The octal owner user ID value.
+    char           GroupUID[8];   /// The octal group ID value.
+    char           FileSize[12];  /// The octal file size, in bytes.
+    char           FileTime[12];  /// The octal UNIX file time of last modification.
+    char           Checksum[8];   /// The octal checksum value of the file.
+    char           FileType;      /// One of the values of the tar_entry_type_e enumeration.
+    char           LinkName[100]; /// The filename of the linked file, with no path information.
+    char           ExtraPad[255]; /// Additional unused data, or, possibly, a ustar_header_encoded_t.
+};
+
+/// @summary Defines the fields of the extended USTAR header as they exist in the file.
+struct ustar_header_encoded_t
+{
+    char           MagicStr[6];   /// The string "ustar\0".
+    char           Version [2];   /// The version number, terminated with a space.
+    char           OwnerStr[32];  /// The ASCII name of the file owner.
+    char           GroupStr[32];  /// The ASCII name of the file group.
+    char           DevMajor[8];   /// The octal device major number.
+    char           DevMinor[8];   /// The octal device minor number.
+    char           FileBase[155]; /// The prefix value for the FileName, with no trailing slash.
+};
+#pragma pack(pop)
+
+/// @summary Defines the set of information maintained at runtime for each entry in a tarball.
+struct tar_entry_t
+{
+    int64_t        FileSize;      /// The size of the file, in bytes.
+    uint64_t       FileTime;      /// The last write time of the file, as a UNIX timestamp.
+    int64_t        DataOffset;    /// The absolute byte offset to the start of the file data.
+    uint32_t       Checksum;      /// The checksum of the file data.
+    uint32_t       Reserved;      /// Reserved for future use. Set to 0.
+    char           FileType;      /// One of the values of the tar_entry_type_e enumeration.
+    char           FullPath[257]; /// The full path of the file, "<FileBase>/<FileName>\0".
+    char           LinkName[101]; /// The filename of the linked file, zero-terminated.
+    char           Padding;       /// One extra byte of padding. Set to 0.
+};
+
 /// @summary Synchronously opens a file for access. Information necessary to 
 /// access the file is written to the vfs_file_t structure. This function is
 /// called for each mount point, in priority order, until one either returns 
@@ -227,8 +286,23 @@ struct vfs_mount_t
 struct vfs_mount_fs_t
 {
     #define N      MAX_PATH_CHARS
-    WCHAR          LocalPath[N];  /// The fully-resolved absolute path of the mount point root.
     size_t         LocalPathLen;  /// The number of characters that make up the LocalPath string.
+    WCHAR          LocalPath[N];  /// The fully-resolved absolute path of the mount point root.
+    #undef  N
+};
+
+/// @summary Defines the internal state data associated with a tarball mount point.
+struct vfs_mount_tarball_t
+{
+    #define N      MAX_PATH_CHARS
+    HANDLE         TarFildes;     /// The file descriptor for the tarball. Duplicated for each opened file.
+    size_t         SectorSize;    /// The physical disk sector size, in bytes.
+    size_t         EntryCount;    /// The number of regular file entries defined in the tarball.
+    size_t         EntryCapacity; /// The maximum number of entries that can be stored in the EntryList.
+    uint32_t      *EntryHash;     /// The set of hashes of entry filenames.
+    tar_entry_t   *EntryInfo;     /// The set of entries defined in the tarball; no data.
+    size_t         LocalPathLen;  /// The number of characters that make up the LocalPath string.
+    WCHAR          LocalPath[N];  /// The fully-resolved absolute path of the TAR file.
     #undef  N
 };
 
@@ -734,7 +808,7 @@ internal_function WCHAR* vfs_make_system_path_fs(vfs_mount_fs_t *fs, char const 
 /// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
 internal_function DWORD vfs_open_fs(vfs_mount_t *m, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
 {
-    vfs_mount_fs_t *fs      = (vfs_mount_fs_t*)m->State;
+    vfs_mount_fs_t *fs      =(vfs_mount_fs_t*)   m->State;
     LARGE_INTEGER   fsize   = {0};
     WCHAR          *pathbuf = vfs_make_system_path_fs(fs, path);
     HANDLE          hFile   = INVALID_HANDLE_VALUE;
@@ -1042,6 +1116,338 @@ internal_function bool vfs_init_mount_fs(vfs_mount_t *m, WCHAR const *local_path
     return true;
 }
 
+/// @summary Calculate the byte offset of the start of the next header in a tarball.
+/// @param data_offset The absolute byte offset of the start of the data.
+/// @param data_size The un-padded size of the file data, in bytes.
+/// @return The byte offset of the start of the next header record.
+internal_function inline int64_t tar_next_header_offset(int64_t data_offset, int64_t data_size)
+{   // assuming a block size of 512 bytes, which is typical.
+    // round the data size up to the nearest even block multiple as
+    // the data blocks are padded up to the block size with zero bytes.
+    return data_offset + (((data_size + 511) / 512) * 512);
+}
+
+/// @summary Copy a string value until a zero-byte is encountered.
+/// @param dst The start of the destination buffer.
+/// @param src The start of the source buffer.
+/// @param dst_offset The offset into the destination buffer at which to begin writing, in bytes.
+/// @param max The maximum number of bytes to copy from the source to the destination.
+/// @return The input dst_offset, plus the number of bytes copied from src to dst minus one.
+internal_function inline size_t tar_strcpy(char *dst, char const *src, size_t dst_offset, size_t max)
+{
+    size_t s = 0;
+    size_t d = dst_offset;
+    do
+    {
+        dst[d++] = src[s];
+    }
+    while (src[s] != 0 && s++ < max);
+    return dst_offset + s;
+}
+
+/// @summary Parses a zero-padded octal string and converts it to a decimal value.
+/// @param str The buffer containing the value to parse.
+/// @param length The maximum number of bytes to read from the input string.
+/// @return The decoded decimal integer value.
+template <typename int_type>
+internal_function  int_type tar_octal_to_decimal(char const *str, size_t length)
+{
+    int_type    n = 0;
+    for (size_t i = 0; i < length; ++i)
+    {
+        if (str[i] >= '0' && str[i] <= '8')
+        {
+            n *= 8;
+            n += str[i] - 48;
+        }
+        else break;
+    }
+    return n;
+}
+
+/// @summary Parses an encoded TAR header entry to generate the data stored by the mount point.
+/// @param dst The record to populate.
+/// @param src The raw header record as it exists on disk.
+/// @param offset The absolute byte offset of the start of the header record within the tarball.
+/// @return The absolute byte offset of the start of the next header record.
+internal_function int64_t tar_decode_entry(tar_entry_t *dst, tar_header_encoded_t const *src, int64_t offset)
+{   // decode the base header fields.
+    dst->FileSize    = tar_octal_to_decimal< int64_t>(src->FileSize, 12);
+    dst->FileTime    = tar_octal_to_decimal<uint64_t>(src->FileTime, 12);
+    dst->DataOffset  = offset + sizeof(tar_header_encoded_t);
+    dst->Checksum    = tar_octal_to_decimal<uint32_t>(src->Checksum,  8);
+    dst->FileType    = src->FileType;
+    // check to see if a ustar extended header is present.
+    ustar_header_encoded_t const *ustar = (ustar_header_encoded_t const*) src->ExtraPad;
+    if (strncmp(ustar->MagicStr, "ustar", 5) == 0)
+    {   // a ustar extended header is present, which affects the path strings.
+        size_t slen  = tar_strcpy(dst->FullPath, ustar->FileBase, 0, 155);
+        // a single forward slash separates the base path and filename.
+        if (slen > 0)  dst->FullPath[slen++] = '/';
+        // append the filename to the path string.
+        slen = tar_strcpy(dst->FullPath, src->FileName, slen, 100); dst->FullPath[slen] = 0;
+        // the link name never has the BasePath prepended; copy it over as-is.
+        memcpy(dst->LinkName, src->LinkName, 100 * sizeof(char)); dst->LinkName[100] = 0;
+    }
+    else
+    {   // no extended header is present, so copy over the file and link name.
+        memcpy(dst->FullPath, src->FileName, 100 * sizeof(char)); dst->FullPath[100] = 0;
+        memcpy(dst->LinkName, src->LinkName, 100 * sizeof(char)); dst->LinkName[100] = 0;
+    }
+    return tar_next_header_offset(dst->DataOffset, dst->FileSize);
+}
+
+/// @summary Normalize path separators for a character.
+/// @param ch The character to inspect.
+/// @return The forward slash if ch is a backslash, otherwise ch.
+internal_function force_inline uint32_t tar_normalize_ch(char ch)
+{
+    return ch != '\\' ? uint32_t(ch) : uint32_t('/');
+}
+
+/// @summary Calculates a 32-bit hash value for a path string. 
+/// Forward and backslashes are treated as equivalent.
+/// @param path A NULL-terminated UTF-8 path string.
+/// @return The hash of the specified string.
+internal_function uint32_t tar_hash_path(char const *path)
+{
+    if (path != NULL && path[0] != 0)
+    {
+        uint32_t    code = 0;
+        uint32_t    hash = 0;
+        char const *iter = path;
+        do
+        {
+            code = tar_normalize_ch(*iter++);
+            hash = _lrotl(hash, 7) + code;
+        }
+        while (code != 0);
+        return hash;
+    }
+    else return 0;
+}
+
+internal_function bool vfs_ensure_entry_list(vfs_mount_tarball_t *tar, size_t capacity)
+{
+    break
+}
+
+/// @summary Synchronously opens a file for access. Information necessary to access the file is written to the vfs_file_t structure. This function is called for each mount point, in priority order, until one either returns ERROR_SUCCESS or an error code other than ERROR_NOT_SUPPORTED.
+/// @param m The mount point performing the file open.
+/// @param path The path of the file to open, relative to the mount point root.
+/// @param usage One of vfs_file_usage_e specifying the intended use of the file.
+/// @param file_hints A combination of vfs_file_hint_e used to control how the file is opened.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @param file On return, this structure should be populated with the data necessary to access the file. If the file cannot be opened, set the OSError field.
+/// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
+internal_function DWORD vfs_open_tarball(vfs_mount_t *m, char const *path, int32_t usage, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
+{   // figure out access flags, share modes, etc. based on the intended usage.
+    HANDLE  hFile  = INVALID_HANDLE_VALUE;
+    DWORD   result = ERROR_NOT_SUPPORTED;
+    DWORD   access = 0;
+    DWORD   share  = 0;
+    DWORD   create = 0;
+    DWORD   flags  = 0;
+    bool    dupfd  = false;
+    switch (usage)
+    {
+    case VFS_USAGE_STREAM_IN:
+    case VFS_USAGE_STREAM_IN_LOAD:
+        dupfd  = true;
+        access = GENERIC_READ;
+        share  = FILE_SHARE_READ;
+        create = OPEN_EXISTING;
+        flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
+        if (file_hints & VFS_FILE_HINT_UNBUFFERED)
+        {   // the TAR file is not opened for unbuffered I/O, so the 
+            // existing file handle cannot be duplicated.
+            flags |= FILE_FLAG_NO_BUFFERING;
+            dupfd  = false;
+        }
+        break;
+
+    case VFS_USAGE_MANUAL_IO:
+        dupfd  = false;
+        access = GENERIC_READ;
+        share  = FILE_SHARE_READ;
+        create = OPEN_EXISTING;
+        flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
+        if (file_hints & VFS_FILE_HINT_UNBUFFERED)   flags |= FILE_FLAG_NO_BUFFERING;
+        if (file_hints & VFS_FILE_HINT_ASYNCHRONOUS) flags |= FILE_FLAG_OVERLAPPED;
+        break;
+
+    default:
+        result = ERROR_NOT_SUPPORTED;
+        goto error_cleanup;
+    }
+
+    // locate the file in the tarball by comparing hashes.
+    vfs_mount_tarball_t *tar       = (vfs_mount_tarball_t*) m->State;
+    uint32_t             hash      =  tar_hash_path(path);
+    uint32_t const      *hash_list =  tar->EntryHash;
+    for (size_t i = 0, n  = tar->EntryCount; i < n; ++i)
+    {
+        if (hash_list[i] == hash)
+        {   // hashes match, confirm by comparing strings.
+            if (!stricmp(path, tar->EntryInfo[i].FullPath))
+            {   // found an exact match for the path; proceed with open.
+                // if the open attributes are an exact match for the attributes
+                // used to mount the tarball, we can just duplicate the handle;
+                // otherwise, the file must be opened again.
+                if (dupfd)
+                {   // duplicate the existing file handle.
+                    HANDLE p = GetCurrentProcess();
+                    DuplicateHandle(p, tar->TarFildes, p, &hFile, 0, FALSE, DUPLICATE_SAME_ACCESS);
+                }
+                else
+                {   // open the file as specified by the caller.
+                    hFile = CreateFile(tar->LocalPath, access, share, NULL, create, flags, NULL);
+                    if (hFile == INVALID_HANDLE_VALUE)
+                    {   // the file cannot be opened.
+                        result = GetLastError();
+                        goto error_cleanup;
+                    }
+                }
+                // finished with setup, the open succeeds.
+                file->OSError     = ERROR_SUCCESS;
+                file->AccessMode  = access;
+                file->ShareMode   = share;
+                file->OpenFlags   = flags;
+                file->Fildes      = hFile;
+                file->SectorSize  = tar->SectorSize;
+                file->BaseOffset  = tar->EntryInfo[i].DataOffset;
+                file->BaseSize    = tar->EntryInfo[i].FileSize;
+                file->FileSize    = tar->EntryInfo[i].FileSize;
+                file->FileHints   = file_hints;
+                file->FileFlags   = VFS_FILE_FLAG_EXPLICIT_CLOSE;
+                file->Decoder     = vfs_create_decoder(usage, decoder_hint);
+                return ERROR_SUCCESS;
+            }
+        }
+    }
+
+error_cleanup:
+    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+    file->OSError     =  result;
+    file->AccessMode  =  access;
+    file->ShareMode   =  share;
+    file->OpenFlags   =  flags;
+    file->Fildes      =  INVALID_HANDLE_VALUE;
+    file->SectorSize  =  0;
+    file->BaseOffset  =  0;
+    file->BaseSize    =  0;
+    file->FileSize    =  0;
+    file->FileHints   =  file_hints;
+    file->FileFlags   =  VFS_FILE_FLAG_NONE;
+    file->Decoder     =  NULL;
+    return result;
+}
+
+/// @summary Atomically and synchronously writes a file. If the file exists, its contents are overwritten; otherwise a new file is created. This operation is generally not supported by archive-based mount points.
+/// @param m The mount point performing the file save.
+/// @param path The path of the file to save, relative to the mount point root.
+/// @param data The buffer containing the data to write to the file.
+/// @param size The number of bytes to copy from the buffer into the file.
+/// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
+internal_function DWORD vfs_save_tarball(vfs_mount_t *m, char const *path, void const *data, int64_t size)
+{
+   return ERROR_NOT_SUPPORTED;
+}
+
+/// @summary Queries a mount point to determine whether it supports the specified usage.
+/// @param m The mount point being queried.
+/// @param usage One of vfs_file_usage_e specifying the intended usage of the file.
+/// @param decoder_hint One of vfs_decoder_hint_t specifying the type of decoder desired.
+/// @return Either ERROR_SUCCESS or ERROR_NOT_SUPPORTED.
+internal_function DWORD vfs_support_tarball(vfs_mount_t *m, int32_t usage, int32_t decoder_hint)
+{
+    switch (usage)
+    {
+    case VFS_USAGE_STREAM_IN:
+    case VFS_USAGE_STREAM_IN_LOAD:
+    case VFS_USAGE_MANUAL_IO:
+        break;
+    default:
+        return ERROR_NOT_SUPPORTED;
+    }
+
+    switch (decoder_hint)
+    {
+    case VFS_DECODER_HINT_USE_DEFAULT:
+        break;
+    default:
+        break;
+    }
+    return ERROR_SUCCESS;
+}
+
+/// @summary Unmount the mount point. This function should close any open file handles and free any resources allocated for the mount point, including the memory allocated for the vfs_mount_t::State field.
+/// @param m The mount point being unmounted.
+internal_function void vfs_unmount_tarball(vfs_mount_t *m)
+{
+    if (m->State != NULL)
+    {   // free internal state data.
+        vfs_mount_tarball_t *tar = (vfs_mount_tarball_t*) m->State;
+        CloseHandle(tar->TarFildes);
+        free(tar->EntryInfo);
+        free(tar->EntryHash);
+        tar->TarFildes     = INVALID_HANDLE_VALUE;
+        tar->EntryCapacity = 0;
+        tar->EntryCount    = 0;
+        tar->EntryHash     = NULL;
+        tar->EntryInfo     = NULL;
+        free(m->State);
+    }
+    m->State      = NULL;
+    m->open       = NULL;
+    m->save       = NULL;
+    m->unmount    = NULL;
+    m->supports   = NULL;
+}
+
+/// @summary Initialize a filesystem-based mountpoint.
+/// @param m The mountpoint instance to initialize.
+/// @param local_path The NULL-terminated string specifying the local path that functions as the root of the mount point. This directory must exist.
+/// @return true if the mount point was initialized successfully.
+internal_function bool vfs_init_mount_tarball(vfs_mount_t *m, WCHAR const *local_path)
+{
+    vfs_mount_tarball_t *tar = NULL;
+    if ((tar =(vfs_mount_tarball_t*) malloc(sizeof(vfs_mount_tarball_t))) == NULL)
+    {   // unable to allocate memory for internal state.
+        return false;
+    }
+
+    // open the TAR file. this handle remains open so that most file 
+    // operations can just duplicate the handle as opposed to reopening 
+    // the file handle (which I'm guessing is more efficient.)
+    DWORD  access = GENERIC_READ;
+    DWORD  share  = FILE_SHARE_READ;
+    DWORD  flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
+    DWORD  create = OPEN_EXISTING;
+    HANDLE tarfd  = CreateFile(local_path, access, share, NULL, create, flags, NULL);
+    if (tarfd == INVALID_HANDLE_VALUE)
+    {   // unable to open the source tarball.
+        free(tar);
+        return false;
+    }
+
+    // retrieve a fully-resolved path name to the TAR file for the cases 
+    // where it needs to be re-opened due to differing file flags.
+    DWORD fnflags     = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    tar->LocalPathLen = GetFinalPathNameByHandle(tarfd, tar->LocalPath, MAX_PATH_CHARS, fnflags);
+
+    // TODO(rlk): read out all of the metadata and build the entry list.
+    // only regular files, hard links and symlinks are included.
+
+    // set the function pointers, etc. on the mount point.
+    m->State    = tar;
+    m->open     = vfs_open_tarball;
+    m->save     = vfs_save_tarball;
+    m->unmount  = vfs_unmount_tarball;
+    m->supports = vfs_support_tarball;
+    return true;
+}
+
 /// @summary Performs all of the common setup when creating a new mount point.
 /// @param driver The VFS driver instance the mount point is attached to.
 /// @param source_wide The NULL-terminated source directory or file path.
@@ -1112,10 +1518,71 @@ internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide,
             }
         }
         // now a bunch of if (wcsicmp(ext, L"zip") { ... } etc.
+        if (!wcsicmp(ext, L"tar"))
+        {   // set up a tarball-based mount point.
+            if (!vfs_init_mount_tarball(mount, source_wide))
+            {   // remove the item we just added and clean up.
+                vfs_mounts_remove_at(driver->Mounts, driver->Mounts.Count-1);
+                ReleaseSRWLockExclusive(&driver->MountsLock);
+                free(mount->Root); mount->Root = NULL;
+                return false;
+            }
+            ReleaseSRWLockExclusive(&driver->MountsLock);
+            return true;
+        }
         // TODO(rlk): need to make sure to release MountsLock.
         ReleaseSRWLockExclusive(&driver->MountsLock);
         return false;
     }
+}
+
+/// @summary Resolves a virtual path to a filesystem mount point, and then converts the 
+/// path to an absolute path on the filesystem. Non-filesystem mount points are skipped.
+/// @param driver The virtual file system driver to search.
+/// @param path The virtual path to translate to a filesystem path.
+/// @param pathbuf The buffer that will receive the filesystem path.
+/// @param buflen The maximum number of wide characters to write to pathbuf.
+/// @return ERROR_SUCCESS, ERROR_NOT_FOUND, or a system error code.
+internal_function DWORD vfs_resolve_filesystem_path(vfs_driver_t *driver, char const *path, WCHAR *pathbuf, size_t buflen)
+{   // iterate over the mount points, which are stored in priority order.
+    AcquireSRWLockShared(&driver->MountsLock);
+    DWORD        result  = ERROR_NOT_FOUND;
+    vfs_mount_t *mounts  = driver->Mounts.MountData;
+    for (size_t i = 0; i < driver->Mounts.Count; ++i)
+    {
+        vfs_mount_t  *m  = &mounts[i];
+        if (vfs_mount_point_match_start(m->Root, path, m->RootLen) && m->open == vfs_open_fs)
+        {   // found the matching filesystem mount point; resolve the absolute path.
+            vfs_mount_fs_t *fs            =(vfs_mount_fs_t*) m->State;
+            char const     *relative_path = path + m->RootLen + 1;
+            size_t          offset        = fs->LocalPathLen;
+            int             nchars        = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, NULL, 0);
+            if (nchars == 0 || buflen < (nchars + offset + 1))
+            {   // the path cannot be converted from UTF-8 to UCS-2.
+                result  = GetLastError();
+                break;
+            }
+            // start with the local root, and then append the relative path portion.
+            memcpy(pathbuf, fs->LocalPath, fs->LocalPathLen * sizeof(WCHAR));
+            pathbuf[fs->LocalPathLen] = L'\\';
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, &pathbuf[fs->LocalPathLen+1], nchars) == 0)
+            {   // the path cannot be converted from UTF-8 to UCS-2.
+                result  = GetLastError();
+                break;
+            }
+            // normalize the directory separator characters to the system default.
+            // on Windows, this is not strictly necessary, but on other OS's it is.
+            for (size_t i = offset + 1, n = offset + nchars; i < n; ++i)
+            {
+                if (pathbuf[i] == L'/')
+                    pathbuf[i]  = L'\\';
+            }
+            result = ERROR_SUCCESS;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&driver->MountsLock);
+    return result;
 }
 
 /// @summary Opens a file for access. Information necessary to access the file is written to the vfs_file_t structure. This function tests each mount point matching the path, in priority order, until one is successful at opening the file or all matching mount points have been tested.
@@ -1256,7 +1723,7 @@ public_function void vfs_driver_close(vfs_driver_t *driver)
 /// @param priority The priority assigned to this specific mount point, with higher numeric values corresponding to higher priority values.
 /// @param mount_id A unique application-defined identifier for the mount point. This identifier can be used to reference the specific mount point.
 /// @return true if the mount point was successfully created.
-public_function bool vfs_mount(vfs_driver_t *driver, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id)
+public_function bool vfs_mount_known(vfs_driver_t *driver, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id)
 {   // retrieve the path specified by folder_id for use as the source path.
     size_t buffer_bytes = MAX_PATH_CHARS * sizeof(WCHAR);
     size_t source_bytes = 0;
@@ -1280,7 +1747,7 @@ public_function bool vfs_mount(vfs_driver_t *driver, int folder_id, char const *
 /// @param priority The priority assigned to this specific mount point, with higher numeric values corresponding to higher priority values.
 /// @param mount_id A unique application-defined identifier for the mount point. This identifier can be used to reference the specific mount point.
 /// @return true if the mount point was successfully created.
-public_function bool vfs_mount(vfs_driver_t *driver, char const *source_path, char const *mount_path, uint32_t priority, uintptr_t mount_id)
+public_function bool vfs_mount_native(vfs_driver_t *driver, char const *source_path, char const *mount_path, uint32_t priority, uintptr_t mount_id)
 {   // convert the source path to a wide character string once during mounting.
     size_t source_chars = 0;
     size_t source_bytes = 0;
@@ -1302,6 +1769,36 @@ public_function bool vfs_mount(vfs_driver_t *driver, char const *source_path, ch
     if (!vfs_setup_mount(driver, source_wide, source_attr, mount_path, priority, mount_id))
     {   // unable to finish internal setup of the mount point.
         free(source_wide);
+        return false;
+    }
+    return true;
+}
+
+/// @summary Creates a mount point backed by the specified archive or directory, specified as a virtual path.
+/// @param driver The virtual file system driver.
+/// @param virtual_path The NULL-terminated UTF-8 string specifying the virtual path of the file or directory that represents the root of the mount point.
+/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the mount point as exposed to the application code. Multiple mount points may share the same mount_path, but have different source_path, mount_id and priority values.
+/// @param priority The priority assigned to this specific mount point, with higher numeric values corresponding to higher priority values.
+/// @param mount_id A unique application-defined identifier for the mount point. This identifier can be used to reference the specific mount point.
+/// @return true if the mount point was successfully created.
+public_function bool vfs_mount_virtual(vfs_driver_t *driver, char const *virtual_path, char const *mount_path, uint32_t priority, uintptr_t mount_id)
+{   // convert the virtual path to a native filesystem path.
+    DWORD  source_attr  = 0;
+    WCHAR  source_wide[MAX_PATH_CHARS]; // 64KB - probably overkill
+    if (FAILED(vfs_resolve_filesystem_path(driver, virtual_path, source_wide, MAX_PATH_CHARS)))
+    {   // cannot resolve the virtual path to a filesystem mount point.
+        return false;
+    }
+
+    // determine whether the source path is a directory or a file.
+    // TODO(rlk): GetFileAttributes() won't work (GetLastError() => ERROR_BAD_NETPATH)
+    // in that case that source_path is the root of a network share. maybe fix this.
+    if ((source_attr = GetFileAttributesW(source_wide)) == INVALID_FILE_ATTRIBUTES)
+    {   // the source path must exist. mount fails.
+        return false;
+    }
+    if (!vfs_setup_mount(driver, source_wide, source_attr, mount_path, priority, mount_id))
+    {   // unable to finish internal setup of the mount point.
         return false;
     }
     return true;
