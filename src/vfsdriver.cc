@@ -128,14 +128,14 @@ enum vfs_decocder_hint_e : int32_t
 /// Vendor extensions may additionally have a type 'A'-'Z'.
 enum tar_entry_type_e : char
 {
-    TAR_ENTRY_TYPE_FILE      = 0, /// The entry represents a regular file.
-    TAR_ENTRY_TYPE_HARDLINK  = 1, /// The entry represents a hard link.
-    TAR_ENTRY_TYPE_SYMLINK   = 2, /// The entry represents a symbolic link.
-    TAR_ENTRY_TYPE_CHARACTER = 3, /// The entry represents a character device file.
-    TAR_ENTRY_TYPE_BLOCK     = 4, /// The entry represents a block device file.
-    TAR_ENTRY_TYPE_DIRECTORY = 5, /// The entry represents a directory.
-    TAR_ENTRY_TYPE_FIFO      = 6, /// The entry represents a named pipe file.
-    TAR_ENTRY_TYPE_CONTIGUOUS= 7, /// The entry represents a contiguous file.
+    TAR_ENTRY_TYPE_FILE      ='0',/// The entry represents a regular file.
+    TAR_ENTRY_TYPE_HARDLINK  ='1',/// The entry represents a hard link.
+    TAR_ENTRY_TYPE_SYMLINK   ='2',/// The entry represents a symbolic link.
+    TAR_ENTRY_TYPE_CHARACTER ='3',/// The entry represents a character device file.
+    TAR_ENTRY_TYPE_BLOCK     ='4',/// The entry represents a block device file.
+    TAR_ENTRY_TYPE_DIRECTORY ='5',/// The entry represents a directory.
+    TAR_ENTRY_TYPE_FIFO      ='6',/// The entry represents a named pipe file.
+    TAR_ENTRY_TYPE_CONTIGUOUS='7',/// The entry represents a contiguous file.
     TAR_ENTRY_TYPE_GMETA     ='g',/// The entry is a global extended header with metadata.
     TAR_ENTRY_TYPE_XMETA     ='x' /// The entry is an extended header with metadata for the next file.
 };
@@ -1227,9 +1227,77 @@ internal_function uint32_t tar_hash_path(char const *path)
     else return 0;
 }
 
-internal_function bool vfs_ensure_entry_list(vfs_mount_tarball_t *tar, size_t capacity)
+/// @summary 
+internal_function bool vfs_ensure_tar_entry_list(vfs_mount_tarball_t *tar, size_t capacity)
 {
-    break
+    if (capacity <= tar->EntryCapacity)
+    {   // no need to expand the list storage.
+        return true;
+    }
+    size_t       ec = (capacity   > tar->EntryCapacity) ? capacity : tar->EntryCapacity;
+    size_t       nc = (ec < 1024) ? (ec * 2) : (ec + 256);
+    uint32_t    *nh = (uint32_t   *) realloc(tar->EntryHash, nc * sizeof(uint32_t));
+    tar_entry_t *ni = (tar_entry_t*) realloc(tar->EntryInfo, nc * sizeof(tar_entry_t));
+    if (nh != NULL)    tar->EntryHash = nh;
+    if (ni != NULL)    tar->EntryInfo = ni;
+    if (nh != NULL && ni != NULL)
+    {
+        tar->EntryCapacity = nc;
+        return true;
+    }
+    else return false;
+}
+
+internal_function DWORD vfs_load_tarball(vfs_mount_tarball_t *tar, HANDLE tarfd)
+{
+    DWORD result  = ERROR_SUCCESS;
+    LARGE_INTEGER offset;
+    LARGE_INTEGER newptr;
+    LARGE_INTEGER startp;
+
+    // begin reading tar entries from the current file position.
+    // retrieve the current file pointer location.
+    offset.QuadPart = 0; newptr.QuadPart = 0; startp.QuadPart = 0;
+    SetFilePointerEx(tarfd, offset, &startp, FILE_CURRENT);
+    offset.QuadPart = startp.QuadPart;
+    newptr.QuadPart = startp.QuadPart;
+    for ( ; ; )
+    {   // read the next archive entry header and check for end-of-archive.
+        DWORD nread = 0;
+        tar_header_encoded_t  header  = {};
+        if (!ReadFile(tarfd, &header, sizeof(header), &nread, NULL) || nread < sizeof(header))
+        {   // unable to read a complete header block.
+            result = GetLastError();
+            break;
+        }
+        if (header.FileName[0] == 0)
+        {   // an entry with no filename indicates the end of the archive.
+            result = ERROR_SUCCESS;
+            break;
+        }
+
+        // filter out types of entries we aren't interested in:
+        int64_t  header_end  = offset.QuadPart + sizeof(header);
+        if (header.FileType != TAR_ENTRY_TYPE_FILE && header.FileType != TAR_ENTRY_TYPE_HARDLINK && header.FileType != TAR_ENTRY_TYPE_SYMLINK)
+        {   // this is an entry type we don't care about, so skip it.
+            int64_t file_size = tar_octal_to_decimal<int64_t>(header.FileSize, 12);
+            offset.QuadPart   = tar_next_header_offset(header_end,   file_size);
+            continue;
+        }
+
+        // create a record to represent this entry, and calculate the offset of the 
+        // next header entry. only header entries are stored in memory; data is not.
+        if (!vfs_ensure_tar_entry_list(tar, tar->EntryCount + 1))
+        {   // unable to allocate memory ...
+            result = ERROR_OUTOFMEMORY;
+            break;
+        }
+        size_t n = tar->EntryCount++;
+        offset.QuadPart = tar_decode_entry(&tar->EntryInfo[n], &header, offset.QuadPart);
+        tar->EntryHash[n] = tar_hash_path(tar->EntryInfo[n].FullPath);
+        SetFilePointerEx(tarfd, offset, &newptr, FILE_BEGIN);
+    }
+    return result;
 }
 
 /// @summary Synchronously opens a file for access. Information necessary to access the file is written to the vfs_file_t structure. This function is called for each mount point, in priority order, until one either returns ERROR_SUCCESS or an error code other than ERROR_NOT_SUPPORTED.
@@ -1422,7 +1490,7 @@ internal_function bool vfs_init_mount_tarball(vfs_mount_t *m, WCHAR const *local
     // the file handle (which I'm guessing is more efficient.)
     DWORD  access = GENERIC_READ;
     DWORD  share  = FILE_SHARE_READ;
-    DWORD  flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
+    DWORD  flags  = FILE_FLAG_SEQUENTIAL_SCAN;
     DWORD  create = OPEN_EXISTING;
     HANDLE tarfd  = CreateFile(local_path, access, share, NULL, create, flags, NULL);
     if (tarfd == INVALID_HANDLE_VALUE)
@@ -1433,11 +1501,22 @@ internal_function bool vfs_init_mount_tarball(vfs_mount_t *m, WCHAR const *local
 
     // retrieve a fully-resolved path name to the TAR file for the cases 
     // where it needs to be re-opened due to differing file flags.
-    DWORD fnflags     = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
-    tar->LocalPathLen = GetFinalPathNameByHandle(tarfd, tar->LocalPath, MAX_PATH_CHARS, fnflags);
+    DWORD fnflags      = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    tar->LocalPathLen  = GetFinalPathNameByHandle(tarfd, tar->LocalPath, MAX_PATH_CHARS, fnflags);
 
-    // TODO(rlk): read out all of the metadata and build the entry list.
-    // only regular files, hard links and symlinks are included.
+    // save the file handle for later duplication and initialize the entry list.
+    // read all of the metadata from the file into memory.
+    tar->EntryCapacity = 0;
+    tar->EntryCount    = 0;
+    tar->EntryHash     = NULL;
+    tar->EntryInfo     = NULL;
+    tar->SectorSize    = vfs_physical_sector_size(tarfd);
+    vfs_ensure_tar_entry_list(tar, 128);
+    vfs_load_tarball(tar, tarfd);
+
+    // close and re-open the TAR file with FILE_FLAG_OVERLAPPED specified.
+    tar->TarFildes = CreateFile(tar->LocalPath, access, share, NULL, create, flags | FILE_FLAG_OVERLAPPED, NULL);
+    CloseHandle(tarfd);
 
     // set the function pointers, etc. on the mount point.
     m->State    = tar;
@@ -1516,6 +1595,7 @@ internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide,
                 ext++;
                 break;
             }
+            else ext--;
         }
         // now a bunch of if (wcsicmp(ext, L"zip") { ... } etc.
         if (!wcsicmp(ext, L"tar"))
