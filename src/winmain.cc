@@ -40,6 +40,9 @@
 #include "piodriver.cc"
 #include "vfsdriver.cc"
 
+#include "parseutil.cc"
+#include "parsedds.cc"
+
 #include "prcmdlist.cc"
 #include "presentation.cc"
 
