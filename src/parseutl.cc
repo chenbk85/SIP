@@ -88,23 +88,6 @@ enum text_encoding_e
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
-/// @summary Returns the minimum of two values.
-/// @param a...b The input values.
-/// @return The larger of the input values.
-template<class T>
-internal_function inline const T& min2(const T& a, const T& b)
-{
-    return (a < b) ? a : b;
-}
-
-/// @summary Returns the maximum of two values.
-/// @param a...b The input values.
-/// @return The larger of the input values.
-template<class T>
-internal_function inline const T& max2(const T& a, const T& b)
-{
-    return (a < b) ? b : a;
-}
 
 /*////////////////////////
 //   Public Functions   //
@@ -129,31 +112,6 @@ public_function inline bool is_digit(char ch)
 {
     return (ch >= '0' && ch <= '9');
 }
-
-/// @summary Generates a little-endian FOURCC.
-/// @param a...d The four characters comprising the code.
-/// @return The packed four-cc value, in little-endian format.
-public_function inline uint32_t fourcc_le(char a, char b, char c, char d)
-{
-    uint32_t A = (uint32_t) a;
-    uint32_t B = (uint32_t) b;
-    uint32_t C = (uint32_t) c;
-    uint32_t D = (uint32_t) d;
-    return ((D << 24) | (C << 16) | (B << 8) | (A << 0));
-}
-
-/// @summary Generates a big-endian FOURCC.
-/// @param a...d The four characters comprising the code.
-/// @return The packed four-cc value, in big-endian format.
-public_function inline uint32_t fourcc_be(char a, char b, char c, char d)
-{
-    uint32_t A = (uint32_t) a;
-    uint32_t B = (uint32_t) b;
-    uint32_t C = (uint32_t) c;
-    uint32_t D = (uint32_t) d;
-    return ((A << 24) | (B << 16) | (C << 8) | (D << 0));
-}
-
 
 /// @summary Gets the bytes (up to four) representing the Unicode BOM associated with a specific text encoding.
 /// @param encoding One of the text encoding constants, specifying the encoding for which the BOM will be returned.

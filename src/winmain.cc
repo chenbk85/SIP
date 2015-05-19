@@ -33,6 +33,8 @@
 
 #include "runtime.cc"
 
+#include "image_defs.cc"
+
 #include "filepath.cc"
 #include "iobuffer.cc"
 #include "aiodriver.cc"
@@ -40,7 +42,7 @@
 #include "piodriver.cc"
 #include "vfsdriver.cc"
 
-#include "parseutil.cc"
+#include "parseutl.cc"
 #include "parsedds.cc"
 
 #include "prcmdlist.cc"
