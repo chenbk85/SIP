@@ -33,14 +33,16 @@
 
 #include "runtime.cc"
 
-#include "image_defs.cc"
-
 #include "filepath.cc"
 #include "iobuffer.cc"
 #include "aiodriver.cc"
 #include "iodecoder.cc"
 #include "piodriver.cc"
 #include "vfsdriver.cc"
+
+#include "image_defs.cc"
+#include "image_blob.cc"
+#include "image_load.cc"
 
 #include "parseutl.cc"
 #include "parsedds.cc"

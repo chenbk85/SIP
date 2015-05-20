@@ -288,7 +288,7 @@ enum dds_alpha_mode_e
 /// RLE-encoded JPEG blocks, and decompressed via compute kernel or shader program.
 enum image_encoding_e
 {
-    IMAGE_ENCODING_RAW            = 0,  /// The image is encoded in a DXGI format.
+    IMAGE_ENCODING_RAW             = 0,  /// The image is encoded in a DXGI format.
 };
 
 
@@ -298,14 +298,14 @@ enum image_encoding_e
 #pragma pack(push, 1)
 struct dds_pixelformat_t
 {
-    uint32_t Size;            /// The size of the structure (32 bytes).
-    uint32_t Flags;           /// Combination of dds_pixelformat_flags_e.
-    uint32_t FourCC;          /// DXT1, DXT2, DXT3, DXT4, DXT5 or DX10. See MSDN.
-    uint32_t RGBBitCount;     /// The number of bits per-pixel.
-    uint32_t BitMaskR;        /// Mask for reading red/luminance/Y data.
-    uint32_t BitMaskG;        /// Mask for reading green/U data.
-    uint32_t BitMaskB;        /// Mask for reading blue/V data.
-    uint32_t BitMaskA;        /// Mask for reading alpha channel data.
+    uint32_t            Size;            /// The size of the structure (32 bytes).
+    uint32_t            Flags;           /// Combination of dds_pixelformat_flags_e.
+    uint32_t            FourCC;          /// DXT1, DXT2, DXT3, DXT4, DXT5 or DX10. See MSDN.
+    uint32_t            RGBBitCount;     /// The number of bits per-pixel.
+    uint32_t            BitMaskR;        /// Mask for reading red/luminance/Y data.
+    uint32_t            BitMaskG;        /// Mask for reading green/U data.
+    uint32_t            BitMaskB;        /// Mask for reading blue/V data.
+    uint32_t            BitMaskA;        /// Mask for reading alpha channel data.
 };
 #pragma pack(pop)
 
@@ -314,20 +314,20 @@ struct dds_pixelformat_t
 #pragma pack(push, 1)
 struct dds_header_t
 {
-    uint32_t Size;            /// The size of the structure (124 bytes).
-    uint32_t Flags;           /// Combination of dds_header_flags_e.
-    uint32_t Height;          /// The surface height, in pixels.
-    uint32_t Width;           /// The surface width, in pixels.
-    uint32_t Pitch;           /// Bytes per-scanline, or bytes in top-level (compressed).
-    uint32_t Depth;           /// The surface depth, in slices. For non-volume surfaces, 0.
-    uint32_t Levels;          /// The number of mipmap levels, or 0 if there are no mipmaps.
-    uint32_t Reserved1[11];   /// Reserved for future use.
-    dds_pixelformat_t Format; /// Pixel format descriptor.
-    uint32_t Caps;            /// Combination of dds_caps_e.
-    uint32_t Caps2;           /// Combination of dds_caps2_e.
-    uint32_t Caps3;           /// Combination of dds_caps3_e.
-    uint32_t Caps4;           /// Combination of dds_caps4_e.
-    uint32_t Reserved2;       /// Reserved for future use.
+    uint32_t            Size;            /// The size of the structure (124 bytes).
+    uint32_t            Flags;           /// Combination of dds_header_flags_e.
+    uint32_t            Height;          /// The surface height, in pixels.
+    uint32_t            Width;           /// The surface width, in pixels.
+    uint32_t            Pitch;           /// Bytes per-scanline, or bytes in top-level (compressed).
+    uint32_t            Depth;           /// The surface depth, in slices. For non-volume surfaces, 0.
+    uint32_t            Levels;          /// The number of mipmap levels, or 0 if there are no mipmaps.
+    uint32_t            Reserved1[11];   /// Reserved for future use.
+    dds_pixelformat_t   Format;          /// Pixel format descriptor.
+    uint32_t            Caps;            /// Combination of dds_caps_e.
+    uint32_t            Caps2;           /// Combination of dds_caps2_e.
+    uint32_t            Caps3;           /// Combination of dds_caps3_e.
+    uint32_t            Caps4;           /// Combination of dds_caps4_e.
+    uint32_t            Reserved2;       /// Reserved for future use.
 };
 #pragma pack(pop)
 
@@ -336,11 +336,11 @@ struct dds_header_t
 #pragma pack(push, 1)
 struct dds_header_dxt10_t
 {
-    uint32_t Format;          /// One of dxgi_format_e.
-    uint32_t Dimension;       /// One of d3d11_resource_dimension_e.
-    uint32_t Flags;           /// Combination of d3d11_resource_misc_flag_e.
-    uint32_t ArraySize;       /// The number of of items in an array texture.
-    uint32_t Flags2;          /// One of dds_alpha_mode_e.
+    uint32_t            Format;          /// One of dxgi_format_e.
+    uint32_t            Dimension;       /// One of d3d11_resource_dimension_e.
+    uint32_t            Flags;           /// Combination of d3d11_resource_misc_flag_e.
+    uint32_t            ArraySize;       /// The number of of items in an array texture.
+    uint32_t            Flags2;          /// One of dds_alpha_mode_e.
 };
 #pragma pack(pop)
 
@@ -348,16 +348,15 @@ struct dds_header_dxt10_t
 /// zero represents the highest-resolution surface (the base surface.)
 struct dds_level_desc_t
 {
-    size_t   Index;           /// The zero-based index of the mip-level.
-    size_t   Width;           /// The width of the surface.
-    size_t   Height;          /// The height of the surface.
-    size_t   Slices;          /// The depth of the surface.
-    size_t   BytesPerElement; /// The number of bytes per-pixel or block.
-    size_t   BytesPerRow;     /// The number of bytes between scanlines.
-    size_t   BytesPerSlice;   /// The number of bytes between slices.
-    size_t   DataSize;        /// The total size of the data for the level, in bytes.
-    size_t   LevelData;       /// Offset to the start of the level data, from the start of the file.
-    uint32_t Format;          /// One of dxgi_format_e.
+    size_t              Index;           /// The zero-based index of the mip-level.
+    size_t              Width;           /// The width of the surface.
+    size_t              Height;          /// The height of the surface.
+    size_t              Slices;          /// The depth of the surface.
+    size_t              BytesPerElement; /// The number of bytes per-pixel or block.
+    size_t              BytesPerRow;     /// The number of bytes between scanlines.
+    size_t              BytesPerSlice;   /// The number of bytes between slices.
+    size_t              DataSize;        /// The total size of the data for the level, in bytes.
+    uint32_t            Format;          /// One of dxgi_format_e.
 };
 
 /*///////////////
@@ -426,7 +425,7 @@ public_function inline uint32_t image_fourcc_be(char a, char b, char c, char d)
 /// @param header the base surface header of the dds.
 /// @param header_ex the extended surface header of the dds, or NULL.
 /// @retur  one of the values of the dxgi_format_e enumeration.
-public_function uint32_t dds_format(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
+public_function uint32_t dxgi_format(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
 {
     if (header_ex != NULL)
     {
@@ -437,7 +436,7 @@ public_function uint32_t dds_format(dds_header_t const *header, dds_header_dxt10
         return DXGI_FORMAT_UNKNOWN;
     }
 
-    dds_pixelformat_t const &pf = header->Format;
+    dds_pixelformat_t const &pf =  header->Format;
     #define ISBITMASK(r, g, b, a) (pf.BitMaskR == (r) && pf.BitMaskG == (g) && pf.BitMaskB == (b) && pf.BitMaskA == (a))
 
     if (pf.Flags & DDPF_FOURCC)
@@ -625,7 +624,7 @@ public_function uint32_t dds_format(dds_header_t const *header, dds_header_dxt10
 /// @summary Determines if a DXGI format value is a block-compressed format.
 /// @param format One of dxgi_format_e.
 /// @return true if format is one of DXGI_FORMAT_BCn.
-public_function bool dds_block_compressed(uint32_t format)
+public_function bool dxgi_block_compressed(uint32_t format)
 {
     switch (format)
     {
@@ -661,7 +660,7 @@ public_function bool dds_block_compressed(uint32_t format)
 /// @summary Determines if a DXGI fomrat value specifies a packed format.
 /// @param format One of dxgi_format_e.
 /// @return true if format is one of DXGI_FORMAT_R8G8_B8G8_UNORM or DXGI_FORMAT_G8R8_G8B8_UNORM.
-public_function bool dds_packed(uint32_t format)
+public_function bool dxgi_packed(uint32_t format)
 {
     if (format == DXGI_FORMAT_R8G8_B8G8_UNORM ||
         format == DXGI_FORMAT_G8R8_G8B8_UNORM)
@@ -675,7 +674,7 @@ public_function bool dds_packed(uint32_t format)
 /// @param header The base surface header of the DDS.
 /// @param header_ex The extended surface header of the DDS, or NULL.
 /// @return true if the DDS describes a cubemap.
-public_function bool dds_cubemap(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
+public_function bool dxgi_cubemap(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
 {
     if (header_ex != NULL)
     {
@@ -707,7 +706,7 @@ public_function bool dds_cubemap(dds_header_t const *header, dds_header_dxt10_t 
 /// @param header The base surface header of the DDS.
 /// @param header_ex The extended surface header of the DDS, or NULL.
 /// @return true if the DDS describes a volume.
-public_function bool dds_volume(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
+public_function bool dxgi_volume(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
 {
     if (header_ex != NULL)
     {
@@ -734,7 +733,7 @@ public_function bool dds_volume(dds_header_t const *header, dds_header_dxt10_t c
 /// @param header The base surface header of the DDS.
 /// @param header_ex The extended surface header of the DDS, or NULL.
 /// @return true if the DDS describes a surface array.
-public_function bool dds_array(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
+public_function bool dxgi_array(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
 {
     if (header != NULL && header_ex != NULL)
     {
@@ -747,7 +746,7 @@ public_function bool dds_array(dds_header_t const *header, dds_header_dxt10_t co
 /// @param header The base surface header of the DDS.
 /// @param header_ex The extended surface header of the DDS, or NULL.
 /// @return true if the DDS describes a mipmap chain.
-public_function bool dds_mipmap(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
+public_function bool dxgi_mipmap(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
 {
     if (header_ex != NULL)
     {
@@ -772,7 +771,7 @@ public_function bool dds_mipmap(dds_header_t const *header, dds_header_dxt10_t c
 /// compressed formats are supported as well.
 /// @param format One of dxgi_format_e.
 /// @return The number of bits per-pixel.
-public_function size_t dds_bits_per_pixel(uint32_t format)
+public_function size_t dxgi_bits_per_pixel(uint32_t format)
 {
     switch (format)
     {
@@ -902,7 +901,7 @@ public_function size_t dds_bits_per_pixel(uint32_t format)
 /// @summary Calculate the number of bytes per 4x4-pixel block.
 /// @param format One of dxgi_format_e.
 /// @return The number of bytes in a 4x4 pixel block, or 0 for non-block-compressed formats.
-public_function size_t dds_bytes_per_block(uint32_t format)
+public_function size_t dxgi_bytes_per_block(uint32_t format)
 {
     switch (format)
     {
@@ -941,7 +940,7 @@ public_function size_t dds_bytes_per_block(uint32_t format)
 /// @param header The base surface header of the DDS.
 /// @param header_ex The extended surface header of the DDS, or NULL.
 /// @return The number of elements in the surface array, or 1 if the DDS does not describe an array.
-public_function size_t dds_array_count(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
+public_function size_t dxgi_array_count(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
 {
     if (header != NULL && header_ex != NULL)
     {
@@ -974,9 +973,9 @@ public_function size_t dds_array_count(dds_header_t const *header, dds_header_dx
 /// @param header The base surface header of the DDS.
 /// @param header_ex The extended surface header of the DDS, or NULL.
 /// @return The number of levels in the mipmap chain, or 1 if the DDS describes the top level only.
-public_function size_t dds_level_count(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
+public_function size_t dxgi_level_count(dds_header_t const *header, dds_header_dxt10_t const *header_ex)
 {
-    if (dds_mipmap(header, header_ex))
+    if (dxgi_mipmap(header, header_ex))
     {
         return header->Levels;
     }
@@ -989,27 +988,27 @@ public_function size_t dds_level_count(dds_header_t const *header, dds_header_dx
 /// writers do not correctly compute the pitch value. See MSDN documentation at:
 /// http://msdn.microsoft.com/en-us/library/windows/desktop/bb943991(v=vs.85).aspx
 /// @param format One of the values of the dxgi_format_e enumeration.
-public_function size_t dds_pitch(uint32_t format, size_t width)
+public_function size_t dxgi_pitch(uint32_t format, size_t width)
 {
-    if (dds_block_compressed(format))
+    if (dxgi_block_compressed(format))
     {
         size_t bw = image_max2<size_t>(1, (width + 3) / 4);
-        return bw * dds_bytes_per_block(format);
+        return bw * dxgi_bytes_per_block(format);
     }
-    if (dds_packed(format))
+    if (dxgi_packed(format))
     {
         return ((width + 1) >> 1) * 4;
     }
-    return (width * dds_bits_per_pixel(format) + 7) / 8;
+    return (width * dxgi_bits_per_pixel(format) + 7) / 8;
 }
 
 /// @summary Calculates the dimension of an image, in pixels, and accounting for block compression. Note that only width and height should be calculated using this logic as block compression is 2D-only.
 /// @param format One of dxgi_format_e.
 /// @param dimension The width or height of an image.
 /// @return The width or height, in pixels.
-public_function inline size_t dds_image_dimension(uint32_t format, size_t dimension)
+public_function inline size_t dxgi_image_dimension(uint32_t format, size_t dimension)
 {
-    if (dds_block_compressed(format))
+    if (dxgi_block_compressed(format))
     {
         // all BC formats encode 4x4 blocks.
         return image_max2<size_t>(1, ((dimension + 3) / 4) * 4);

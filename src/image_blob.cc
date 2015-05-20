@@ -1,0 +1,36 @@
+/*/////////////////////////////////////////////////////////////////////////////
+/// @summary Defines constants, types and functions for managing blobs of 
+/// image data. Image data is stored in buckets, one for each DXGI format.
+/// When the first image is added to a bucket, it reserves a block of virtual 
+/// address space, which is committed on demand. There is one image blob for 
+/// each supported image encoding, and the blob maintains image usage 
+/// information. The image blob can function as a cache for image data.
+///////////////////////////////////////////////////////////////////////////80*/
+
+/*////////////////
+//   Includes   //
+////////////////*/
+
+/*////////////////////
+//   Preprocessor   //
+////////////////////*/
+
+/*/////////////////
+//   Constants   //
+/////////////////*/
+
+/*///////////////////
+//   Local Types   //
+///////////////////*/
+
+/*///////////////
+//   Globals   //
+///////////////*/
+
+/*///////////////////////
+//   Local Functions   //
+///////////////////////*/
+
+/*////////////////////////
+//   Public Functions   //
+////////////////////////*/
