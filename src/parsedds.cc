@@ -279,7 +279,7 @@ internal_function int dds_buffer_header_dx10(stream_decoder_t *decoder, dds_pars
 /// @param ddsp The DDS parser state to update.
 /// @return The updated parser state identifier.
 internal_function int dds_receive_next_element(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
-{
+{   UNREFERENCED_PARAMETER(decoder);
     if (ddsp->ElementIndex == ddsp->ElementCount)
     {   // all elements (and all mip-levels) have been read. done parsing.
         return DDS_PARSE_STATE_COMPLETE;
@@ -296,7 +296,7 @@ internal_function int dds_receive_next_element(stream_decoder_t *decoder, dds_pa
 /// @param ddsp The DDS parser state to update.
 /// @return The updated parser state identifier.
 internal_function int dds_receive_next_level(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
-{
+{   UNREFERENCED_PARAMETER(decoder);
     if (ddsp->LevelIndex == ddsp->LevelCount)
     {   // finished receiving all mip-levels of the current cube face or array element.
         ddsp->ElementIndex++;
@@ -483,7 +483,8 @@ public_function bool dds_header_dxt10(void const *data, size_t data_size, dds_he
 /// @param max_levels The maximum number of items to write to out_levels.
 /// @return The number of level descriptors written to out_levels.
 public_function size_t dds_describe(void const *data, size_t data_size, dds_header_t const *header, dds_header_dxt10_t const *header_ex, dds_level_desc_t *out_levels, size_t *out_offsets, size_t max_levels)
-{
+{   UNREFERENCED_PARAMETER(data);
+    UNREFERENCED_PARAMETER(data_size);
     uint32_t  format  = DXGI_FORMAT_UNKNOWN;
     size_t    offset  = 0;
     size_t    basew   = 0;

@@ -1063,6 +1063,7 @@ internal_function DWORD vfs_support_fs(vfs_mount_t *m, int32_t usage, int32_t de
     default:
         break;
     }
+    UNREFERENCED_PARAMETER(m);
     return ERROR_SUCCESS;
 }
 
@@ -1357,7 +1358,7 @@ internal_function DWORD vfs_open_tarball(vfs_mount_t *m, char const *path, int32
     {
         if (hash_list[i] == hash)
         {   // hashes match, confirm by comparing strings.
-            if (!stricmp(path, tar->EntryInfo[i].FullPath))
+            if (!_stricmp(path, tar->EntryInfo[i].FullPath))
             {   // found an exact match for the path; proceed with open.
                 // if the open attributes are an exact match for the attributes
                 // used to mount the tarball, we can just duplicate the handle;
@@ -1419,6 +1420,10 @@ error_cleanup:
 /// @return ERROR_SUCCESS, ERROR_NOT_SUPPORTED or the OS error code.
 internal_function DWORD vfs_save_tarball(vfs_mount_t *m, char const *path, void const *data, int64_t size)
 {
+    UNREFERENCED_PARAMETER(m);
+    UNREFERENCED_PARAMETER(path);
+    UNREFERENCED_PARAMETER(data);
+    UNREFERENCED_PARAMETER(size);
    return ERROR_NOT_SUPPORTED;
 }
 
@@ -1446,6 +1451,7 @@ internal_function DWORD vfs_support_tarball(vfs_mount_t *m, int32_t usage, int32
     default:
         break;
     }
+    UNREFERENCED_PARAMETER(m);
     return ERROR_SUCCESS;
 }
 
@@ -1598,7 +1604,7 @@ internal_function bool vfs_setup_mount(vfs_driver_t *driver, WCHAR *source_wide,
             else ext--;
         }
         // now a bunch of if (wcsicmp(ext, L"zip") { ... } etc.
-        if (!wcsicmp(ext, L"tar"))
+        if (!_wcsicmp(ext, L"tar"))
         {   // set up a tarball-based mount point.
             if (!vfs_init_mount_tarball(mount, source_wide))
             {   // remove the item we just added and clean up.
