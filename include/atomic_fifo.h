@@ -1,6 +1,7 @@
 /*/////////////////////////////////////////////////////////////////////////////
 /// @summary Defines and implements several types of FIFO containers supporting
-/// concurrent access with different attributes.
+/// concurrent access with different attributes, along with some frequently 
+/// required functions for working with dynamic arrays.
 ///////////////////////////////////////////////////////////////////////////80*/
 
 #ifndef ATOMIC_FIFO_H
@@ -124,6 +125,25 @@ struct mpsc_fifo_u_t
 /*/////////////////
 //   Functions   //
 /////////////////*/
+/// @summary Calculate the new allocation capacity for a dynamic array.
+/// @param current The current array capacity, in elements.
+/// @param required The minimum required array capacity, in elements.
+/// @param threshold The element count at which the capacity begins growing by a fixed amount.
+/// @param fixed The number of elements to add if the required capacity exceeds the threshold.
+public_function size_t calculate_capacity(size_t current, size_t required, size_t threshold, size_t fixed)
+{
+    size_t newc = current > 0 ? current : 1;
+    while (newc < required && newc <= threshold)
+    {   // grow capacity by doubling until the threshold is reached.
+        newc *= 2;
+    }
+    while (newc < required)
+    {   // grow capacity by adding a fixed amount until the required capacity is reached.
+        newc += fixed;
+    }
+    return newc;
+}
+
 /// @summary Mark a node managed by a fifo_allocator_t as being available for reuse.
 /// @param node The node to mark as available for reuse.
 template <typename T>
