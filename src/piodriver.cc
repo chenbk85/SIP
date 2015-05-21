@@ -163,10 +163,7 @@ struct pio_driver_t
     pio_sti_priority_t      *StreamInPriority; /// The set of priority data associated with each stream-in file.
     pio_sti_priority_queue_t STIActiveQueue;   /// The priority queue of stream-in files, rebuilt each tick.
 
-    pio_sti_pending_alloc_t  STIPendingAlloc;  /// The FIFO node allocator for enqueuing stream-in open requests to the driver.
     pio_sti_pending_queue_t  STIPendingQueue;  /// The MPSC unbounded FIFO of pending stream-in open requests.
-
-    pio_sti_control_alloc_t  STIControlAlloc;  /// The FIFO node allocator for enqueuing stream-in control requests to the driver.
     pio_sti_control_queue_t  STIControlQueue;  /// The MPSC unbounded FIFO of pending stream-in control requests.
 };
 
@@ -1009,11 +1006,9 @@ public_function DWORD pio_driver_open(pio_driver_t *driver, aio_driver_t *aio)
     pio_sti_state_list_ensure(driver, 128);
     pio_sti_priority_queue_create(driver->STIActiveQueue, 128);
     // initialize the queue for pushing stream-in open requests to the driver.
-    fifo_allocator_init(&driver->STIPendingAlloc);
-    mpsc_fifo_u_init   (&driver->STIPendingQueue);
+    mpsc_fifo_u_init(&driver->STIPendingQueue);
     // initialize the queue for pushing stream-in control requests to the driver.
-    fifo_allocator_init(&driver->STIControlAlloc);
-    mpsc_fifo_u_init   (&driver->STIControlQueue);
+    mpsc_fifo_u_init(&driver->STIControlQueue);
     return ERROR_SUCCESS;
 }
 
@@ -1027,10 +1022,11 @@ public_function void pio_driver_close(pio_driver_t *driver)
 /// @summary Queues a file to be streamed in. 
 /// @param driver The prioritized I/O driver managing the stream.
 /// @param request The stream-in request specifying information about the file.
-public_function void pio_driver_stream_in(pio_driver_t *driver, pio_sti_request_t const &request)
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+public_function void pio_driver_stream_in(pio_driver_t *driver, pio_sti_request_t const &request, pio_sti_pending_alloc_t *thread_alloc)
 {   // post the request to start the file streaming into memory.
     // this request will be picked up in pio_driver_main().
-    fifo_node_t<pio_sti_request_t> *n = fifo_allocator_get(&driver->STIPendingAlloc);
+    fifo_node_t<pio_sti_request_t> *n = fifo_allocator_get(thread_alloc);
     n->Item = request;
     n->Item.StreamDecoder->addref();
     mpsc_fifo_u_produce(&driver->STIPendingQueue, n);
@@ -1039,9 +1035,10 @@ public_function void pio_driver_stream_in(pio_driver_t *driver, pio_sti_request_
 /// @summary Pauses reading of a given stream. Reading of the stream can be resumed at a later point in time, from the same location, by sending a resume command.
 /// @param driver The prioritized I/O driver managing the stream.
 /// @param id The application-defined identifier of the stream.
-public_function void pio_driver_pause_stream(pio_driver_t *driver, uintptr_t id)
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+public_function void pio_driver_pause_stream(pio_driver_t *driver, uintptr_t id, pio_sti_control_alloc_t *thread_alloc)
 {
-    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(&driver->STIControlAlloc);
+    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(thread_alloc);
     n->Item.Identifier = id;
     n->Item.ByteOffset = 0;
     n->Item.Command    = PIO_STREAM_IN_CONTROL_PAUSE;
@@ -1051,9 +1048,10 @@ public_function void pio_driver_pause_stream(pio_driver_t *driver, uintptr_t id)
 /// @summary Resumes reading a paused stream from the pause location.
 /// @param driver The prioritized I/O driver managing the stream.
 /// @param id The application-defined identifier of the stream.
-public_function void pio_driver_resume_stream(pio_driver_t *driver, uintptr_t id)
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+public_function void pio_driver_resume_stream(pio_driver_t *driver, uintptr_t id, pio_sti_control_alloc_t *thread_alloc)
 {
-    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(&driver->STIControlAlloc);
+    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(thread_alloc);
     n->Item.Identifier = id;
     n->Item.ByteOffset = 0;
     n->Item.Command    = PIO_STREAM_IN_CONTROL_RESUME;
@@ -1063,9 +1061,10 @@ public_function void pio_driver_resume_stream(pio_driver_t *driver, uintptr_t id
 /// @summary Resumes reading a paused stream from the beginning of the stream.
 /// @param driver The prioritized I/O driver managing the stream.
 /// @param id The application-defined identifier of the stream.
-public_function void pio_driver_rewind_stream(pio_driver_t *driver, uintptr_t id)
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+public_function void pio_driver_rewind_stream(pio_driver_t *driver, uintptr_t id, pio_sti_control_alloc_t *thread_alloc)
 {
-    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(&driver->STIControlAlloc);
+    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(thread_alloc);
     n->Item.Identifier = id;
     n->Item.ByteOffset = 0;
     n->Item.Command    = PIO_STREAM_IN_CONTROL_REWIND;
@@ -1075,9 +1074,10 @@ public_function void pio_driver_rewind_stream(pio_driver_t *driver, uintptr_t id
 /// @summary Stops reading a stream and closed the underlying file handle.
 /// @param driver The prioritized I/O driver managing the stream.
 /// @param id The application-defined identifier of the stream.
-public_function void pio_driver_stop_stream(pio_driver_t *driver, uintptr_t id)
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+public_function void pio_driver_stop_stream(pio_driver_t *driver, uintptr_t id, pio_sti_control_alloc_t *thread_alloc)
 {
-    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(&driver->STIControlAlloc);
+    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(thread_alloc);
     n->Item.Identifier = id;
     n->Item.ByteOffset = 0;
     n->Item.Command    = PIO_STREAM_IN_CONTROL_STOP;
@@ -1088,9 +1088,10 @@ public_function void pio_driver_stop_stream(pio_driver_t *driver, uintptr_t id)
 /// @param driver The prioritized I/O driver managing the stream.
 /// @param id The application-defined identifier of the stream.
 /// @param offset The byte offset from which reading will resume.
-public_function void pio_driver_seek_stream(pio_driver_t *driver, uintptr_t id, int64_t offset)
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+public_function void pio_driver_seek_stream(pio_driver_t *driver, uintptr_t id, int64_t offset, pio_sti_control_alloc_t *thread_alloc)
 {
-    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(&driver->STIControlAlloc);
+    fifo_node_t<pio_sti_control_t> *n = fifo_allocator_get(thread_alloc);
     n->Item.Identifier = id;
     n->Item.ByteOffset = offset;
     n->Item.Command    = PIO_STREAM_IN_CONTROL_SEEK;
