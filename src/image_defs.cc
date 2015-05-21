@@ -981,8 +981,8 @@ public_function void dx10_header_for_dds(dds_header_dxt10_t *dx10, dds_header_t 
     dx10->Flags2    = DDS_ALPHA_MODE_UNKNOWN;
 
     // determine a correct resource dimension:
-    if (dxgi_cubemap(dds, NULL))
-    {
+    if (dxgi_cubemap(dds, NULL) && dx10->ArraySize == 6)
+    {   // DX10+ cubemaps must specify all six faces.
         dx10->Dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
         dx10->Flags    |= D3D11_RESOURCE_MISC_TEXTURECUBE;
     }
