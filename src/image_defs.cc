@@ -969,6 +969,34 @@ public_function size_t dxgi_array_count(dds_header_t const *header, dds_header_d
     else return 0;
 }
 
+/// @summary Given a baseline DDS header, generates a corresponding DX10 extended header.
+/// @param dx10 The DX10 extended DDS header to populate.
+/// @param dds The base DDS header describing the image.
+public_function void dx10_header_for_dds(dds_header_dxt10_t *dx10, dds_header_t const *dds)
+{
+    dx10->Format    = dxgi_format(dds, NULL);
+    dx10->Dimension = D3D11_RESOURCE_DIMENSION_TEXTURE1D;
+    dx10->Flags     = 0; // determined below
+    dx10->ArraySize = dxgi_array_count(dds, NULL);
+    dx10->Flags2    = DDS_ALPHA_MODE_UNKNOWN;
+
+    // determine a correct resource dimension:
+    if (dxgi_cubemap(dds, NULL))
+    {
+        dx10->Dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+        dx10->Flags    |= D3D11_RESOURCE_MISC_TEXTURECUBE;
+    }
+    else if (dxgi_volume(dds, NULL))
+    {
+        dx10->Dimension = D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+    }
+    else if ((dds->Flags & DDSD_WIDTH ) != 0 && dds->Width  > 1 && 
+             (dds->Flags & DDSD_HEIGHT) != 0 && dds->Height > 1)
+    {
+        dx10->Dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+    }
+}
+
 /// @summary Determines the number of levels in the mipmap chain.
 /// @param header The base surface header of the DDS.
 /// @param header_ex The extended surface header of the DDS, or NULL.
