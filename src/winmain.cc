@@ -39,13 +39,15 @@
 #include "iodecoder.cc"
 #include "piodriver.cc"
 #include "vfsdriver.cc"
+#include "threadio.cc"
 
 #include "image_defs.cc"
 #include "image_blob.cc"
-#include "image_load.cc"
 
 #include "parseutl.cc"
 #include "parsedds.cc"
+
+#include "image_load.cc"
 
 #include "prcmdlist.cc"
 #include "presentation.cc"
@@ -242,15 +244,19 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
     vfs_driver_t     vfs;
     vfs_driver_open(&vfs, &aio, &pio);
-    vfs_mount_known(&vfs, VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
-    vfs_mount_known(&vfs, VFS_KNOWN_PATH_PUBLIC_DOCUMENTS, "/doc", 0, 1);
-    vfs_put_file(&vfs, "/doc/test_save.txt", "This is a test (user)...\n", 25);
-    vfs_unmount(&vfs, 0); // remove user documents mount
-    vfs_put_file(&vfs, "/doc/test_save.txt", "This is a test (public)...\n", 27);
-    vfs_mount_known(&vfs, VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
-    vfs_mount_virtual(&vfs, "/doc/test_archive.tar", "/doc", 2, 2);
+
+    thread_io_t    io;
+    io.initialize(&vfs);
+
+    io.mount(VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
+    io.mount(VFS_KNOWN_PATH_PUBLIC_DOCUMENTS, "/doc", 0, 1);
+    io.put_file("/doc/test_save.txt", "This is a test (user)...\n", 25);
+    io.unmount(0); // remove user documents mount
+    io.put_file("/doc/test_save.txt", "This is a test (public)...\n", 27);
+    io.mount(VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
+    //io.mountv("/doc/test_archive.tar", "/doc", 2, 2);
     uint64_t stns = pio_driver_nanotime(&pio);
-    stream_decoder_t *d1 = vfs_load_file(&vfs, "/doc/test_save.txt", 0, 0, VFS_DECODER_HINT_USE_DEFAULT, NULL);
+    stream_decoder_t *d1 = io.load_file("/doc/test_save.txt", VFS_FILE_HINT_NONE, VFS_DECODER_HINT_USE_DEFAULT, 0, 0, NULL);
     if (d1 != NULL)
     {   // here's how you read data from the stream.
         while (!d1->atend())

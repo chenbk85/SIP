@@ -1317,12 +1317,7 @@ internal_function DWORD vfs_open_tarball(vfs_mount_t *m, char const *path, int32
         share  = FILE_SHARE_READ;
         create = OPEN_EXISTING;
         flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-        if (file_hints & VFS_FILE_HINT_UNBUFFERED)
-        {   // the TAR file is not opened for unbuffered I/O, so the 
-            // existing file handle cannot be duplicated.
-            flags |= FILE_FLAG_NO_BUFFERING;
-            dupfd  = false;
-        }
+        // alignment restrictions can't be guaranteed, so unbuffered I/O isn't supported.
         break;
 
     case VFS_USAGE_MANUAL_IO:
@@ -1955,11 +1950,6 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
     }
 
     // move the file pointer to the beginning of the logical file.
-    // TODO(rlk): archive implementations need to CreateFile so that
-    // the file handle gets properly duplicated. the archive does not
-    // need to be re-parsed, but the EXPLICIT_CLOSE flag should be 
-    // specified. alternatively, we could just say that this interface
-    // is not to be used from multiple threads simultaneously...
     LARGE_INTEGER start_pos;
     start_pos.QuadPart =  file_info.BaseOffset;
     if (!SetFilePointerEx(file_info.Fildes, start_pos, NULL, FILE_BEGIN))
@@ -2040,17 +2030,18 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
 /// @param path A NULL-terminated UTF-8 string specifying the virtual file path.
 /// @param id An application-defined identifier for the stream.
 /// @param priority The priority value for the load, with higher numeric values representing higher priority.
-/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @param user_hints A combination of vfs_file_hint_e specifying the preferred file behavior, or VFS_FILE_HINT_NONT (0) to let the implementation decide. These hints may not be honored.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT (0) to let the implementation decide.
 /// @param thread_alloc_open The FIFO node allocator used to enqueue stream open commands to the PIO driver.
 /// @param thread_alloc_control The FIFO node allocator used to enqueue stream control commands to the PIO driver. May be NULL if control is NULL.
 /// @param control If non-NULL, on return, this structure is initialized with information necessary to control streaming of the file.
 /// @return The stream decoder that can be used to access the file data. When finished accessing the file data, call the stream_decoder_t::release() method to delete the stream decoder instance.
-public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t decoder_hint, pio_sti_pending_alloc_t *thread_alloc_open, pio_sti_control_alloc_t *thread_alloc_control, stream_control_t *control)
+public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t user_hints, int32_t decoder_hint, pio_sti_pending_alloc_t *thread_alloc_open, pio_sti_control_alloc_t *thread_alloc_control, stream_control_t *control)
 {   // open the file and retrieve relevant information.
     vfs_file_t  file_info;
     char const *relpath     = NULL;
     int32_t     usage       = VFS_USAGE_STREAM_IN_LOAD;
-    uint32_t    file_hints  = VFS_FILE_HINT_UNBUFFERED | VFS_FILE_HINT_ASYNCHRONOUS;
+    uint32_t    file_hints  =(user_hints == VFS_FILE_HINT_NONE) ? VFS_FILE_HINT_UNBUFFERED | VFS_FILE_HINT_ASYNCHRONOUS : user_hints;
     DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
     if (FAILED (open_result)) return NULL;
     DWORD       asio_result = aio_driver_prepare(driver->AIO, file_info.Fildes);
@@ -2092,7 +2083,74 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
     return file_info.Decoder;
 }
 
-/*public_function stream_control_t* vfs_stream_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t decoder_hint, size_t chunk_size, uint64_t interval_ns)
-{
-    // this function is responsible for setting up the stream decoder's buffer allocator.
-}*/
+/// @summary Asynchronously loads a file by streaming it into memory in fixed-size chunks, delivered to the decoder at a given interval. 
+/// @param driver The virtual file system driver used to resolve the file path.
+/// @param path A NULL-terminated UTF-8 string specifying the virtual file path.
+/// @param id An application-defined identifier for the stream.
+/// @param priority The priority value for the load, with higher numeric values representing higher priority.
+/// @param user_hints A combination of vfs_file_hint_e specifying the preferred file behavior, or VFS_FILE_HINT_NONT (0) to let the implementation decide. These hints may not be honored.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT (0) to let the implementation decide.
+/// @param interval_ns The desired data delivery interval, specified in nanoseconds.
+/// @param chunk_size The minimum size of a single buffer delivered every interval, in bytes.
+/// @param chunk_count The number of buffers to maintain. The system will fill the buffers as quickly as possible, but only deliver them at the delivery interval.
+/// @param thread_alloc_open The FIFO node allocator used to enqueue stream open commands to the PIO driver.
+/// @param thread_alloc_control The FIFO node allocator used to enqueue stream control commands to the PIO driver. May be NULL if control is NULL.
+/// @param control If non-NULL, on return, this structure is initialized with information necessary to control streaming of the file.
+/// @return The stream decoder that can be used to access the file data. When finished accessing the file data, call the stream_decoder_t::release() method to delete the stream decoder instance.
+public_function stream_decoder_t* vfs_stream_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t user_hints, int32_t decoder_hint, uint64_t interval_ns, size_t chunk_size, size_t chunk_count, pio_sti_pending_alloc_t *thread_alloc_open, pio_sti_control_alloc_t *thread_alloc_control, stream_control_t *control)
+{   // open the file and retrieve relevant information.
+    // interval-based delivery prefers buffered I/O, if possible.
+    vfs_file_t  file_info;
+    char const *relpath     = NULL;
+    int32_t     usage       = VFS_USAGE_STREAM_IN;
+    uint32_t    file_hints  =(user_hints == VFS_FILE_HINT_NONE) ? VFS_FILE_HINT_ASYNCHRONOUS : user_hints;
+    DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
+    if (FAILED (open_result)) return NULL;
+    DWORD       asio_result = aio_driver_prepare(driver->AIO, file_info.Fildes);
+    if (FAILED (asio_result))
+    {   // could not associate the file handle with the I/O completion port.
+        vfs_close_file(&file_info);
+        return NULL;
+    }
+
+    // set up the buffer allocator. allocate a fixed number of chunk_size chunks.
+    if (!file_info.Decoder->InternalAllocator.reserve(chunk_size * chunk_count, chunk_size))
+    {   // unable to reserve the requested amount of buffer space.
+        vfs_close_file(&file_info);
+        return NULL;
+    }
+    if ((file_info.OpenFlags & FILE_FLAG_NO_BUFFERING) == 0)
+    {   // using buffered I/O, we can deliver exactly the requested chunk size
+        // as there are no sector-alignment restrictions on offsets or sizes.
+        file_info.Decoder->InternalAllocator.AllocSize  = chunk_size;
+    }
+    file_info.Decoder->BufferAllocator = &file_info.Decoder->InternalAllocator;
+    
+    // initialize the stream control structure for the caller.
+    if (control != NULL)
+    {
+        control->SID = id;
+        control->PIO = driver->PIO;
+        control->PIOAlloc    = thread_alloc_control;
+        control->EncodedSize = file_info.BaseSize;
+        control->DecodedSize = file_info.FileSize;
+    }
+
+    // push the stream-in request down to the PIO driver.
+    // the PIO driver holds a reference to the decoder.
+    pio_sti_request_t iocmd;
+    iocmd.Identifier   = id;
+    iocmd.StreamDecoder= file_info.Decoder;
+    iocmd.Fildes       = file_info.Fildes;
+    iocmd.SectorSize   = file_info.SectorSize;
+    iocmd.BaseOffset   = file_info.BaseOffset;
+    iocmd.BaseSize     = file_info.BaseSize;
+    iocmd.IntervalNs   = interval_ns;
+    iocmd.StreamFlags  = PIO_STREAM_IN_FLAGS_LOAD;
+    iocmd.BasePriority = priority;
+    pio_driver_stream_in(driver->PIO, iocmd, thread_alloc_open); // +1=1
+    
+    // add a decoder reference for the caller:
+    file_info.Decoder->addref(); // +1=2
+    return file_info.Decoder;
+}
