@@ -221,10 +221,10 @@ typedef DWORD (*vfs_support_fn)(vfs_mount_t*, int32_t, int32_t);
 /// @param The mount point being unmounted.
 typedef void  (*vfs_unmount_fn)(vfs_mount_t*);
 
-/// @summary Provides an interface to control playback of a stream. The stream
-/// controller holds a reference to the associated stream decoder.
+/// @summary Provides an interface to control playback of a stream.
 struct stream_control_t
-{
+{   typedef pio_sti_control_alloc_t     pio_thread_alloc_t;
+
     stream_control_t(void);         /// Construct unattached stream controller.
     ~stream_control_t(void);        /// Release decoder reference.
 
@@ -234,16 +234,11 @@ struct stream_control_t
     void seek(int64_t offset);      /// Seek to a specified location and resume streaming.
     void stop(void);                /// Stop streaming the file and close it.
 
-    uintptr_t         SID;          /// The application-defined stream identifier.
-    pio_driver_t     *PIO;          /// The prioritized I/O driver interface.
-    stream_decoder_t *Decoder;      /// The decoder used to read stream data.
-    int64_t           EncodedSize;  /// The number of bytes of data as stored.
-    int64_t           DecodedSize;  /// The number of bytes of data when decoded, if known.
-};
-
-struct stream_writer_t
-{
-    uintptr_t         SID;          /// The application-defined stream identifier.
+    uintptr_t           SID;        /// The application-defined stream identifier.
+    pio_driver_t       *PIO;        /// The prioritized I/O driver interface.
+    pio_thread_alloc_t *PIOAlloc;   /// The allocator used when submitting stream control commands to the PIO driver.
+    int64_t             EncodedSize;/// The number of bytes of data as stored.
+    int64_t             DecodedSize;/// The number of bytes of data when decoded, if known.
 };
 
 /// @summary Defines the information about an open file. This information is 
@@ -343,7 +338,7 @@ stream_control_t::stream_control_t(void)
     : 
     SID(0), 
     PIO(NULL), 
-    Decoder(NULL), 
+    PIOAlloc(NULL),
     EncodedSize(0), 
     DecodedSize(0)
 {
@@ -353,31 +348,27 @@ stream_control_t::stream_control_t(void)
 /// @summary Releases references held by the stream control interface.
 stream_control_t::~stream_control_t(void)
 {
-    if (Decoder != NULL)
-    {   // release the reference held by the control interface.
-        Decoder->release();
-    }
-    SID = 0;
-    PIO = NULL;
-    Decoder = NULL;
+    SID      = 0;
+    PIO      = NULL;
+    PIOAlloc = NULL;
 }
 
 /// @summary Pauses reading of the stream.
 void stream_control_t::pause(void)
 {
-    pio_driver_pause_stream(PIO, SID);
+    pio_driver_pause_stream(PIO, SID, PIOAlloc);
 }
 
 /// @summary Resumes reading of the stream from the pause position.
 void stream_control_t::resume(void)
 {
-    pio_driver_resume_stream(PIO, SID);
+    pio_driver_resume_stream(PIO, SID, PIOAlloc);
 }
 
 /// @summary Resumes reading of the stream from the beginning.
 void stream_control_t::rewind(void)
 {
-    pio_driver_resume_stream(PIO, SID);
+    pio_driver_resume_stream(PIO, SID, PIOAlloc);
 }
 
 /// @summary Resumes reading of the stream from the specified byte offset.
@@ -386,13 +377,13 @@ void stream_control_t::rewind(void)
 /// disk sector size.
 void stream_control_t::seek(int64_t offset)
 {
-    pio_driver_seek_stream(PIO, SID, offset);
+    pio_driver_seek_stream(PIO, SID, offset, PIOAlloc);
 }
 
 /// @summary Stops reading the stream and closes the underlying file handle.
 void stream_control_t::stop(void)
 {
-    pio_driver_stop_stream(PIO, SID);
+    pio_driver_stop_stream(PIO, SID, PIOAlloc);
 }
 
 /// @summary Compare two mount point roots to determine if they match.
@@ -1235,10 +1226,9 @@ internal_function bool vfs_ensure_tar_entry_list(vfs_mount_tarball_t *tar, size_
     {   // no need to expand the list storage.
         return true;
     }
-    size_t       ec = (capacity   > tar->EntryCapacity) ? capacity : tar->EntryCapacity;
-    size_t       nc = (ec < 1024) ? (ec * 2) : (ec + 256);
-    uint32_t    *nh = (uint32_t   *) realloc(tar->EntryHash, nc * sizeof(uint32_t));
-    tar_entry_t *ni = (tar_entry_t*) realloc(tar->EntryInfo, nc * sizeof(tar_entry_t));
+    size_t       nc =  calculate_capacity(tar->EntryCapacity, capacity, 1024, 256);
+    uint32_t    *nh = (uint32_t   *)  realloc(tar->EntryHash, nc * sizeof(uint32_t));
+    tar_entry_t *ni = (tar_entry_t*)  realloc(tar->EntryInfo, nc * sizeof(tar_entry_t));
     if (nh != NULL)    tar->EntryHash = nh;
     if (ni != NULL)    tar->EntryInfo = ni;
     if (nh != NULL && ni != NULL)
@@ -2051,9 +2041,11 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
 /// @param id An application-defined identifier for the stream.
 /// @param priority The priority value for the load, with higher numeric values representing higher priority.
 /// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT to let the implementation decide.
+/// @param thread_alloc_open The FIFO node allocator used to enqueue stream open commands to the PIO driver.
+/// @param thread_alloc_control The FIFO node allocator used to enqueue stream control commands to the PIO driver. May be NULL if control is NULL.
 /// @param control If non-NULL, on return, this structure is initialized with information necessary to control streaming of the file.
 /// @return The stream decoder that can be used to access the file data. When finished accessing the file data, call the stream_decoder_t::release() method to delete the stream decoder instance.
-public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t decoder_hint, stream_control_t *control)
+public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t decoder_hint, pio_sti_pending_alloc_t *thread_alloc_open, pio_sti_control_alloc_t *thread_alloc_control, stream_control_t *control)
 {   // open the file and retrieve relevant information.
     vfs_file_t  file_info;
     char const *relpath     = NULL;
@@ -2073,16 +2065,16 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
     
     // initialize the stream control structure for the caller.
     if (control != NULL)
-    {   // the stream control interface holds a reference to the decoder.
-        control->SID         = id;
-        control->PIO         = driver->PIO;
+    {
+        control->SID = id;
+        control->PIO = driver->PIO;
+        control->PIOAlloc    = thread_alloc_control;
         control->EncodedSize = file_info.BaseSize;
         control->DecodedSize = file_info.FileSize;
-        control->Decoder     = file_info.Decoder;
-        control->Decoder->addref(); // =1
     }
 
     // push the stream-in request down to the PIO driver.
+    // the PIO driver holds a reference to the decoder.
     pio_sti_request_t iocmd;
     iocmd.Identifier   = id;
     iocmd.StreamDecoder= file_info.Decoder;
@@ -2093,10 +2085,10 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
     iocmd.IntervalNs   = 0;
     iocmd.StreamFlags  = PIO_STREAM_IN_FLAGS_LOAD;
     iocmd.BasePriority = priority;
-    pio_driver_stream_in(driver->PIO, iocmd); // =1 or =2
+    pio_driver_stream_in(driver->PIO, iocmd, thread_alloc_open); // +1=1
     
     // add a decoder reference for the caller:
-    file_info.Decoder->addref(); // =2 or =3
+    file_info.Decoder->addref(); // +1=2
     return file_info.Decoder;
 }
 
