@@ -79,8 +79,8 @@ struct dds_parser_state_t
     size_t              BaseDimension[3];     /// The base image dimensions, width, height and depth.
     dds_header_t       *DDSHeader;            /// Pointer to DDSHBuffer, if it's a valid DDS header.
     dds_header_dxt10_t *DX10Header;           /// Pointer to DX10Buffer, if it's a valid header.
-    dds_level_desc_t   *LevelInfo;            /// Mipmap level descriptors, dds_level_count() total.
-    size_t             *LevelOffsets;         /// Mipmap level byte offsets, dds_array_count() * dds_level_count() total.
+    dds_level_desc_t   *LevelInfo;            /// Mipmap level descriptors, dds_level_count() total. Owned by the image blob.
+    size_t             *LevelOffsets;         /// Mipmap level byte offsets, dds_array_count() * dds_level_count() total. Owned by the image blob.
     void               *MappedAddress;        /// The base address of the mapped image blob.
     uint8_t            *WriteCursor;          /// Pointer to the current image data location.
     uint8_t            *EndOfLevel;           /// Pointer to the end of the current mip-level.
