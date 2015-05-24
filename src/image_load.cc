@@ -58,6 +58,7 @@ struct image_load_request_t
     stream_decoder_t      *Decoder;         /// The decoder used to read the file data.
     image_result_alloc_t  *ResultAlloc;     /// The FIFO node allocator used to enqueue items into the result queue.
     image_result_queue_t  *ResultQueue;     /// The MPSC unbounded FIFO where the result of the load operation will be placed.
+    int                    FileFormat;      /// One of image_file_format_e specifying the type of parser to create.
 };
 
 typedef fifo_allocator_t<image_load_request_t>  image_request_alloc_t;
@@ -274,19 +275,40 @@ public_function bool image_loader_create(image_loader_t *loader/*, image_cache_t
     image_parser_list_create(&loader->DDSList, 16);
 }
 
-public_function bool load_image(image_loader_t *loader, vfs_driver_t *vfs, char const *path, image_request_alloc_t *thread_alloc, image_result_queues_t const &queues)
-{
+/// @summary Queues an image for loading. The application is responsible for opening the stream.
+/// @param loader The image loader that will manage parsing the image file format.
+/// @param decoder The stream decoder used to read the stream data.
+/// @param file_type One of image_file_format_e indicating the file format of the image data.
+/// @param thread_alloc The FIFO node allocator for the thread requesting the file load.
+/// @param queues The FIFO node allocator and queue to which the load result will be posted.
+/// @return true if the image load was queued.
+public_function bool load_image(image_loader_t *loader, stream_decoder_t *decoder, int file_format, image_request_alloc_t *thread_alloc, image_result_queues_t const &queues)
+{   // TODO(rlk): need to validate the file_format prior to enqueueing the request.
+    fifo_node_t<image_load_request_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item.ImageId    = decoder->Identifier;
+    n->Item.Decoder    = decoder;
+    n->Item.ResultAlloc= queues.ResultAlloc;
+    n->Item.ResultQueue= queues.ResultQueue;
+    n->Item.FileFormat = file_format;
+    mpsc_fifo_u_produce(&loader->RequestQueue, n);
+    return true;
 }
 
-public_function bool load_image(image_loader_t *loader, stream_decoder_t *decoder, int file_type, image_request_alloc_t *thread_alloc, image_result_queues_t const &queues)
-{
-    fifo_node_t<image_load_request_t> *n = fifo_allocator_get(thread_alloc);
-    n->Item.ImageId       = decoder->Identifier;
-    n->Item.Decoder       = decoder;
-    n->Item.ResultAlloc   = queues.ResultAlloc;
-    n->Item.ResultQueue   = queues.ResultQueue;
-    mpsc_fifo_u_produce(&loader->RequestQueue, n);
-    // TODO(rlk): Review I/O layer for correct queue usage. 
-    // Each producer thread for an MPSC FIFO must provide its own FIFO allocator.
-    // The PIO driver interface does it incorrectly, I think.
+/// @summary Updates the state of all in-progress image loads queued against an image loader.
+/// @param loader The image loader state to update.
+public_function void image_loader_update(image_loader_t *loader)
+{   // start any pending image load requests.
+    image_load_request_t load;
+    while (mpsc_fifo_u_consume(&loader->RequestQueue, load))
+    {
+        switch (load.FileFormat)
+        {
+        case IMAGE_FILE_FORMAT_DDS:
+                dds_parser_list_add(&loader->DDSList, load);
+                break;
+        }
+    }
+    // update the state of each parser list. this generates image 
+    // load results in the target queue for each load request.
+    dds_parser_list_update(&loader->DDSList);
 }
