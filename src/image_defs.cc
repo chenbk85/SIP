@@ -359,6 +359,56 @@ struct dds_level_desc_t
     uint32_t            Format;          /// One of dxgi_format_e.
 };
 
+/// @summary Defines the data needed to load an image. This data is captured in 
+/// an image database and used to load or re-load the image if it is requested 
+/// and does not currently exist within the target image cache.
+struct image_open_info_t
+{
+    uintptr_t           ImageId;         /// The application-defined image identifier (duplicated in the ID table.)
+    size_t              PathOffset;      /// The byte offset of the virtual path in the string table.
+    int                 FileHints;       /// A combination of vfs_file_hint_e used when opening the file.
+    int                 DecoderHint;     /// One of vfs_decoder_hint_e used to request a specific decoder.
+};
+
+/// @summary Data about an image that has been loaded into an image cache at 
+/// some point. This data is captured in an image database and can be used to 
+/// satisfy simple metadata queries, even if the image is not currently loaded.
+struct image_cache_info_t
+{
+    uintptr_t           TargetCache;     /// The image cache into which the image data was loaded.
+    size_t              BytesInCache;    /// The number of bytes reserved for the image in the target cache.
+    uint32_t            ImageFormat;     /// The image pixel format. One of dxgi_format_e.
+    uint32_t            ImageEncoding;   /// The image encoding. One of image_encoding_e.
+    size_t              BaseWidth;       /// The width of the highest-resolution mip-level, in pixels.
+    size_t              BaseHeight;      /// The height of the highest-resolution mip-level, in pixels.
+    size_t              BaseSliceCount;  /// The number of slices in the highest-resolution mip-level.
+    size_t              ElementCount;    /// The number of array elements or cubemap faces.
+    size_t              LevelCount;      /// The number of levels in the mipmap chain.
+    size_t              BitsPerPixel;    /// The number of bytes per-pixel.
+    size_t              BytesPerBlock;   /// The number of bytes per-block for compressed formats, or zero.
+    size_t              ImageDataOffset; /// The byte offset of the image data from the start of the file or buffer.
+    dds_header_t        DDSHeader;       /// The DDS header describing the image.
+    dds_header_dxt10_t  DX10Header;      /// The Direct3D 10 extended header describing the image.
+    dds_level_desc_t   *LevelInfo;       /// An array of LevelCount mip-level descriptors, owned by the image blob.
+    size_t             *LevelOffsets;    /// An array of ElementCount * LevelCount zero-based byte offsets of the start of each level, owned by the image blob.
+};
+
+/// @summary Represents a set of images that have been or will be loaded. The 
+/// main application can insert images into the database, allowing them to be
+/// loaded into an image cache at some future point.
+struct image_database_t
+{
+    // image_database_begin_update()
+    // image_database_end_update()
+    // because we'll want to batch-insert
+    SRWLOCK             Lock;            /// The lock guarding against concurrent insertions.
+    SRWLOCK             CacheLock;       /// The lock guarding cache information updates specifically.
+    id_table_t          IdTable;         /// The table mapping image ID to registry index.
+    string_table_t      PathTable;       /// The string table of cached virtual file paths.
+    image_open_info_t  *OpenInfo;        /// The list of VFS file open arguments for each image.
+    image_cache_info_t *CacheInfo;       /// The list of cached image information for each image.
+};
+
 /*///////////////
 //   Globals   //
 ///////////////*/
