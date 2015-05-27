@@ -356,6 +356,44 @@ public_function inline size_t next_pow2(size_t x)
     return n;
 }
 
+/// @summary Mixes the bits of a 32-bit unsigned integer.
+/// @param x The input value.
+/// @return The input value, with its bits mixed.
+public_function inline uint32_t uint32_mix(uint32_t x)
+{   // the finalizer from murmurhash3, 32-bit.
+    x ^= x >> 16;
+    x *= 0x85EBCA6B;
+    x ^= x >> 13;
+    x *= 0xC2B2AE35;
+    x ^= x >> 16;
+    return x;
+}
+
+/// @summary Mixes the bits of a 64-bit unsigned integer.
+/// @param x The input value.
+/// @return The input value, with its bits mixed.
+public_function inline uint64_t uint64_mix(uint64_t x)
+{   // the finalizer from murmurhash3, 64-bit.
+    x ^= x >> 33;
+    x *= 0xFF51AFD7ED558CCDULL;
+    x ^= x >> 33;
+    x *= 0xC4CEB9FE1A85EC53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
+/// @summary Template magic to call the appropriate mixer for an unsigned memsize type.
+/// @param x The unsigned integer value to mix.
+/// @return The input value, with its bits mixed.
+template <typename int_type> int_type uint_mixer(int_type x);
+template <> inline uint32_t uint_mixer<uint32_t>(uint32_t x) { return uint32_mix(x); }
+template <> inline uint64_t uint_mixer<uint64_t>(uint64_t x) { return uint64_mix(x); }
+template <typename int_type> 
+inline int_type mix_bits(int_type x)
+{
+    return uint_mixer(x);
+}
+
 #undef  PLATFORM_INTRINSICS_DEFINED
 #define PLATFORM_INTRINSICS_DEFINED
 #endif /* !defined(INTRINSICS_H) */
