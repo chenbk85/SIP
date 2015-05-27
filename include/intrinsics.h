@@ -316,7 +316,7 @@ typedef uint8_t cacheline_t[CACHELINE_SIZE];
 /// @param size The size value to round up.
 /// @param pow2 The power-of-two alignment.
 /// @return The input size, rounded up to the nearest even multiple of pow2.
-internal_function inline size_t align_up(size_t size, size_t pow2)
+public_function inline size_t align_up(size_t size, size_t pow2)
 {
     assert((pow2 & (pow2-1)) == 0);
     return (size == 0) ? pow2 : ((size + (pow2-1)) & ~(pow2-1));
@@ -326,7 +326,7 @@ internal_function inline size_t align_up(size_t size, size_t pow2)
 /// @param size The size value to round up.
 /// @param pow2 The power-of-two alignment.
 /// @return The input size, rounded up to the nearest even multiple of pow2.
-internal_function inline int64_t align_up(int64_t size, size_t pow2)
+public_function inline int64_t align_up(int64_t size, size_t pow2)
 {
     assert((pow2 & (pow2-1)) == 0);
     uint64_t pow2_64   = uint64_t(pow2);
@@ -338,9 +338,22 @@ internal_function inline int64_t align_up(int64_t size, size_t pow2)
 /// @param size The size value to clamp.
 /// @param limit The upper-bound to clamp to.
 /// @return The smaller of size and limit.
-internal_function inline size_t clamp_to(size_t size, size_t limit)
+public_function inline size_t clamp_to(size_t size, size_t limit)
 {
     return (size > limit) ? limit : size;
+}
+
+/// @summary Calculates the next power-of-two greater than or equal to a value.
+/// @param x The input value.
+/// @return A power-of-two value greater than or equal to the input value.
+public_function inline size_t next_pow2(size_t x)
+{
+    size_t n = 1;
+    while (n < x)
+    {
+        n  <<= 1;
+    }
+    return n;
 }
 
 #undef  PLATFORM_INTRINSICS_DEFINED
