@@ -278,7 +278,7 @@ public_function char* string_table_put(string_table_t *table, char const *str, s
         if (new_vals != NULL) table->VBuckets[bucket] = new_vals;
         if (new_keys != NULL && new_vals != NULL)
         {   // memory allocation was successful, store the updated capacity.
-            new_keys[ST_BUCKET_CAPACITY]  = new_size;
+            new_keys[ST_BUCKET_CAPACITY]  = (uint32_t)  new_size;
             klist  = new_keys;
             vlist  = new_vals;
         }
