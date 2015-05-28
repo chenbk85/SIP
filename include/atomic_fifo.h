@@ -59,6 +59,20 @@ struct fifo_allocator_t
     cacheline_t      Pad1;    /// Padding separating allocator data from other fields.
 };
 
+/// @summary Define the data associated with a table mapping target queue to 
+/// its corresponding FIFO node allocator. The target queue is identified by
+/// address only and is stored internally as an opaque pointer-size value. 
+/// This structure is not safe for concurrent access by multiple threads.
+template <typename T>
+struct fifo_allocator_table_t
+{   typedef uintptr_t             queue_t;
+    typedef fifo_allocator_t<T>   alloc_t;
+    size_t           Count;   /// The number of items in the table.
+    size_t           Capacity;/// The maximum number of items in the table.
+    queue_t         *KList;   /// The list of keys.
+    alloc_t         *VList;   /// The list of allocator instances.
+};
+
 /// @summary Define the data associated with a FIFO in which the producer and
 /// consumer are the same thread. There are no locks and no waiting. This type
 /// of queue is good for internal buffering. The FIFO maintains an internal
@@ -238,6 +252,75 @@ inline fifo_node_t<T>* fifo_allocator_get(fifo_allocator_t<T> *alloc)
     if (alloc->Head == NULL) alloc->Head = node;       // list was empty; Head = Tail
     alloc->Tail = node;                                // node is the new tail
     return node;
+}
+
+/// @summary Initializes a new node allocator table.
+/// @param table The FIFO node allocator table to initialize.
+/// @param capacity The number of node allocator instances to pre-allocate.
+template <typename T>
+inline void fifo_allocator_table_create(fifo_allocator_table_t<T> *table, size_t capacity)
+{   typedef typename fifo_allocator_table_t<T>::queue_t k_t;
+    typedef typename fifo_allocator_table_t<T>::alloc_t v_t;
+    table->Count    = 0;
+    table->Capacity = 0;
+    table->KList    = NULL;
+    table->VList    = NULL;
+    if (capacity > 0)
+    {
+        table->KList    = (k_t*) malloc(capacity * sizeof(k_t));
+        table->VList    = (v_t*) malloc(capacity * sizeof(v_t));
+        table->Capacity = capacity;
+    }
+    for (size_t i = 0; i < capacity; ++i)
+    {   // initialize the fields of each allocator.
+        fifo_allocator_init(&table->VList[i]);
+    }
+}
+
+/// @summary Frees resources associated with an allocator table.
+/// @param table The allocator table to delete.
+template <typename T>
+inline void fifo_allocator_table_delete(fifo_allocator_table_t<T> *table)
+{
+    for (size_t i = 0, n = table->Count; i < n; ++i)
+    {   // free all nodes in each allocator pool.
+        fifo_allocator_reinit(&table->VList[i]);
+    }
+    free(table->VList); table->VList = NULL;
+    free(table->KList); table->KList = NULL;
+    table->Count   = 0;
+    table->Capacity= 0;
+}
+
+/// @summary Retrieves the allocator associated with a given key. If the key is not known, a new allocator is initialized.
+/// @param table The allocator table to query or update.
+/// @param key The address (usually of the target FIFO) used as the key.
+/// @return The FIFO node allocator associated with the key, or NULL if memory allocation failed.
+template <typename T>
+inline fifo_allocator_t<T>* fifo_allocator_table_get(fifo_allocator_table_t<T> *table, void const *key)
+{   typedef typename fifo_allocator_table_t<T>::queue_t k_t;
+    typedef typename fifo_allocator_table_t<T>::alloc_t v_t;
+    k_t const k = (k_t const) key;
+    for (size_t i = 0, n = table->Count; i < n; ++i)
+    {
+        if (table->KList[i] == k)
+        {   // this allocator already exists in the table.
+            return &table->VList[i];
+        }
+    }
+    if (table->Count == table->Capacity)
+    {   // need to allocate additional storage.
+        size_t newc   = calculate_capacity(table->Capacity, table->Capacity + 1, 64, 16);
+        k_t   *newk   =(k_t*) realloc(table->KList, newc * sizeof(k_t));
+        v_t   *newv   =(v_t*) realloc(table->VList, newc * sizeof(v_t));
+        if (newk != NULL) table->KList = newk;
+        if (newv != NULL) table->VList = newv;
+        if (newk != NULL && newv != NULL) table->Capacity = newc;
+        else return NULL;
+    }
+    size_t index = table->Count++;
+    table->KList[index] = k; fifo_allocator_init(&table->VList[index]);
+    return &table->VList[index];
 }
 
 /// @summary Initialize the queue to empty. No existing resources are freed,
