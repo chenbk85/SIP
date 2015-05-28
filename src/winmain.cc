@@ -294,6 +294,18 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     pio_driver_close(&pio);
     aio_driver_close(&aio);
 
+    size_t ofs_a = 0;
+    size_t ofs_b = 0;
+    size_t ofs_c = 0;
+    string_table_t st;
+    string_table_create(&st, 128, 0);
+    string_table_put(&st, "String A", ofs_a);
+    string_table_put(&st, "String B", ofs_b);
+    OutputDebugStringA(string_table_get(&st, ofs_a));
+    OutputDebugStringA(string_table_get(&st, ofs_b));
+    assert(string_table_put(&st, "String A", ofs_c) == string_table_get(&st, ofs_a));
+    string_table_delete(&st);
+
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
     if (!create_file_list(&image_files, 0, 0) || !enumerate_files(&image_files, "images", "*.*", true))
