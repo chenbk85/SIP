@@ -33,6 +33,9 @@
 
 #include "runtime.cc"
 
+#include "idtable.cc"
+#include "strtable.cc"
+
 #include "filepath.cc"
 #include "iobuffer.cc"
 #include "aiodriver.cc"

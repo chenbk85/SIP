@@ -375,6 +375,7 @@ struct image_open_info_t
 /// satisfy simple metadata queries, even if the image is not currently loaded.
 struct image_cache_info_t
 {
+    uintptr_t           ImageId;         /// The application-defined image identifier (duplicated in the ID table.)
     uintptr_t           TargetCache;     /// The image cache into which the image data was loaded.
     size_t              BytesInCache;    /// The number of bytes reserved for the image in the target cache.
     uint32_t            ImageFormat;     /// The image pixel format. One of dxgi_format_e.
@@ -398,11 +399,9 @@ struct image_cache_info_t
 /// loaded into an image cache at some future point.
 struct image_database_t
 {
-    // image_database_begin_update()
-    // image_database_end_update()
-    // because we'll want to batch-insert
     SRWLOCK             Lock;            /// The lock guarding against concurrent insertions.
-    SRWLOCK             CacheLock;       /// The lock guarding cache information updates specifically.
+    size_t              ImageCount;      /// The number of images defined in the database.
+    size_t              ImageCapacity;   /// The number of images with allocated storage.
     id_table_t          IdTable;         /// The table mapping image ID to registry index.
     string_table_t      PathTable;       /// The string table of cached virtual file paths.
     image_open_info_t  *OpenInfo;        /// The list of VFS file open arguments for each image.
@@ -1027,7 +1026,7 @@ public_function void dx10_header_for_dds(dds_header_dxt10_t *dx10, dds_header_t 
     dx10->Format    = dxgi_format(dds, NULL);
     dx10->Dimension = D3D11_RESOURCE_DIMENSION_TEXTURE1D;
     dx10->Flags     = 0; // determined below
-    dx10->ArraySize = dxgi_array_count(dds, NULL);
+    dx10->ArraySize =(uint32_t) dxgi_array_count(dds, NULL);
     dx10->Flags2    = DDS_ALPHA_MODE_UNKNOWN;
 
     // determine a correct resource dimension:
@@ -1092,4 +1091,259 @@ public_function inline size_t dxgi_image_dimension(uint32_t format, size_t dimen
         return image_max2<size_t>(1, ((dimension + 3) / 4) * 4);
     }
     else return image_max2<size_t>(1, dimension);
+}
+
+/// @summary Initializes a new, empty image database and preallocates storage.
+/// @param db The image database state to initialize.
+/// @param expected_capacity The number of image records expected to live in this database instance.
+/// @param prealloc_capacity The number of image records to pre-allocate.
+public_function void image_database_create(image_database_t *db, size_t expected_capacity, size_t prealloc_capacity)
+{
+    InitializeSRWLock(&db->Lock);
+    id_table_create(&db->IdTable, expected_capacity / 128);
+    string_table_create(&db->PathTable, expected_capacity, 0);
+    db->ImageCount    = 0;
+    db->ImageCapacity = 0;
+    db->OpenInfo      = NULL;
+    db->CacheInfo     = NULL;
+    if (prealloc_capacity > 0)
+    {
+        db->OpenInfo      =(image_open_info_t *) malloc(prealloc_capacity * sizeof(image_open_info_t ));
+        db->CacheInfo     =(image_cache_info_t*) malloc(prealloc_capacity * sizeof(image_cache_info_t));
+        db->ImageCapacity = prealloc_capacity;
+    }
+}
+
+/// @summary Frees all storage associated with an image database.
+/// @param db The image database to delete.
+public_function void image_database_delete(image_database_t *db)
+{
+    for (size_t i = 0, n = db->ImageCount; i < n; ++i)
+    {   // free storage for each entry in CacheInfo.
+        // the database takes ownership of the memory blocks 
+        // once the image cache has finished loading the image.
+        free(db->CacheInfo[i].LevelInfo);    db->CacheInfo[i].LevelInfo    = NULL;
+        free(db->CacheInfo[i].LevelOffsets); db->CacheInfo[i].LevelOffsets = NULL;
+        db->CacheInfo[i].ElementCount  = 0;
+        db->CacheInfo[i].LevelCount    = 0;
+    }
+    free(db->CacheInfo); db->CacheInfo = NULL;
+    free(db->OpenInfo);  db->OpenInfo  = NULL;
+    string_table_delete(&db->PathTable);
+    id_table_delete(&db->IdTable);
+    db->ImageCount    = 0;
+    db->ImageCapacity = 0;
+}
+
+/// @summary Deletes all records in an image database.
+/// @param db The image database to reset.
+public_function void image_database_reset(image_database_t *db)
+{
+    AcquireSRWLockExclusive(&db->Lock);
+    // free memory allocated for cache information entries.
+    for (size_t i = 0, n = db->ImageCount; i < n; ++i)
+    {   // free storage for each entry in CacheInfo.
+        // the database takes ownership of the memory blocks 
+        // once the image cache has finished loading the image.
+        free(db->CacheInfo[i].LevelInfo);    db->CacheInfo[i].LevelInfo    = NULL;
+        free(db->CacheInfo[i].LevelOffsets); db->CacheInfo[i].LevelOffsets = NULL;
+        db->CacheInfo[i].ElementCount  = 0;
+        db->CacheInfo[i].LevelCount    = 0;
+    }
+    // wipe out data in the ID and string tables.
+    db->ImageCount = 0;
+    id_table_clear(&db->IdTable);
+    string_table_clear(&db->PathTable);
+    ReleaseSRWLockExclusive(&db->Lock);
+}
+
+/// @summary Acquires the image database writer lock. Each call must be paired with a call to image_database_end_write().
+/// @param db The image database being updated.
+public_function void image_database_begin_write(image_database_t *db)
+{
+    AcquireSRWLockExclusive(&db->Lock);
+}
+
+/// @summary Inserts a new image record into the database. The database must be locked.
+/// @param db The image database being updated.
+/// @param image_id The application-defined identifier of the image.
+/// @param path A NULL-terminated UTF-8 string specifying the virtual path of the image file.
+/// @param file_hints A combination of vfs_file_hint_e specifying the preferred file behavior, or VFS_FILE_HINT_NONT (0) to let the implementation decide. These hints may not be honored.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT (0) to let the implementation decide.
+public_function void image_database_insert_nolock(image_database_t *db, uintptr_t image_id, char const *path, int file_hints=VFS_FILE_HINT_NONE, int decoder_hint=VFS_DECODER_HINT_USE_DEFAULT)
+{
+    if (db->ImageCount == db->ImageCapacity)
+    {   // reallocate storage for both the open info and the cache info.
+        size_t              numimages = calculate_capacity(db->ImageCapacity, db->ImageCapacity + 1, 4096, 1024);
+        image_open_info_t  *new_opens =(image_open_info_t *) realloc(db->OpenInfo , numimages * sizeof(image_open_info_t ));
+        image_cache_info_t *new_cache =(image_cache_info_t*) realloc(db->CacheInfo, numimages * sizeof(image_cache_info_t));
+        if (new_opens != NULL) db->OpenInfo  = new_opens;
+        if (new_cache != NULL) db->CacheInfo = new_cache;
+        if (new_opens != NULL  && new_cache != NULL) db->ImageCapacity = numimages;
+    }
+    // initialize the data for the new entry.
+    size_t path_offset = 0;
+    string_table_put(&db->PathTable, path, path_offset);
+    id_table_put(&db->IdTable, image_id, db->ImageCount);
+
+    image_open_info_t  &oinfo = db->OpenInfo [db->ImageCount];
+    oinfo.ImageId      = image_id;
+    oinfo.PathOffset   = path_offset;
+    oinfo.FileHints    = file_hints;
+    oinfo.DecoderHint  = decoder_hint;
+
+    image_cache_info_t &cinfo = db->CacheInfo[db->ImageCount];
+    memset(&cinfo, 0, sizeof(image_cache_info_t));
+    cinfo.ImageId      = image_id;
+
+    db->ImageCount++;
+}
+
+/// @summary Updates an existing image record with image information. The database must be locked.
+/// @param db The image database being updated.
+/// @param cache_info The populated record of image information from the image cache.
+public_function void image_database_update_nolock(image_database_t *db, image_cache_info_t const &cache_info)
+{
+    size_t index;
+    if (id_table_get(&db->IdTable, cache_info.ImageId, &index))
+    {   // free any existing memory allocated for this entry.
+        free(db->CacheInfo[index].LevelInfo);    db->CacheInfo[index].LevelInfo    = NULL;
+        free(db->CacheInfo[index].LevelOffsets); db->CacheInfo[index].LevelOffsets = NULL;
+        // and then copy over the new data into the entry.
+        db->CacheInfo[index] = cache_info;
+    }
+}
+
+/// @summary Releases the image database writer lock.
+/// @param db The image database being updated.
+public_function void image_database_end_write(image_database_t *db)
+{
+    ReleaseSRWLockExclusive(&db->Lock);
+}
+
+/// @summary Acquires the writer lock, inserts a single image record, and releases the writer lock. This function is generally used by application code.
+/// @param db The image database being updated.
+/// @param image_id The application-defined identifier of the image.
+/// @param path A NULL-terminated UTF-8 string specifying the virtual path of the image file.
+/// @param file_hints A combination of vfs_file_hint_e specifying the preferred file behavior, or VFS_FILE_HINT_NONT (0) to let the implementation decide. These hints may not be honored.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT (0) to let the implementation decide.
+public_function void image_database_insert(image_database_t *db, uintptr_t image_id, char const *path, int file_hints=VFS_FILE_HINT_NONE, int decoder_hint=VFS_DECODER_HINT_USE_DEFAULT)
+{
+    image_database_begin_write(db);
+    image_database_insert_nolock(db, image_id, path, file_hints, decoder_hint);
+    image_database_end_write(db);
+}
+
+/// @summary Acquires the writer lock, updates a single image record, and releases the writer lock. This function is generally used by the image cache.
+/// @param db The image database being updated.
+/// @param cache_info The populated record of image information from the image cache.
+public_function void image_database_update(image_database_t *db, image_cache_info_t const &cache_info)
+{
+    image_database_begin_write(db);
+    image_database_update_nolock(db, cache_info);
+    image_database_end_write(db);
+}
+
+/// @summary Acquires the image database reader lock for batch query operations. This call must be paired with image_database_end_read().
+/// @param db The image database being queried.
+public_function void image_database_begin_read(image_database_t *db)
+{
+    AcquireSRWLockShared(&db->Lock);
+}
+
+/// @summary Retrieves the information needed to open an image. This function is typically called by the image cache layer.
+/// @param db The image database to query.
+/// @param image_id The application-defined identifier of the image.
+/// @param file_hints On return, this value is updated with the default file open hint flags.
+/// @param decoder_hint On return, this value is updated with the default decoder hint value.
+/// @return The virtual path of the image file, or NULL. Free the returned buffer using the standard C library free() function.
+public_function char* image_database_file_nolock(image_database_t *db, uintptr_t image_id, int &file_hints, int &decoder_hint)
+{
+    size_t index;
+    if (id_table_get(&db->IdTable, image_id, &index))
+    {   // the specified image is known. because the string table is only
+        // valid until the image DB is unlocked, we need to strdup the path.
+        // free the returned buffer using the standard C library free() call.
+        file_hints   = db->OpenInfo[index].FileHints;
+        decoder_hint = db->OpenInfo[index].DecoderHint;
+        return _strdup(string_table_get(&db->PathTable, db->OpenInfo[index].PathOffset));
+    }
+    else
+    {   // the database doesn't know of an image with the specified ID.
+        file_hints   = VFS_FILE_HINT_NONE;
+        decoder_hint = VFS_DECODER_HINT_USE_DEFAULT;
+        return NULL;
+    }
+}
+
+/// @summary Retrieves basic information about an image. This function is typically called by application code.
+/// @param db The image database to query.
+/// @param image_id The application-defined identifier of the image.
+/// @param image_info On return, information about the image is copied to this location. If the image is not in-cache, the BytesInCache field will be zero.
+/// @return true if the image information has been set, meaning the image has been loaded at least once.
+public_function bool image_database_image_info_nolock(image_database_t *db, uintptr_t image_id, image_cache_info_t &image_info)
+{
+    size_t index;
+    if (id_table_get(&db->IdTable, image_id, &index))
+    {   // return the image information from the most recent load.
+        // the database may know of the image, but if the image 
+        // hasn't been loaded yet, there won't be any useful information.
+        image_info =  db->CacheInfo[index];
+        return (image_info.ImageFormat != DXGI_FORMAT_UNKNOWN);
+    }
+    else
+    {   // the database doesn't know of an image with the specified ID.
+        memset(&image_info, 0, sizeof(image_cache_info_t));
+        return false;
+    }
+}
+
+/// @summary Releases the image database reader lock.
+/// @param db The image database being queried.
+public_function void image_database_end_read(image_database_t *db)
+{
+    ReleaseSRWLockShared(&db->Lock);
+}
+
+/// @summary Acquires the reader lock, queries image file open information, and releases the reader lock. This function is typically called by the image cache layer.
+/// @param db The image database to query.
+/// @param image_id The application-defined identifier of the image.
+/// @param file_hints On return, this value is updated with the default file open hint flags.
+/// @param decoder_hint On return, this value is updated with the default decoder hint value.
+/// @return The virtual path of the image file, or NULL. Free the returned buffer using the standard C library free() function.
+public_function char* image_database_file(image_database_t *db, uintptr_t image_id, int &file_hints, int &decoder_hint)
+{
+    image_database_begin_read(db);
+    char *path = image_database_file_nolock(db, image_id, file_hints, decoder_hint);
+    image_database_end_read(db);
+    return path;
+}
+
+/// @summary Acquires the reader lock, queries image attributes, and releases the reader lock. This function is typically called by the application logic.
+/// @param db The image database to query.
+/// @param image_id The application-defined identifier of the image.
+/// @param image_info On return, information about the image is copied to this location. If the image is not in-cache, the BytesInCache field will be zero.
+/// @return true if the image information has been set, meaning the image has been loaded at least once.
+public_function bool image_database_image_info(image_database_t *db, uintptr_t image_id, image_cache_info_t &image_info)
+{
+    image_database_begin_read(db);
+    bool result = image_database_image_info_nolock(db, image_id, image_info);
+    image_database_end_read(db);
+    return result;
+}
+
+/// @summary Determines whether an image is in-cache as of the most recent query.
+/// @param image_info Image information as returned by image_database_image_info().
+/// @return true if the image was in-cache at the time the query was executed.
+public_function bool image_in_cache(image_cache_info_t const &image_info)
+{
+    return (image_info.BytesInCache > 0);
+}
+
+/// @summary Determines whether basic image attributes have been set.
+/// @param image_info Image information as returned by image_database_image_info().
+/// @return true if the image information had been set at the time the query was executed.
+public_function bool image_info_set(image_cache_info_t const &image_info)
+{
+    return (image_info.ImageFormat != DXGI_FORMAT_UNKNOWN);
 }
