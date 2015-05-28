@@ -100,7 +100,7 @@ internal_function uint32_t default_string_hash_cs(char const *str, char const *&
         {
             hash = _lrotl(hash, 7) + ch;
         }
-        end = iter + 1;
+        end = iter;
     }
     else end = str + 1;
     return hash;
@@ -121,7 +121,7 @@ internal_function uint32_t default_string_hash_ci(char const *str, char const *&
         {
             hash = _lrotl(hash, 7) + ((ch >= 'A' && ch <= 'Z') ? ((ch-'A')+'a') : ch);
         }
-        end = iter + 1;
+        end = iter;
     }
     else end = str + 1;
     return hash;
@@ -142,7 +142,7 @@ internal_function uint32_t string_hash_path(char const *str, char const *&end)
         {
             hash = _lrotl(hash, 7) + ((ch >= 'A' && ch <= 'Z') ? ((ch-'A')+'a') : ((ch == '\\') ? '/' : ch));
         }
-        end = iter + 1;
+        end = iter;
     }
     else end = str + 1;
     return hash;
