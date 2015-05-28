@@ -290,9 +290,9 @@ public_function char* string_table_put(string_table_t *table, char const *str, s
     }
 
     // update the hash table with key = hash and value = byte_offset.
-    size_t table_index  = klist[ST_BUCKET_SIZE]++;
-    klist [table_index  + ST_KEY_OFFSET] = hash;
-    vlist [table_index] = byte_offset;
+    size_t table_index = klist[ST_BUCKET_SIZE]++;
+    klist [table_index + ST_KEY_OFFSET] = hash;
+    vlist [table_index]= byte_offset;
 
     // all operations completed successfully.
     table->NextBlock  += nbytes;
