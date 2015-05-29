@@ -1,5 +1,7 @@
 /*/////////////////////////////////////////////////////////////////////////////
-/// @summary 
+/// @summary Defines the interface to an image cache, which maintains metadata
+/// for images known to the system, coordinates loading of image data into 
+/// cache memory, and eviction of images to limit cache memory usage.
 ///////////////////////////////////////////////////////////////////////////80*/
 
 /*////////////////
@@ -15,7 +17,7 @@
 /////////////////*/
 /// @summary A special value that may be assigned to image_declaration_t::FinalFrame
 /// to indicate that the specified image file defines all frames of the image.
-static size_t const IMAGE_ALL_FRAMES  = ~0;
+static size_t const IMAGE_ALL_FRAMES  = ~size_t(0);
 
 /*///////////////////
 //   Local Types   //
@@ -102,6 +104,8 @@ typedef fifo_allocator_t<image_location_t>            image_location_alloc_t;
 typedef fifo_allocator_t<image_location_t>            image_eviction_alloc_t;
 typedef mpsc_fifo_u_t   <image_location_t>            image_location_queue_t;
 typedef spsc_fifo_u_t   <image_location_t>            image_eviction_queue_t;
+#define IMAGE_LOCATION_STATIC_INIT(iid, fid)      \
+    { (iid), (fid), NULL, 0, 0 }
 
 /// @summary Defines the data output by the cache when it needs to load a frames from a file.
 /// For images where the frame data is spread across multiple files (like a PNG sequence), 
@@ -125,7 +129,6 @@ typedef spsc_fifo_u_t   <image_load_t>                image_load_queue_t;
 struct image_cache_result_t
 {
     uint32_t             CommandId;               /// One of image_cache_command_e specifying the command type.
-    uint32_t             ErrorCode;               /// ERROR_SUCCESS, or a system error code.
     uintptr_t            ImageId;                 /// The application-defined identifier of the logical image.
     size_t               FrameIndex;              /// The zero-based frame index.
     void                *BaseAddress;             /// The base address of the frame data, if it was locked.
@@ -136,20 +139,37 @@ typedef fifo_allocator_table_t<image_cache_result_t>  image_cache_result_alloc_t
 typedef fifo_allocator_t      <image_cache_result_t>  image_cache_result_alloc_t;
 typedef mpsc_fifo_u_t         <image_cache_result_t>  image_cache_result_queue_t; // or SPSC?
 
+/// @summary Defines the data returned when a cache control command completes with an error.
+/// Generally, only lock commands will generate errors. In the case where the command operates
+/// on a range of frames, only one error result will be generated for the entire range.
+struct image_cache_error_t
+{
+    uint32_t             CommandId;               /// One of image_cache_command_e specifying the command type.
+    DWORD                ErrorCode;               /// ERROR_SUCCESS, or a system error code.
+    uintptr_t            ImageId;                 /// The application-defined identifier of the logical image.
+    size_t               FirstFrame;              /// The zero-based index of the first frame of the request.
+    size_t               FinalFrame;              /// The zero-based index of the last frame of the request, or IMAGE_ALL_FRAMES.
+};
+typedef fifo_allocator_table_t<image_cache_error_t>   image_cache_error_alloc_table_t;
+typedef fifo_allocator_t      <image_cache_error_t>   image_cache_error_alloc_t;
+typedef mpsc_fifo_u_t         <image_cache_error_t>   image_cache_error_queue_t;
+
 /// @summary Defines the data specified with a cache update command, which will generate 
 /// some sequence of operations (images may be evicted, loads may be generated, and so on.)
 struct image_cache_command_t
-{   typedef image_cache_result_queue_t                result_queue_t;
+{   typedef image_cache_error_queue_t                 error_queue_t;
+    typedef image_cache_result_queue_t                result_queue_t;
     uint32_t             CommandId;               /// One of image_cache_command_e specifying the operation to perform.
     uint32_t             Options;                 /// A combination of image_cache_command_option_e.
     uintptr_t            ImageId;                 /// The application-defined identifier of the logical image.
     size_t               FirstFrame;              /// The zero-based index of the first frame to operate on.
     size_t               FinalFrame;              /// The zero-based index of the last frame to operate on, or IMAGE_ALL_FRAMES.
     uint8_t              Priority;                /// The priority value to use when loading the file (if necessary.)
-    result_queue_t      *ResultQueue;             /// The queue in which results should be placed, or NULL.
+    error_queue_t       *ErrorQueue;              /// The queue in which error results should be placed, or NULL.
+    result_queue_t      *ResultQueue;             /// The queue in which successful completion results should be placed, or NULL.
 };
-typedef fifo_allocator_t<image_cache_command_t> image_command_alloc_t;
-typedef mpsc_fifo_u_t   <image_cache_command_t> image_command_queue_t;
+typedef fifo_allocator_t<image_cache_command_t>       image_command_alloc_t;
+typedef mpsc_fifo_u_t   <image_cache_command_t>       image_command_queue_t;
 
 /// @summary Defines the parameters controlling cache behavior. The cache behavior may 
 /// be modified at runtime, for example, to tune memory usage.
@@ -235,6 +255,7 @@ struct image_cache_entry_t
 /// cache is not responsible for allocating or committing image memory.
 struct image_cache_t
 {   typedef image_cache_result_alloc_table_t          result_alloc_table_t;
+    typedef image_cache_error_alloc_table_t           error_alloc_table_t;
     typedef image_declaration_alloc_t                 declaration_alloc_t;
     typedef image_declaration_queue_t                 declaration_queue_t;
     typedef image_definition_alloc_t                  definition_alloc_t;
@@ -281,6 +302,7 @@ struct image_cache_t
     size_t                 PendingCount;          /// The number of in-progress frame lock commands.
     size_t                 PendingCapacity;       /// The total number of allocated storage slots for pending frame lock commands.
     image_cache_command_t *PendingLocks;          /// The list of pending frame lock commands.
+    error_alloc_table_t    ErrorAlloc;            /// The table of FIFO node allocators for posting error results to client queues.
     result_alloc_table_t   ResultAlloc;           /// The table of FIFO node allocators for posting lock results to client queues.
 };
 
@@ -509,6 +531,69 @@ internal_function void image_cache_process_drop(image_cache_t *cache, image_cach
     {   // this image does not have any entry in the cache, so just delete it.
         image_cache_drop_image_record(cache, cmd.ImageId);
     }
+}
+
+/// @summary Generates a completion event for a lock command for a single frame.
+/// @param cache The image cache that processed the lock command.
+/// @param cmd The lock command being completed.
+/// @param loc Information about the placement of the frame in cache memory.
+internal_function void image_cache_complete_lock(image_cache_t *cache, image_cache_command_t const &cmd, image_location_t const &loc)
+{
+    if (cmd.ResultQueue != NULL)
+    {   // get the producer allocator from the table. one will be created if necessary.
+        image_cache_result_alloc_t    *alloc = fifo_allocator_table_get(&cache->ResultAlloc, cmd.ResultQueue);
+        fifo_node_t<image_cache_result_t> *n = fifo_allocator_get(alloc);
+        n->Item.ImageId        = loc.ImageId;
+        n->Item.FrameIndex     = loc.FrameIndex;
+        n->Item.CommandId      = IMAGE_CACHE_COMMAND_LOCK;
+        n->Item.BaseAddress    = loc.BaseAddress;
+        n->Item.BytesReserved  = loc.BytesReserved;
+        mpsc_fifo_u_produce(cmd.ResultQueue, n);
+    }
+}
+
+/// @summary Generates an error event for an image cache control command.
+/// @param cache The image cache that processed the command.
+/// @param cmd The command being completed.
+/// @param error The system error code to return to the application.
+internal_function void image_cache_complete_error(image_cache_t *cache, image_cache_command_t const &cmd, uint32_t error)
+{
+    if (cmd.ErrorQueue != NULL)
+    {   // get the producer allocator from the table. one will be created if necessary.
+        image_cache_error_alloc_t     *alloc = fifo_allocator_table_get(&cache->ErrorAlloc, cmd.ErrorQueue);
+        fifo_node_t<image_cache_error_t>  *n = fifo_allocator_get(alloc);
+        n->Item.CommandId  = cmd.CommandId;
+        n->Item.ErrorCode  = error;
+        n->Item.ImageId    = cmd.ImageId;
+        n->Item.FirstFrame = cmd.FirstFrame;
+        n->Item.FinalFrame = cmd.FinalFrame;
+        mpsc_fifo_u_produce(cmd.ErrorQueue, n);
+    }
+}
+
+internal_function void image_cache_process_lock(image_cache_t *cache, image_cache_command_t const &cmd)
+{
+    size_t index;
+    if (id_table_get(&cache->EntryIds, cmd.ImageId, &index) == false)
+    {   // this image has no frames in cache. create a new cache entry.
+        if (cache->EntryCount == cache->EntryCapacity)
+        {   // grow the list of cache entries.
+            // TODO(rlk): instead of hard-coded values, use cache initialization capacity.
+            size_t new_amount  = calculate_capacity(cache->EntryCapacity, cache->EntryCapacity+1, 4096, 1024);
+            image_cache_entry_t *nl = (image_cache_entry_t*) realloc(cache->EntryList, new_amount * sizeof(image_cache_entry_t));
+            if (nl != NULL)
+            {   // memory allocation was successful.
+                cache->EntryList     = nl;
+                cache->EntryCapacity = new_amount;
+            }
+            else
+            {   // memory allocation failed. complete the request immediately.
+                image_cache_complete_error(cache, cmd, ERROR_OUTOFMEMORY);
+            }
+        }
+    }
+
+    image_cache_entry_t &entry = cache->EntryList[index];
 }
 
 /*////////////////////////
