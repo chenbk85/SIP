@@ -84,6 +84,19 @@
 // image_blob_t    : Manages block of address space, maintains entry list. One per-format.
 // image_entry_t   : Stores metadata for a single logical image.
 
+// TODO(rlk):
+// Need to figure out how to expose encoding to the parser.
+// The parser doesn't need to know about image_cache_t etc. it only needs to know about the image_encoder_t.
+// Define the image_encoder_t in image_defs.cc, move image_blob.cc to after the parser includes.
+// The image_cache_t needs to know about all of the parser implementations.
+// Move the parser list stuff from image_load.cc to this file.
+// Delete image_load.cc as it is no longer needed.
+// Have a function to switch on image_encoding_e and instantiate the correct image_encoder_t.
+// Need to be able to support multi-frame images, which have a uintptr_t ImageId and a FrameIndex+FrameCount.
+// That covers the loading of images. Then need to add support for the cache functionality.
+// The image_blob_t should be possible to implement without image_cache_t or any of the request stuff
+//   as it is only responsible for reserving and committing memory (basically it's just a stack allocator).
+
 /*///////////////
 //   Globals   //
 ///////////////*/
