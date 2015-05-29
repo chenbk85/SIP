@@ -44,13 +44,11 @@
 #include "vfsdriver.cc"
 #include "threadio.cc"
 
-#include "image_defs.cc"
-#include "image_blob.cc"
+#include "imtypes.cc"
+#include "imcache.cc"
 
 #include "parseutl.cc"
 #include "parsedds.cc"
-
-#include "image_load.cc"
 
 #include "prcmdlist.cc"
 #include "presentation.cc"
