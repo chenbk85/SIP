@@ -286,9 +286,17 @@ enum dds_alpha_mode_e
 /// @summary Define the recognized image encodings. The image encoding allows 
 /// data to be uploaded to image memory in a non-native format, for example, 
 /// RLE-encoded JPEG blocks, and decompressed via compute kernel or shader program.
-enum image_encoding_e
+enum image_encoding_e : int
 {
     IMAGE_ENCODING_RAW             = 0,  /// The image is encoded in a DXGI format.
+};
+
+/// @summary Define the recognized image compression types. Image compression 
+/// in this case does not include hardware-supported block compressed data, but
+/// rather data like a JPEG bitstream.
+enum image_compression_e : int
+{
+    IMAGE_COMPRESSION_NONE         = 0,  /// The image has no additional compression applied.
 };
 
 
