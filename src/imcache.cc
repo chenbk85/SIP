@@ -116,6 +116,7 @@ struct image_load_t
     char const          *FilePath;                /// The NULL-terminated UTF-8 virtual file path.
     size_t               FirstFrame;              /// The zero-based index of the first frame to load.
     size_t               FinalFrame;              /// The zero-based index of the last frame to load, or IMAGE_ALL_FRAMES.
+    int64_t              FileOffset;              /// The byte offset of the start of the first frame to load, or 0.
     int                  FileHints;               /// A combination of vfs_file_hint_t to use when opening the file.
     int                  DecoderHint;             /// One of vfs_decoder_hint_e to use when opening the file.
     uint8_t              Priority;                /// The file load priority.
@@ -199,6 +200,33 @@ struct image_files_data_t
     size_t               FileCount;               /// The number of individual files making up the image.
     size_t               FileCapacity;            /// The number of file definitions that can be stored.
     image_file_t        *FileList;                /// Information about each individual file.
+};
+
+/// @summary Maintains a dynamic list of queues to be notified of some condition
+/// when a single frame of an image has finished being loaded. 
+template <typename T>
+struct frame_load_queue_list_t
+{
+    size_t               QueueCount;              /// The number of queues to notify.
+    size_t               QueueCapacity;           /// The allocated capacity of the queue list.
+    T                  **QueueList;               /// The set of queues to notify.
+};
+
+/// @summary Defines the set of data associated with an outstanding load request. 
+/// The queue lists are tracked separately because the same error queue may be 
+/// specified with every request (so error handling/reporting can be done in one place)
+/// while several different request queues may be specified.
+struct image_loads_data_t
+{   typedef frame_load_queue_list_t<image_cache_error_queue_t > error_queues_t;
+    typedef frame_load_queue_list_t<image_cache_result_queue_t> result_queues_t;
+    uintptr_t            ImageId;                 /// The application-defined identifier of the logical image.
+    size_t               TotalFrames;             /// The total number of frames defined on the image, or IMAGE_ALL_FRAMES if unknown.
+    size_t               FrameCount;              /// The number of frames waiting to load.
+    size_t               FrameCapacity;           /// The number of frame indices that can be stored in FrameList.
+    size_t              *FrameList;               /// The set of frame indices waiting to be loaded.
+    uint64_t            *RequestTime;             /// The set of frame initial request times, in nanoseconds.
+    error_queues_t      *ErrorQueues;             /// The set of frame load error queues.
+    result_queues_t     *ResultQueues;            /// The set of frame load result queues.
 };
 
 /// @summary Defines the metadata maintained for each logical image.
@@ -291,6 +319,11 @@ struct image_cache_t
     id_table_t             EntryIds;              /// The internal table of mapping logical image ID to cache state.
     image_cache_entry_t   *EntryList;             /// The list of cache entries for images with at least one in-cache frame.
 
+    size_t                 LoadCount;             /// The number of outstanding load requests.
+    size_t                 LoadCapacity;          /// The total number of allocated storage slots in LoadList.
+    id_table_t             LoadIds;               /// The list of image IDs for outstanding load requests. May contain duplicates.
+    image_loads_data_t    *LoadList;              /// The list of unique outstanding load request state.
+
     load_queue_t           LoadQueue;             /// The SPSC output queue for image load requests.
     load_alloc_t           LoadAlloc;             /// The internal FIFO node allocator for the image load request queue.
 
@@ -316,6 +349,81 @@ struct image_cache_t
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
+/// @summary Initialize, and possible pre-allocate space for storing a set of 
+/// pointers to queues of some type. Each item in the set is unique.
+/// @param list The queue list to initialize.
+/// @param capacity The initial capacity of the queue list.
+template <typename T>
+inline void frame_load_queue_list_create(frame_load_queue_list_t<T> *list, size_t capacity)
+{
+    list->QueueCount    = 0;
+    list->QueueCapacity = 0;
+    list->QueueList     = NULL;
+    if (capacity > 0)
+    {   // preallocate storage for the specified number of items.
+        T **storage  = (T**)malloc(capacity * sizeof(T*));
+        if (storage != NULL)
+        {
+            list->QueueList      = storage;
+            list->QueueCapacity  = capacity;
+        }
+    }
+}
+
+/// @summary Free resources associated with a frame load queue list.
+/// @param list The queue list to delete.
+template <typename T>
+inline void frame_load_queue_list_delete(frame_load_queue_list_t<T> *list)
+{
+    free(list->QueueList); list->QueueList = NULL;
+    list->QueueCount     = 0;
+    list->QueueCapacity  = 0;
+}
+
+/// @summary Mark a frame load queue list as empty without freeing any memory.
+/// @param list The queue list to clear.
+template <typename T>
+inline void frame_load_queue_list_clear(frame_load_queue_list_t<T> *list)
+{
+    list->QueueCount = 0;
+}
+
+/// @summary Store a queue reference in a frame load queue list. If the specified
+/// queue already exists in the list, it is not re-added. NULL items are excluded.
+/// @param list The queue list to update.
+/// @param queue The queue reference to store.
+template <typename T>
+inline void frame_load_queue_list_put(frame_load_queue_list_t<T> *list, T *queue)
+{
+    if (queue == NULL)
+    {   // don't allow NULL entries to be inserted into the list.
+        return;
+    }
+    // search for this item in the list. we only want to generate one event notification.
+    for (size_t i = 0, n = list->QueueCount; i < n; ++i)
+    {
+        if (list->QueueList[i] == queue)
+            return;
+    }
+    // queue not found in the queue list; add it.
+    if (list->QueueCount == list->QueueCapacity)
+    {
+        size_t old_amount = list->QueueCapacity;
+        size_t new_amount = calculate_capacity(old_amount, old_amount+1, 8, 8);
+        T    **new_queues =(T**) realloc(list->QueueList, new_amount * sizeof(T*));
+        if (new_queues != NULL)
+        {   // memory allocation was successful. update state.
+            list->QueueList     = new_queues;
+            list->QueueCapacity = new_amount;
+        }
+        // else, memory allocation failed. how to handle?
+    }
+    if (list->QueueCount < list->QueueCapacity)
+    {   // proceed with adding the new item to the list.
+        list->QueueList[list->QueueCount++] = queue;
+    }
+}
+
 /// @summary Reads the current tick count for use as a timestamp.
 /// @return The current timestamp value, in nanoseconds.
 internal_function inline uint64_t image_cache_nanotime(image_cache_t *cache)
@@ -582,6 +690,7 @@ internal_function uint32_t image_cache_complete_error(image_cache_t *cache, imag
 /// @param image_id The application-defined identifier of the image associated with the cache entry.
 /// @param now_time The current cache update timestamp, specified in nanoseconds.
 /// @param index On return, this location is updated with the zero-based index of the new entry.
+/// @return Either ERROR_SUCCESS or a system error code.
 internal_function uint32_t image_cache_add_entry(image_cache_t *cache, uintptr_t image_id, uint64_t now_time, size_t &index)
 {
     if (cache->EntryCount == cache->EntryCapacity)
@@ -596,13 +705,10 @@ internal_function uint32_t image_cache_add_entry(image_cache_t *cache, uintptr_t
         }
         else return ERROR_OUTOFMEMORY;
 
-        // the new entry was just allocated, so initialize its fields.
-        size_t e   = cache->EntryCount;
-        cache->EntryList[e].FrameCount    = 0;
-        cache->EntryList[e].FrameCapacity = 0;
-        cache->EntryList[e].FrameList     = NULL;
-        cache->EntryList[e].FrameData     = NULL;
-        cache->EntryList[e].FrameState    = NULL;
+        // initialize the fields of the newly-allocated entries.
+        size_t new_first = cache->EntryCount;
+        size_t new_count = cache->EntryCapacity - cache->EntryCount;
+        memset(&cache->EntryList[new_first], 0, new_count * sizeof(image_cache_entry_t));
     }
     // initialize the fields of the new entry.
     index = cache->EntryCount++;
@@ -635,45 +741,324 @@ internal_function uint32_t image_cache_add_entry(image_cache_t *cache, uintptr_t
     return ERROR_SUCCESS;
 }
 
-internal_function uint32_t image_cache_process_lock(image_cache_t *cache, image_cache_command_t const &cmd, uint64_t now_time)
+/// @summary Updates a pending load record to include a new frame. The frame is only
+/// added to the pending load record if it doesn't already exist; otherwise, the 
+/// response queues are stored and the requestor will be notified when the frame is 
+/// ready, or when an error has occurred.
+/// @param load The frame load record to update.
+/// @param frame_index The zero-based index of the frame to load, or IMAGE_ALL_FRAMES.
+/// @param new_frame On return, this value is set to true if this frame was not previously marked to load.
+/// @param error On return, this value is updated with ERROR_SUCCESS, or a system error code.
+/// @return The zero-based index of the frame record in the frame list.
+internal_function size_t image_cache_frame_load_list_put(image_loads_data_t &load, size_t frame_index, bool &new_item, uint32_t &error)
+{   typedef typename image_loads_data_t::error_queues_t  equeue_t;
+    typedef typename image_loads_data_t::result_queues_t rqueue_t;
+    // if the frame is already in the list, just return the existing index.
+    for (size_t i = 0, n = load.FrameCount; i < n; ++i)
+    {
+        if (load.FrameList[i] == frame_index || load.FrameList[i] == IMAGE_ALL_FRAMES)
+        {   // there's a load pending for this frame. 
+            new_item = false;
+            return i;
+        }
+    }
+    // the frame is not in the pending load list, so create a new entry.
+    if (load.FrameCount == load.FrameCapacity)
+    {   // increase the capacity of the frame list.
+        size_t  old_amount = load.FrameCapacity;
+        size_t  new_amount = calculate_capacity(old_amount, old_amount+1, 1024, 128);
+        size_t         *nf =(size_t  *)realloc (load.FrameList   , new_amount * sizeof(size_t));
+        uint64_t       *nt =(uint64_t*)realloc (load.RequestTime , new_amount * sizeof(uint64_t));
+        equeue_t       *ne =(equeue_t*)realloc (load.ErrorQueues , new_amount * sizeof(equeue_t));
+        rqueue_t       *nr =(rqueue_t*)realloc (load.ResultQueues, new_amount * sizeof(rqueue_t));
+        if (nf != NULL) load.FrameList      = nf;
+        if (nt != NULL) load.RequestTime    = nt;
+        if (ne != NULL) load.ErrorQueues    = ne;
+        if (nr != NULL) load.ResultQueues   = nr;
+        if (nf != NULL && nt != NULL && ne != NULL && nr != NULL)
+        {   // all lists reallocated successfully. update capacity.
+            load.FrameCapacity = new_amount;
+            // initialize any new queue lists.
+            size_t new_first   = old_amount;
+            size_t new_count   = new_amount - old_amount;
+            for (size_t n = 0, i = new_first; n < new_count; ++n, ++i)
+            {
+                frame_load_queue_list_create(&load.ErrorQueues[i] , 1);
+                frame_load_queue_list_create(&load.ResultQueues[i], 8);
+            }
+        }
+        else
+        {   // unable to re-allocate one or more lists. don't update capacity.
+            error = ERROR_OUTOFMEMORY;
+            return IMAGE_ALL_FRAMES;
+        }
+    }
+    else
+    {   // use an existing, but currently unused item.
+        size_t index = load.FrameCount;
+        frame_load_queue_list_clear(&load.ErrorQueues [index]);
+        frame_load_queue_list_clear(&load.ResultQueues[index]);
+    }
+    new_item = true;
+    error    = ERROR_SUCCESS;
+    return load.FrameCount++;
+}
+
+/// @summary Generate the load notification for a single frame.
+/// @param cache The image cache processing the lock request.
+/// @param load The pending-load record for the image, which will be updated with a new frame load record.
+/// @param cmd The image lock command that's initiating the load request.
+/// @param image_info Known information about the image.
+/// @param file_info Information about the mapping of frames to source files.
+/// @param frame_index The zero-based index of the frame to load, or IMAGE_ALL_FRAMES.
+/// @param now_time The nanosecond timestamp of the current update tick, used for measuring load time.
+/// @return ERROR_SUCCESS or a system error code.
+internal_function uint32_t image_cache_load_frame(image_cache_t *cache, image_loads_data_t &load, image_cache_command_t const &cmd, image_basic_data_t const &image_info, image_files_data_t const &file_info, size_t frame_index, uint64_t now_time)
 {
-    size_t index;
-    if (id_table_get(&cache->EntryIds, cmd.ImageId, &index) == false)
-    {   // this image has no frames in cache. create a new cache entry.
-        uint32_t error = image_cache_add_entry(cache, cmd.ImageId, now_time, index);
-        if (FAILED(error)) return error;
+    int64_t  offset      = 0;
+    size_t   first_frame = frame_index;
+    size_t   final_frame = frame_index;
+    bool     new_frame   = false;
+    uint32_t error       = ERROR_SUCCESS;
+    size_t   list_index  = image_cache_frame_load_list_put(load, frame_index, new_frame, error);
+    if (FAILED(error))     return error;
+
+    if (frame_index < image_info.ElementCount)
+    {   // supply the byte offset of the start of the image.
+        offset      = image_info.FileOffsets[frame_index];
+    }
+    else// frame_index = IMAGE_ALL_FRAMES
+    {   // begin loading from the beginning of the file.
+        offset      = 0;
+        first_frame = 0;
+    }
+    
+    if (new_frame)
+    {   // initialize the frame pending-load state.
+        load.FrameList  [list_index] = frame_index;
+        load.RequestTime[list_index] = now_time;
+        // submit the load requests for each frame.
+        uint32_t    file_error = ERROR_NOT_FOUND;
+        for (size_t file_index = 0, file_count = file_info.FileCount; file_index < file_count; ++file_index)
+        {
+            image_file_t const &f = file_info.FileList[file_index];
+            if (frame_index >=  f.FirstFrame && frame_index <= f.FinalFrame)
+            {   // found the matching source file record. emit the notification.
+                fifo_node_t<image_load_t> *n  = fifo_allocator_get(&cache->LoadAlloc);
+                n->Item.ImageId     = cmd.ImageId;
+                n->Item.FilePath    = f.FilePath;
+                n->Item.FirstFrame  = first_frame;
+                n->Item.FinalFrame  = final_frame;
+                n->Item.FileOffset  = offset;
+                n->Item.FileHints   = file_info.FileHints;
+                n->Item.DecoderHint = file_info.DecoderHint;
+                n->Item.Priority    = cmd.Priority;
+                spsc_fifo_u_produce(&cache->LoadQueue, n);
+                file_error = ERROR_SUCCESS;
+                break;
+            }
+        }
+        if (FAILED(file_error))
+        {
+            return file_error;
+        }
+    }
+    // add the queues to the notify lists.
+    frame_load_queue_list_put(&load.ErrorQueues [list_index], cmd.ErrorQueue);
+    frame_load_queue_list_put(&load.ResultQueues[list_index], cmd.ResultQueue);
+    return ERROR_SUCCESS;
+}
+
+/// @summary Generates pending load records and load requests for one or more frames.
+/// @param cache The image cache processing the lock request.
+/// @param cmd The image lock command that's initiating the load request.
+/// @param image_info Known information about the image.
+/// @param first_frame The zero-based index of the first frame to start loading.
+/// @param final_frame The zero-based index of the last frame to load, or IMAGE_ALL_FRAMES.
+/// @param now_time The nanosecond timestamp of the current update tick, used for measuring load time.
+/// @return ERROR_SUCCESS or a system error code.
+internal_function uint32_t image_cache_submit_load(image_cache_t *cache, image_cache_command_t const &cmd, image_basic_data_t const &image_info, size_t first_frame, size_t final_frame, uint64_t now_time)
+{   // locate the information describing the mapping of frames to files.
+    image_files_data_t    file_info;
+    size_t                file_index;
+    AcquireSRWLockShared(&cache->MetadataLock);
+    if (id_table_get(&cache->ImageIds, cmd.ImageId, &file_index))
+    {   // save off the file mapping information.
+        file_info   = cache->FileData[file_index];
+        ReleaseSRWLockShared(&cache->MetadataLock);
+    }
+    else
+    {   // this image has no file records - we can't load it.
+        ReleaseSRWLockShared(&cache->MetadataLock);
+        return ERROR_NOT_FOUND;
     }
 
+    // locate any existing pending-load information for this image:
+    size_t load_index;
+    if (id_table_get(&cache->LoadIds, cmd.ImageId, &load_index) == false)
+    {   // there's no existing load for this image. create one.
+        if (cache->LoadCount == cache->LoadCapacity)
+        {   // need to grow the list of in-progress load state.
+            size_t old_amount = cache->LoadCapacity;
+            size_t new_amount = calculate_capacity(old_amount, old_amount+1, 1024, 128);
+            image_loads_data_t *ld_list =(image_loads_data_t*) realloc(cache->LoadList, new_amount * sizeof(image_loads_data_t));
+            if (ld_list != NULL)
+            {   // the list was reallocated successfully. save the new state.
+                cache->LoadList     = ld_list;
+                cache->LoadCapacity = new_amount;
+                // initialize the new list entries to NULL/0.
+                size_t new_index    = cache->LoadCount;
+                size_t new_count    = new_amount - old_amount;
+                memset(&cache->LoadList[new_index], 0, new_count * sizeof(image_loads_data_t));
+            }
+            else return ERROR_OUTOFMEMORY;
+        }
+        // grab an unused item from the list.
+        load_index = cache->LoadCount++;
+        image_loads_data_t &ldinit = cache->LoadList[load_index];
+        size_t  nknown     = image_info.ElementCount;
+        size_t  frames     = nknown ? nknown : IMAGE_ALL_FRAMES;
+        ldinit.ImageId     = cmd.ImageId;
+        ldinit.TotalFrames = frames;
+        ldinit.FrameCount  = 0;
+        // insert the new item into the image ID-> load index table.
+        id_table_put(&cache->LoadIds, cmd.ImageId, load_index);
+    }
+
+    // finally, generate load requests for the individual frames.
+    image_loads_data_t &load = cache->LoadList[load_index];
+    if (final_frame == IMAGE_ALL_FRAMES)
+    {   // we're loading all frames, but don't know how many there are.
+        // generate one load request for all frames with index IMAGE_ALL_FRAMES.
+        uint32_t   e = image_cache_load_frame(cache, load, cmd, image_info, file_info, IMAGE_ALL_FRAMES, now_time);
+        if (FAILED(e)) return e;
+    }
+    else
+    {   // we're loading a known range of frames and have a valid frame count.
+        // generate one load request for each frame not already pending load.
+        size_t      frame_count =(final_frame - first_frame) + 1;
+        for (size_t frame_index = first_frame ; frame_index <= final_frame; ++frame_index)
+        {
+            uint32_t   e = image_cache_load_frame(cache, load, cmd, image_info, file_info, frame_index, now_time);
+            if (FAILED(e)) return e;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
+/// @summary Process a command to lock one or more frames of an image into cache memory.
+/// @param cache The image cache processing the command.
+/// @param cmd Data supplied with the lock command. 
+/// @param now_time The nanosecond timestamp of the current update tick, used for measuring load time.
+/// @return ERROR_SUCCESS, ERROR_IO_PENDING, or a system error code.
+internal_function uint32_t image_cache_process_lock(image_cache_t *cache, image_cache_command_t const &cmd, uint64_t now_time)
+{
     size_t meta_index;
     image_basic_data_t image_info = IMAGE_BASIC_DATA_STATIC_INIT(cmd.ImageId);
     AcquireSRWLockShared(&cache->MetadataLock);
     if (id_table_get(&cache->ImageIds, cmd.ImageId, &meta_index))
     {   // save a copy of the image metadata.
         image_info = cache->MetaData[meta_index];
+        ReleaseSRWLockShared(&cache->MetadataLock);
     }
-    ReleaseSRWLockShared(&cache->MetadataLock);
-
-    // if the image hasn't ever been loaded, there won't be any metadata.
-    if (image_info.ImageFormat == DXGI_FORMAT_UNKNOWN)
-    {
-        // generate load requests for all frames in the specified range.
-        // for each frame in the cmd range, find a matching entry in the file info list, 
-        // and then generate a load request for each one. note that it's possible that
-        // each file entry corresponds to a range of frames.
+    else
+    {   // this image isn't known at all, so we can't lock it.
+        ReleaseSRWLockShared(&cache->MetadataLock);
+        return ERROR_NOT_FOUND;
     }
 
-    image_cache_entry_t &entry = cache->EntryList[index];
-    // if the frame is already in-cache, increment the lock count and complete immediately.
-    // otherwise, generate a load request and copy the command to the pending list.
-    for (size_t i = 0, n = entry.FrameCount; i < n; ++i)
-    {
+    size_t cache_index;
+    if (id_table_get(&cache->EntryIds, cmd.ImageId, &cache_index) == false)
+    {   // this image has no frames in cache. create a new cache entry.
+        uint32_t error = image_cache_add_entry(cache, cmd.ImageId, now_time, cache_index);
+        if (FAILED(error)) return error;
+    }
+
+    // save off the cache entry, which will be updated below.
+    // figure out the actual set of frames being requested.
+    image_cache_entry_t &entry = cache->EntryList[cache_index];
+    size_t first_frame = cmd.FirstFrame;
+    size_t final_frame = cmd.FinalFrame;
+    if (image_info.ElementCount != 0)
+    {   // this image has been loaded previously, we have metadata.
+        if (cmd.FinalFrame >= image_info.ElementCount)
+        {   // replace IMAGE_ALL_FRAMES with the last frame index.
+            final_frame = image_info.ElementCount - 1;
+        }
+    }
+    else
+    {   // we don't have any metadata, so we don't know how many frames
+        // there are, and we don't know what the frame offsets are.
+        first_frame  = 0;
+        final_frame  = IMAGE_ALL_FRAMES;
+    }
+
+    // check whether each frame is in-cache, and if not, request it be loaded.
+    // the only way final_frame is IMAGE_ALL_FRAMES at this point is if we 
+    // don't have any image metadata to know the frame count, and in this
+    // case we'll always stream in the entire image.
+    if (final_frame != IMAGE_ALL_FRAMES)
+    {   // check to see if any or all of the requested frames are in-cache.
+        // if so, complete these immediately; generate pending loads for misses.
+        uint32_t error_pending  = ERROR_IO_PENDING;
+        size_t frames_in_cache  = 0;
+        size_t frames_requested =(final_frame - first_frame) + 1;
+        for (size_t frame_index = first_frame ; frame_index <= final_frame; ++frame_index)
+        {   bool load_the_frame = true;
+            // the frame index list is unordered, so check every element.
+            for (size_t i = 0, n = entry.FrameCount; i < n; ++i)
+            {
+                if (entry.FrameList[i] == frame_index)
+                {   // update the state of the cache entry. increment the lock 
+                    // count so that the frame won't get evicted from cache memory.
+                    entry.FrameState[i].LastRequestTime = now_time;
+                    entry.FrameState[i].LockCount++;
+                    // complete the lock request for the caller.
+                    image_location_t loc;
+                    loc.ImageId        = cmd.ImageId;
+                    loc.FrameIndex     = frame_index;
+                    loc.BaseAddress    = entry.FrameData[i].BaseAddress;
+                    loc.BytesReserved  = entry.FrameData[i].BytesReserved;
+                    loc.Context        = entry.FrameData[i].Context;
+                    image_cache_complete_lock(cache, cmd, loc);
+                    // no need to re-load this frame into cache.
+                    load_the_frame = false;
+                    frames_in_cache++;
+                    break;
+                }
+            }
+            if (load_the_frame)
+            {   // submit a single-frame pending load to the queue.
+                uint32_t   err = image_cache_submit_load(cache, cmd, image_info, frame_index, frame_index, now_time);
+                if (FAILED(err))
+                {   // immediately complete with an error result.
+                    error_pending = image_cache_complete_error(cache, cmd, err);
+                }
+            }
+        }
+        if (frames_in_cache == frames_requested)
+        {   // the lock request has completed. nothing needs to be loaded.
+            return ERROR_SUCCESS;
+        }
+        return error_pending;
+    }
+    else
+    {   // load every frame of the image into cache. this is represented by 
+        // a single load request. in this case, no frames are currently loaded.
+        uint32_t   err = image_cache_submit_load(cache, cmd, image_info, 0, IMAGE_ALL_FRAMES, now_time);
+        if (FAILED(err))
+        {   // immediately complete with an error result.
+            return image_cache_complete_error(cache, cmd, err);
+        }
+        return ERROR_IO_PENDING;
     }
 }
 
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
-
+/// @summary Executes a single update tick for an image cache.
+/// @param cache The image cache to update.
 public_function void image_cache_update(image_cache_t *cache)
 {   // get the timestamp of the start of this tick for use in tagging cache entries.
     uint64_t now_time = image_cache_nanotime(cache);
@@ -691,7 +1076,16 @@ public_function void image_cache_update(image_cache_t *cache)
         }
         else
         {   // this is a new entry, so create it.
-            // ...
+            if (cache->ImageCount == cache->ImageCapacity)
+            {   // grow the image definition lists.
+            }
+            index = cache->ImageCount++;
+            cache->FileData[index].ImageId     = imgdecl.ImageId;
+            cache->FileData[index].FileCount   = 0;
+            cache->FileData[index].FileHints   = imgdecl.FileHints;
+            cache->FileData[index].DecoderHint = imgdecl.DecoderHint;
+            cache->FileData[index].FileList[...] ...
+            id_table_put(&cache->ImageIds, imgdecl.ImageId, index);
         }
         ReleaseSRWLockExclusive(&cache->MetadataLock);
     }
