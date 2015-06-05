@@ -49,7 +49,8 @@ enum image_cache_entry_flag_e       : uint32_t
 /// @summary Defines the supported victim selection behaviors of the image cache.
 enum image_cache_behavior_e
 {
-    IMAGE_CACHE_BEHAVIOR_IMAGE_LRU_FRAME_MRU = 0, /// The most recently used frame of the least recently used image is selected.
+    IMAGE_CACHE_BEHAVIOR_MANUAL              = 0, /// The cache does not automatically evict frames.
+    IMAGE_CACHE_BEHAVIOR_IMAGE_LRU_FRAME_MRU = 1, /// The most recently used frame of the least recently used image is selected.
     // ...
 };
 
@@ -680,21 +681,21 @@ internal_function void image_cache_process_drop(image_cache_t *cache, image_cach
 
 /// @summary Generates a completion event for a lock command for a single frame.
 /// @param cache The image cache that processed the lock command.
-/// @param cmd The lock command being completed.
+/// @param result_queue The result queue to which the completion event will be posted.
 /// @param loc Information about the placement of the frame in cache memory.
 /// @return The function always returns ERROR_SUCCESS.
-internal_function uint32_t image_cache_complete_lock(image_cache_t *cache, image_cache_command_t const &cmd, image_location_t const &loc)
+internal_function uint32_t image_cache_complete_lock(image_cache_t *cache, image_cache_command_t::result_queue_t *result_queue, image_location_t const &loc)
 {
-    if (cmd.ResultQueue != NULL)
+    if (result_queue != NULL)
     {   // get the producer allocator from the table. one will be created if necessary.
-        image_cache_result_alloc_t    *alloc = fifo_allocator_table_get(&cache->ResultAlloc, cmd.ResultQueue);
+        image_cache_result_alloc_t    *alloc = fifo_allocator_table_get(&cache->ResultAlloc, result_queue);
         fifo_node_t<image_cache_result_t> *n = fifo_allocator_get(alloc);
         n->Item.ImageId        = loc.ImageId;
         n->Item.FrameIndex     = loc.FrameIndex;
         n->Item.CommandId      = IMAGE_CACHE_COMMAND_LOCK;
         n->Item.BaseAddress    = loc.BaseAddress;
         n->Item.BytesReserved  = loc.BytesReserved;
-        mpsc_fifo_u_produce(cmd.ResultQueue, n);
+        mpsc_fifo_u_produce(result_queue, n);
     }
 }
 
@@ -1053,7 +1054,7 @@ internal_function uint32_t image_cache_process_lock(image_cache_t *cache, image_
                     loc.BaseAddress    = entry.FrameData[i].BaseAddress;
                     loc.BytesReserved  = entry.FrameData[i].BytesReserved;
                     loc.Context        = entry.FrameData[i].Context;
-                    image_cache_complete_lock(cache, cmd, loc);
+                    image_cache_complete_lock(cache, cmd.ResultQueue, loc);
                     // no need to re-load this frame into cache.
                     load_the_frame = false;
                     frames_in_cache++;
@@ -1219,6 +1220,115 @@ internal_function void image_cache_update_image_definition(image_cache_t *cache,
     }
 }
 
+/// @summary Updates the cache status in response to a notification that an image frame has been loaded or moved in cache memory.
+/// @param cache The image cache to update.
+/// @param pos The location of the image frame in cache memory.
+/// @param now_time The nanosecond timestamp of the current update tick.
+/// @return ERROR_SUCCESS, or a system error code.
+internal_function uint32_t image_cache_update_location(image_cache_t *cache, image_location_t const &pos, uint64_t now_time)
+{   // retire pending load commands by posting to their result queue.
+    uint64_t  t_start = 0;
+    bool   lock_frame = false;
+    size_t load_index;
+    if (id_table_get(&cache->LoadIds, pos.ImageId, &load_index))
+    {   // locate the completed frame in the load list, and emit the error or result.
+        image_loads_data_t  &load = cache->LoadList[load_index];
+        for (size_t   frame_index = 0, frame_count = load.FrameCount; frame_index < frame_count; ++frame_count)
+        {
+            if (load.FrameList[frame_index] == pos.FrameIndex)
+            {   // post the lock result to every registered queue.
+                for (size_t i = 0, n = load.ResultQueues[frame_index].QueueCount; i < n; ++i)
+                {
+                    image_cache_complete_lock(cache, load.ResultQueues[frame_index].QueueList[i], pos);
+                }
+                // images are only ever loaded in response to a lock request.
+                // indicate that we need to increment the lock count, and also
+                // save off the request time to track frame load time.
+                lock_frame = true;
+                t_start    = load.RequestTime[frame_index];
+                // the frame has finished loading, so remove it from the list.
+                frame_load_queue_list_clear(&load.ErrorQueues [frame_index]);
+                frame_load_queue_list_clear(&load.ResultQueues[frame_index]);
+                // remove from the list by swapping the last item into place.
+                size_t this_frame = frame_index;
+                size_t last_frame = load.FrameCount - 1;
+                load.FrameList   [this_frame] = load.FrameList   [last_frame];
+                load.RequestTime [this_frame] = load.RequestTime [last_frame];
+                load.ErrorQueues [this_frame] = load.ErrorQueues [last_frame];
+                load.ResultQueues[this_frame] = load.ResultQueues[last_frame];
+                load.FrameCount--;
+                // if there are no frames remaining to load, remove the record.
+                if (load.FrameCount == 0)
+                {   // remove from the list by swapping the last item into place.
+                    size_t this_load = load_index;
+                    size_t last_load = cache->LoadCount - 1;
+                    if (this_load != last_load)
+                    {   // update the ID look up table so it can find the relocated item.
+                        id_table_update(&cache->LoadIds, cache->LoadList[last_load].ImageId, load_index, NULL);
+                        cache->LoadList[this_load]     = cache->LoadList[last_load];
+                        cache->LoadCount--;
+                    }
+                    // remove the unused item from the ID look up table.
+                    id_table_remove(&cache->LoadIds, pos.ImageId, NULL);
+                }
+                break;
+            }
+        }
+    }
+
+    size_t entry_index;
+    if (id_table_get(&cache->EntryIds, pos.ImageId, &entry_index) == false)
+    {   // there's no corresponding cache entry, so create one.
+        uint32_t error = image_cache_add_entry(cache, pos.ImageId, now_time, entry_index);
+        if (FAILED(error)) return error;
+    }
+
+    // update the state of the frame in the cache.
+    image_cache_entry_t &entry = cache->EntryList[entry_index];
+    for (size_t i = 0, n = entry.FrameCount; i < n; ++i)
+    {
+        if (entry.FrameList[i] == pos.FrameIndex)
+        {   // store the updated frame location information.
+            entry.FrameData[i].BaseAddress   = pos.BaseAddress;
+            entry.FrameData[i].BytesReserved = pos.BytesReserved;
+            entry.FrameData[i].Context       = pos.Context;
+            // update the cache data of the entry, if it was just loaded.
+            if (lock_frame)
+            {
+                entry.FrameState[i].LockCount++;
+                entry.FrameState[i].TimeToLoad = now_time - t_start;
+            }
+            break;
+        }
+    }
+
+    // update the cache memory load status.
+    int    behavior_id; 
+    size_t bytes_total = 0;
+    size_t bytes_limit = 0;
+    AcquireSRWLockExclusive(&cache->AttribLock);
+    cache->TotalBytes += pos.BytesReserved;
+    behavior_id        = cache->BehaviorId;
+    bytes_limit        = cache->LimitBytes;
+    bytes_total        = cache->TotalBytes;
+    ReleaseSRWLockExclusive(&cache->AttribLock);
+
+    // are we over the allowed memory budget?
+    if (bytes_total > bytes_limit)
+    {   // over memory budget, so we need to evict some frames.
+        switch (behavior_id)
+        {
+        case IMAGE_CACHE_BEHAVIOR_MANUAL:
+            // do nothing in this case. it is up to the user to 
+            // select images or frames and evict them manually.
+            // TODO(rlk): maybe we want to emit some event?
+            // otherwise, how will "the user" know?
+            break;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
@@ -1258,18 +1368,6 @@ public_function void image_cache_update(image_cache_t *cache)
     image_location_t imgpos;
     while (mpsc_fifo_u_consume(&cache->LocationQueue, imgpos))
     {
-        size_t index;
-        if (id_table_get(&cache->EntryIds, imgpos.ImageId, &index))
-        {   // update the existing cache entry. the frame may have 
-            // been relocated, or it may have been loaded for the first time.
-            // ...
-        }
-        else
-        {   // there's no corresponding cache entry, so create one.
-            // ...
-        }
-        // retire pending lock commands by posting to their result queue.
-        // ...
     }
 
     // process all newly received commands. unlock commands and lock 
@@ -1285,13 +1383,13 @@ public_function void image_cache_update(image_cache_t *cache)
             image_cache_process_unlock(cache, imgcmd);
             break;
         case IMAGE_CACHE_COMMAND_LOCK:
-            image_cache_process_lock(cache, imgcmd, now_time);
+            image_cache_process_lock  (cache, imgcmd, now_time);
             break;
         case IMAGE_CACHE_COMMAND_EVICT:
-            image_cache_process_evict(cache, imgcmd);
+            image_cache_process_evict (cache, imgcmd);
             break;
         case IMAGE_CACHE_COMMAND_DROP:
-            image_cache_process_drop(cache, imgcmd);
+            image_cache_process_drop  (cache, imgcmd);
             break;
         }
     }
