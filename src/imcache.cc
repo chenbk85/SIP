@@ -77,6 +77,7 @@ struct image_definition_t
     size_t               Width;                   /// The width of the highest-resolution level of the image, in pixels.
     size_t               Height;                  /// The height of the highest-resolution level of the image, in pixels.
     size_t               SliceCount;              /// The number of slices in the highest-resolution level of the image.
+    size_t               ElementIndex;            /// The zero-based index of the first element definition being specified.
     size_t               ElementCount;            /// The number of array elements, cubemap faces, or frames.
     size_t               LevelCount;              /// The number of levels in the mipmap chain.
     size_t               BytesPerPixel;           /// The number of bytes per-pixel of the image data.
@@ -85,6 +86,7 @@ struct image_definition_t
     dds_header_dxt10_t   DX10Header;              /// Metadata defining extended image attributes.
     dds_level_desc_t    *LevelInfo;               /// An array of LevelCount entries describing the levels in the mipmap chain.
     int64_t             *FileOffsets;             /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
+    bool                 FreeBuffers;             /// true if LevelInfo and FileOffsets should be freed by the image cache.
 };
 typedef fifo_allocator_t<image_definition_t>          image_definition_alloc_t;
 typedef mpsc_fifo_u_t   <image_definition_t>          image_definition_queue_t;
@@ -433,6 +435,38 @@ internal_function inline uint64_t image_cache_nanotime(image_cache_t *cache)
     return uint64_t(SEC_TO_NANOSEC * (double(counts.QuadPart) / double(cache->ClockFrequency.QuadPart)));
 }
 
+/// @summary Normalize a single character for path comparisons.
+/// @param ch The character to normalize.
+/// @return If ch specifies an upper-case ASCII character, it is converted to lower case. If ch specifies a backslash, it is converted to a forward slash.
+internal_function inline char image_cache_path_normalize(char ch)
+{
+    return ((ch >= 'A' && ch <= 'Z') ? ((ch - 'A') + 'a') : ((ch == '\\') ? '/' : ch));
+}
+
+/// @summary Compares two path strings for equality.
+/// @param a A NULL-terminated path string.
+/// @param b A NULL-terminated path string.
+/// @return true if paths a and b represent the same entity.
+internal_function bool image_cache_path_match(char const *a, char const *b)
+{
+    if (a == b)
+    {   // easy out.
+        return true;
+    }
+    if (a == NULL || b == NULL)
+    {   // easy out.
+        return false;
+    }
+    char ca, cb; // both a and b are non-NULL.
+    do
+    {
+        ca = image_cache_path_normalize(*a++);
+        cb = image_cache_path_normalize(*b++);
+    } 
+    while  (ca == cb && ca != 0);
+    return (ca == cb);
+}
+
 /// @summary Immediately drop an image record. The image can no longer be reloaded into cache.
 /// @param cache The image cache to query and update.
 /// @param image_id The application-defined identifier of the logical image to delete.
@@ -751,8 +785,8 @@ internal_function uint32_t image_cache_add_entry(image_cache_t *cache, uintptr_t
 /// @param error On return, this value is updated with ERROR_SUCCESS, or a system error code.
 /// @return The zero-based index of the frame record in the frame list.
 internal_function size_t image_cache_frame_load_list_put(image_loads_data_t &load, size_t frame_index, bool &new_item, uint32_t &error)
-{   typedef typename image_loads_data_t::error_queues_t  equeue_t;
-    typedef typename image_loads_data_t::result_queues_t rqueue_t;
+{   typedef image_loads_data_t::error_queues_t  equeue_t;
+    typedef image_loads_data_t::result_queues_t rqueue_t;
     // if the frame is already in the list, just return the existing index.
     for (size_t i = 0, n = load.FrameCount; i < n; ++i)
     {
@@ -936,7 +970,6 @@ internal_function uint32_t image_cache_submit_load(image_cache_t *cache, image_c
     else
     {   // we're loading a known range of frames and have a valid frame count.
         // generate one load request for each frame not already pending load.
-        size_t      frame_count =(final_frame - first_frame) + 1;
         for (size_t frame_index = first_frame ; frame_index <= final_frame; ++frame_index)
         {
             uint32_t   e = image_cache_load_frame(cache, load, cmd, image_info, file_info, frame_index, now_time);
@@ -1054,6 +1087,138 @@ internal_function uint32_t image_cache_process_lock(image_cache_t *cache, image_
     }
 }
 
+/// @summary Updates the internal table of image definitions to define a new image, or a new frame in an existing image.
+/// @param cache The image cache to update.
+/// @param decl The image declaration.
+internal_function void image_cache_define_image(image_cache_t *cache, image_declaration_t const &decl)
+{
+    size_t index;
+    if (id_table_get(&cache->ImageIds, decl.ImageId , &index))
+    {   // there's an existing entry; update it.
+        image_files_data_t &file_info= cache->FileData[index];
+        // search for an existing file definition. if found, don't re-add.
+        for (size_t i = 0, n = file_info.FileCount; i < n; ++i)
+        {
+            if (file_info.FileList[i].FinalFrame == IMAGE_ALL_FRAMES)
+            {   // a record defining all frames is already present.
+                return;
+            }
+            if (decl.FirstFrame >= file_info.FileList[i].FirstFrame &&
+                decl.FinalFrame <= file_info.FileList[i].FinalFrame)
+            {   // a record defining these frames is already present.
+                return;
+            }
+        }
+        // this is a new file being defined for the image.
+        if (file_info.FileCount == file_info.FileCapacity)
+        {   // grow the file list capacity.
+            size_t old_amount    = file_info.FileCapacity;
+            size_t new_amount    = calculate_capacity(old_amount, old_amount+1, 64, 64);
+            image_file_t  *nl    =(image_file_t*)realloc(file_info.FileList, new_amount * sizeof(image_file_t));
+            if (nl != NULL)
+            {   // update the list data pointer and capacity.
+                file_info.FileList = nl;
+                file_info.FileCapacity = new_amount;
+            }
+            else return; // unable to allocate memory
+        }
+        // insert the new record into the list.
+        file_info.FileList[file_info.FileCount].FilePath   = decl.FilePath;
+        file_info.FileList[file_info.FileCount].FirstFrame = decl.FirstFrame;
+        file_info.FileList[file_info.FileCount].FinalFrame = decl.FinalFrame;
+        file_info.FileCount++;
+    }
+    else
+    {   // this is a new image definition; create it.
+        if (cache->ImageCount == cache->ImageCapacity)
+        {   // increase the capacity of the image lists.
+            size_t old_amount  = cache->ImageCapacity;
+            size_t new_amount  = calculate_capacity(old_amount, old_amount+1, 1024, 1024);
+            image_files_data_t *nf = (image_files_data_t*) realloc(cache->FileData, new_amount * sizeof(image_files_data_t));
+            image_basic_data_t *nm = (image_basic_data_t*) realloc(cache->MetaData, new_amount * sizeof(image_basic_data_t));
+            if (nf != NULL) cache->FileData = nf;
+            if (nm != NULL) cache->MetaData = nm;
+            if (nf != NULL && nm != NULL)
+            {   // initialize the fields of the new items.
+                cache->ImageCapacity = new_amount;
+                size_t new_first  = old_amount;
+                size_t new_count  = new_amount - old_amount;
+                memset(&cache->FileData[new_first], 0, new_count * sizeof(image_files_data_t));
+                memset(&cache->MetaData[new_first], 0, new_count * sizeof(image_basic_data_t));
+            }
+            else return;
+        }
+        image_files_data_t &file_info    = cache->FileData[cache->ImageCount];
+        image_basic_data_t &meta_data    = cache->MetaData[cache->ImageCount];
+        file_info.ImageId                = decl.ImageId;
+        file_info.FileCount              = 0;
+        file_info.FileCapacity           = 1;
+        file_info.FileList               =(image_file_t*) malloc(sizeof(image_file_t));
+        file_info.FileList[0].FilePath   = decl.FilePath;
+        file_info.FileList[0].FirstFrame = decl.FirstFrame;
+        file_info.FileList[0].FinalFrame = decl.FinalFrame;
+        file_info.FileHints              = decl.FileHints;
+        file_info.DecoderHint            = decl.DecoderHint;
+        meta_data = IMAGE_BASIC_DATA_STATIC_INIT(decl.ImageId);
+        // make the new record visible externally.
+        id_table_put(&cache->ImageIds, decl.ImageId, cache->ImageCount);
+        cache->ImageCount++;
+    }
+}
+
+/// @summary Updates the internal table of image metadata.
+/// @param cache The image cache that received the image metadata.
+/// @param def The image attributes.
+internal_function void image_cache_update_image_definition(image_cache_t *cache, image_definition_t const &def)
+{
+    size_t index;
+    if (id_table_get(&cache->ImageIds, def.ImageId, &index))
+    {   // the internal image metadata record takes ownership of 
+        // the data provided as part of the image definition. 
+        // allocated memory will be freed when the image is dropped.
+        image_basic_data_t &meta = cache->MetaData[index];
+        if (meta.ImageFormat    == DXGI_FORMAT_UNKNOWN)
+        {   // store the basic image attributes as none have yet been set.
+            meta.ImageId         = def.ImageId;
+            meta.ImageFormat     = def.ImageFormat;
+            meta.Compression     = def.Compression;
+            meta.Width           = def.Width;
+            meta.Height          = def.Height;
+            meta.SliceCount      = def.SliceCount;
+            meta.ElementCount    = 0;                 // set below
+            meta.LevelCount      = 0;                 // set below
+            meta.BytesPerPixel   = def.BytesPerPixel;
+            meta.BytesPerBlock   = def.BytesPerBlock;
+            meta.DDSHeader       = def.DDSHeader;
+            meta.DX10Header      = def.DX10Header;
+            meta.LevelInfo       = NULL;              // copied below
+            meta.FileOffsets     = NULL;              // copied below
+            if (def.LevelCount   > 0)
+            {   // copy the mip-level descriptors over.
+                // these remain constant for all elements.
+                size_t copy_bytes= def.LevelCount  *  sizeof(dds_level_desc_t);
+                meta.LevelCount  = def.LevelCount;
+                meta.LevelInfo   =(dds_level_desc_t*) malloc(copy_bytes);
+                memcpy(meta.LevelInfo, def.LevelInfo, copy_bytes);
+            }
+        }
+        if (meta.ElementCount <= def.ElementIndex)
+        {   // ensure that file offsets get copied to the correct location.
+            // it's possible that frame 0 might not be the first frame received.
+            size_t   new_count    = def.ElementIndex + def.ElementCount;
+            size_t   new_bytes    = new_count * meta.LevelCount * sizeof(int64_t);
+            int64_t *new_offsets  =(int64_t*)realloc(meta.FileOffsets, new_bytes);
+            if (new_offsets != NULL)
+            {   // copy the file offsets for the new elements.
+                size_t  ofs_index = def.ElementIndex * meta.LevelCount;
+                size_t copy_bytes = def.ElementCount * meta.LevelCount * sizeof(int64_t);
+                meta.ElementCount = new_count;
+                memcpy(&meta.FileOffsets[ofs_index], def.FileOffsets, copy_bytes);
+            }
+        }
+    }
+}
+
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
@@ -1067,26 +1232,9 @@ public_function void image_cache_update(image_cache_t *cache)
     // that may also be queued can reference the most up-to-date information.
     image_declaration_t imgdecl;
     while (mpsc_fifo_u_consume(&cache->DeclarationQueue, imgdecl))
-    {   // check the metadata ID table to see if there's an existing entry.
+    {
         AcquireSRWLockExclusive(&cache->MetadataLock);
-        size_t index;
-        if (id_table_get(&cache->ImageIds, imgdecl.ImageId, &index))
-        {   // there's an existing entry, so update it.
-            // ...
-        }
-        else
-        {   // this is a new entry, so create it.
-            if (cache->ImageCount == cache->ImageCapacity)
-            {   // grow the image definition lists.
-            }
-            index = cache->ImageCount++;
-            cache->FileData[index].ImageId     = imgdecl.ImageId;
-            cache->FileData[index].FileCount   = 0;
-            cache->FileData[index].FileHints   = imgdecl.FileHints;
-            cache->FileData[index].DecoderHint = imgdecl.DecoderHint;
-            cache->FileData[index].FileList[...] ...
-            id_table_put(&cache->ImageIds, imgdecl.ImageId, index);
-        }
+        image_cache_define_image(cache, imgdecl);
         ReleaseSRWLockExclusive(&cache->MetadataLock);
     }
 
@@ -1097,17 +1245,13 @@ public_function void image_cache_update(image_cache_t *cache)
     while (mpsc_fifo_u_consume(&cache->DefinitionQueue, imgdef))
     {   // check the metadata ID table for an existing entry.
         AcquireSRWLockExclusive(&cache->MetadataLock);
-        size_t index;
-        if (id_table_get(&cache->ImageIds, imgdef.ImageId, &index))
-        {   // the internal image metadata record takes ownership of 
-            // the data provided as part of the image definition. 
-            // allocated memory will be freed when the image is dropped.
-            image_basic_data_t  &meta = cache->MetaData[index];
-            // ...
-        }
-        // else, there's no corresponding definition. it's 
-        // possible that the image was dropped, so ignore.
+        image_cache_update_image_definition(cache, imgdef);
         ReleaseSRWLockExclusive(&cache->MetadataLock);
+        if (imgdef.FreeBuffers)
+        {   // automatically free caller-allocated buffers.
+            free(imgdef.LevelInfo);
+            free(imgdef.FileOffsets);
+        }
     }
 
     // process all completed loads of image frames to cache memory.
@@ -1135,5 +1279,20 @@ public_function void image_cache_update(image_cache_t *cache)
     image_cache_command_t imgcmd;
     while (mpsc_fifo_u_consume(&cache->CommandQueue, imgcmd))
     {
+        switch (imgcmd.CommandId)
+        {
+        case IMAGE_CACHE_COMMAND_UNLOCK:
+            image_cache_process_unlock(cache, imgcmd);
+            break;
+        case IMAGE_CACHE_COMMAND_LOCK:
+            image_cache_process_lock(cache, imgcmd, now_time);
+            break;
+        case IMAGE_CACHE_COMMAND_EVICT:
+            image_cache_process_evict(cache, imgcmd);
+            break;
+        case IMAGE_CACHE_COMMAND_DROP:
+            image_cache_process_drop(cache, imgcmd);
+            break;
+        }
     }
 }
