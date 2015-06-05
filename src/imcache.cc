@@ -62,7 +62,7 @@ struct image_declaration_t
     char const          *FilePath;                /// A NULL-terminated, UTF-8 string specifying the virtual file path.
     size_t               FirstFrame;              /// The zero based index of the first frame defined in the file.
     size_t               FinalFrame;              /// The zero-based index of the last frame defined in the file, or IMAGE_ALL_FRAMES.
-    int                  FileHints;               /// A combination of vfs_file_hint_e to pass to the VFS driver when opening the file.
+    uint32_t             FileHints;               /// A combination of vfs_file_hint_e to pass to the VFS driver when opening the file.
     int                  DecoderHint;             /// One of vfs_decoder_hint_e, or VFS_DECODER_HINT_USE_DEFAULT.
 };
 typedef fifo_allocator_t<image_declaration_t>         image_declaration_alloc_t;
@@ -338,11 +338,83 @@ struct image_cache_t
     location_queue_t       LocationQueue;         /// The MPSC input queue for cache memory location updates.
     command_queue_t        CommandQueue;          /// The MPSC input queue for cache control commands.
 
-    size_t                 PendingCount;          /// The number of in-progress frame lock commands.
-    size_t                 PendingCapacity;       /// The total number of allocated storage slots for pending frame lock commands.
-    image_cache_command_t *PendingLocks;          /// The list of pending frame lock commands.
     error_alloc_table_t    ErrorAlloc;            /// The table of FIFO node allocators for posting error results to client queues.
     result_alloc_table_t   ResultAlloc;           /// The table of FIFO node allocators for posting lock results to client queues.
+};
+
+/// @summary Defines the usage statistics that can be returned by an image cache instance.
+struct image_cache_stat_t
+{
+    size_t                 BytesLimit;            /// The configured memory budget, in bytes.
+    size_t                 BytesUsed;             /// The number of bytes currently in-use.
+};
+
+/// @summary Defines the client interface to an image cache from a single thread.
+struct thread_image_cache_t
+{   typedef image_cache_result_queue_t                result_queue_t;
+    typedef image_cache_error_queue_t                 error_queue_t;
+    typedef image_declaration_alloc_t                 declaration_alloc_t;
+    typedef image_command_alloc_t                     command_alloc_t;
+
+    thread_image_cache_t(void);
+    ~thread_image_cache_t(void);
+
+    void initialize
+    (
+        image_cache_t     *cache
+    );                                            /// Set the target cache.
+
+    void configure
+    (
+        image_cache_config_t const &cfg
+    );                                            /// Reconfigure the target cache.
+
+    void add_source
+    (
+        uintptr_t          id, 
+        char const        *path, 
+        size_t             first_frame  = 0, 
+        size_t             final_frame  = IMAGE_ALL_FRAMES, 
+        uint32_t           file_hints   = VFS_FILE_HINT_NONE, 
+        int                decoder_hint = VFS_DECODER_HINT_USE_DEFAULT
+    );                                            /// Define the file source of one or more image frames.
+
+    void stat
+    (
+        image_cache_stat_t &stats 
+    );                                            /// Synchronously retrieve cache statistics.
+
+    void lock
+    (
+        uintptr_t          id, 
+        size_t             first_frame, 
+        size_t             final_frame, 
+        result_queue_t    *result_queue, 
+        error_queue_t     *error_queue, 
+        uint8_t            priority
+    );                                            /// Asynchronously lock one or more frames into cache memory.
+
+    void unlock
+    (
+        uintptr_t          id, 
+        size_t             first_frame, 
+        size_t             final_frame, 
+        uint32_t           options      = IMAGE_CACHE_COMMAND_OPTION_NONE
+    );                                            /// Asynchronously unlock one or more frames in cache memory.
+
+    void evict
+    (
+        uintptr_t          id
+    );                                            /// Asynchronously evict all frames of an image from cache memory.
+
+    void drop
+    (
+        uintptr_t          id
+    );                                            /// Asynchronoulsy evict all frames of an image, and drop the image record.
+
+    image_cache_t         *Cache;                 /// The target image cache.
+    command_alloc_t        CommandAlloc;          /// The FIFO node allocator for the thread, used to submit control commands.
+    declaration_alloc_t    DeclarationAlloc;      /// The FIFO node allocator for the thread, used to submit frame source definitions.
 };
 
 /*///////////////
@@ -1332,6 +1404,211 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
+/// @summary Initialize a new image cache.
+/// @param cache The image cache to create.
+/// @param expected_image_count The number of unique images expected to be defined.
+/// @param config Behavior and size configuration options for the cache.
+public_function void image_cache_create(image_cache_t *cache, size_t expected_image_count, image_cache_config_t const &config)
+{
+    if (expected_image_count < 128)
+    {   // enforce a minimum value.
+        expected_image_count = 128;
+    }
+    size_t bucket_count = expected_image_count / 128;
+
+    QueryPerformanceFrequency(&cache->ClockFrequency);
+
+    InitializeSRWLock(&cache->AttribLock);
+    cache->LimitBytes = config.CacheSize;
+    cache->BehaviorId = config.Behavior;
+    cache->TotalBytes = 0;
+
+    InitializeSRWLock(&cache->MetadataLock);
+    id_table_create(&cache->ImageIds, bucket_count);
+    cache->FileData      = NULL;
+    cache->MetaData      = NULL;
+    cache->ImageCount    = 0;
+    cache->ImageCapacity = 0;
+
+    id_table_create(&cache->EntryIds, bucket_count);
+    cache->EntryList     = NULL;
+    cache->EntryCount    = 0;
+    cache->EntryCapacity = 0;
+
+    id_table_create(&cache->LoadIds, bucket_count);
+    cache->LoadList      = NULL;
+    cache->LoadCount     = 0;
+    cache->LoadCapacity  = 0;
+
+    spsc_fifo_u_init(&cache->LoadQueue);
+    fifo_allocator_init(&cache->LoadAlloc);
+
+    spsc_fifo_u_init(&cache->EvictQueue);
+    fifo_allocator_init(&cache->EvictAlloc);
+
+    mpsc_fifo_u_init(&cache->DeclarationQueue);
+    mpsc_fifo_u_init(&cache->DefinitionQueue);
+    mpsc_fifo_u_init(&cache->LocationQueue);
+    mpsc_fifo_u_init(&cache->CommandQueue);
+
+    fifo_allocator_table_create(&cache->ErrorAlloc, 1);
+    fifo_allocator_table_create(&cache->ResultAlloc, 8);
+}
+
+/// @summary Reconfigure the image cache, modifying the victim selection algorithm and memory budget.
+/// @param cache The image cache to reconfigure.
+/// @param config The new cache configuration values.
+public_function void image_cache_configure(image_cache_t *cache, image_cache_config_t const &config)
+{
+    AcquireSRWLockExclusive(&cache->AttribLock);
+    cache->BehaviorId = config.Behavior;
+    cache->LimitBytes = config.CacheSize;
+    ReleaseSRWLockExclusive(&cache->AttribLock);
+}
+
+/// @summary Query the image cache for usage statistics as of the most recent update.
+/// @param cache The image cache to query.
+/// @param stat The cache statsitics to populate.
+public_function void image_cache_stats(image_cache_t *cache, image_cache_stat_t &stat)
+{
+    AcquireSRWLockShared(&cache->AttribLock);
+    stat.BytesLimit = cache->LimitBytes;
+    stat.BytesUsed  = cache->TotalBytes;
+    ReleaseSRWLockShared(&cache->AttribLock);
+}
+
+/// @summary Mark all frames of an image to be evicted from cache memory.
+/// @param cache The image cache managing the image.
+/// @param id The application-defined image identifier.
+/// @param thread_alloc The allocator used to submit cache control commands from the calling thread.
+public_function void image_cache_evict_image(image_cache_t *cache, uintptr_t id, image_command_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_cache_command_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item.CommandId   = IMAGE_CACHE_COMMAND_EVICT;
+    n->Item.ImageId     = id;
+    n->Item.Options     = IMAGE_CACHE_COMMAND_OPTION_NONE;
+    n->Item.FirstFrame  = 0;
+    n->Item.FinalFrame  = IMAGE_ALL_FRAMES;
+    n->Item.ErrorQueue  = NULL;
+    n->Item.ResultQueue = NULL;
+    n->Item.Priority    = 0;
+    mpsc_fifo_u_produce(&cache->CommandQueue, n);
+}
+
+/// @summary Mark all frames of an image to be evicted from cache memory, and then drop the image to prevent it from being reloaded.
+/// @param cache The image cache managing the image.
+/// @param id The application-defined image identifier.
+/// @param thread_alloc The allocator used to submit cache control commands from the calling thread.
+public_function void image_cache_drop_image(image_cache_t *cache, uintptr_t id, image_command_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_cache_command_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item.CommandId   = IMAGE_CACHE_COMMAND_DROP;
+    n->Item.ImageId     = id;
+    n->Item.Options     = IMAGE_CACHE_COMMAND_OPTION_NONE;
+    n->Item.FirstFrame  = 0;
+    n->Item.FinalFrame  = IMAGE_ALL_FRAMES;
+    n->Item.ErrorQueue  = NULL;
+    n->Item.ResultQueue = NULL;
+    n->Item.Priority    = 0;
+    mpsc_fifo_u_produce(&cache->CommandQueue, n);
+}
+
+/// @summary Define the source file for one or more frames of an image. The image is created, if necessary.
+/// @param cache The image cache managing the image.
+/// @param id The application-defined identifier of the image.
+/// @param file_path The NULL-terminated UTF-8 string specifying the virtual file path. The string will be copied.
+/// @param first_frame The zero-based index of the first frame defined in the file.
+/// @param final_frame The zero-based index of the last frame defined in the file, or IMAGE_ALL_FRAMES.
+/// @param file_hints A combination of vfs_file_hint_e specifying hints used to open the file, or VFS_FILE_HINT_NONE to let the implementation decide.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the type of decoder to create, or VFS_DECODER_HINT_NONE to let the implementation decide.
+/// @param thread_alloc The allocator used to submit image declaration commands from the calling thread.
+public_function void image_cache_add_frames(image_cache_t *cache, uintptr_t id, char const *file_path, size_t first_frame, size_t final_frame, uint32_t file_hints, int decoder_hint, image_declaration_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_declaration_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item.ImageId     = id;
+    n->Item.FilePath    =_strdup(file_path);
+    n->Item.FirstFrame  = first_frame;
+    n->Item.FinalFrame  = final_frame;
+    n->Item.FileHints   = file_hints;
+    n->Item.DecoderHint = decoder_hint;
+    mpsc_fifo_u_produce(&cache->DeclarationQueue, n);
+}
+
+/// @summary Define the source file for all frames of an image. The image is created, if necessary.
+/// @param cache The image cache managing the image.
+/// @param id The application-defined identifier of the image.
+/// @param file_path The NULL-terminated UTF-8 string specifying the virtual file path. The string will be copied.
+/// @param thread_alloc The allocator used to submit image declaration commands from the calling thread.
+public_function void image_cache_add_image(image_cache_t *cache, uintptr_t id, char const *file_path, image_declaration_alloc_t *thread_alloc)
+{
+    image_cache_add_frames(cache, id, file_path, 0, IMAGE_ALL_FRAMES, VFS_FILE_HINT_NONE, VFS_DECODER_HINT_USE_DEFAULT, thread_alloc);
+}
+
+/// @summary Specify image metadata for one or more frames of an image. This is usually performed by the image loader.
+/// @param cache The image cache managing the image.
+/// @param def The image metadata.
+/// @param thread_alloc The allocator used to submit image metadata from the calling thread.
+public_function void image_cache_define_frames(image_cache_t *cache, image_definition_t const &def, image_definition_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_definition_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item = def;
+    mpsc_fifo_u_produce(&cache->DefinitionQueue, n);
+}
+
+/// @summary Specify that a single frame has been placed in cache memory. This is usually performed by the image loader.
+/// @param cache The image cache managing the image.
+/// @param pos Information about the location of the frame in cache memory.
+/// @param thread_alloc The allocator used to submit image placement information from the calling thread.
+public_function void image_cache_place_frame(image_cache_t *cache, image_location_t const &pos, image_location_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_location_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item = pos;
+    mpsc_fifo_u_produce(&cache->LocationQueue, n);
+}
+
+/// @summary Request that one or more frames of an image be locked in cache memory for access.
+/// @param cache The image cache managing the image.
+/// @param id The application-defined identifier of the image to lock.
+/// @param first_frame The zero-based index of the first frame to lock.
+/// @param final_frame The zero-based index of the last frame to lock, or IMAGE_ALL_FRAMES.
+/// @param result_queue The queue where results will be placed for each frame when available.
+/// @param error_queue The queue where errors will be placed for each frame.
+/// @param priority The priority value to use if a frame needs to be re-loaded into cache memory.
+/// @param thread_alloc The allocator used to submit cache control commands from the calling thread.
+public_function void image_cache_lock_frames(image_cache_t *cache, uintptr_t id, size_t first_frame, size_t final_frame, image_cache_result_queue_t *result_queue, image_cache_error_queue_t *error_queue, uint8_t priority, image_command_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_cache_command_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item.CommandId   = IMAGE_CACHE_COMMAND_LOCK;
+    n->Item.ImageId     = id;
+    n->Item.Options     = IMAGE_CACHE_COMMAND_OPTION_NONE;
+    n->Item.FirstFrame  = first_frame;
+    n->Item.FinalFrame  = final_frame;
+    n->Item.ErrorQueue  = error_queue;
+    n->Item.ResultQueue = result_queue;
+    n->Item.Priority    = priority;
+    mpsc_fifo_u_produce(&cache->CommandQueue, n);
+}
+
+/// @summary Request that one or more frames of an image be unlocked in cache memory, allowing them to be evicted.
+/// @param cache The image cache managing the image.
+/// @param id The application-defined identifier of the image to unlock.
+/// @param first_frame The zero-based index of the first frame to unlock.
+/// @param final_frame The zero-based index of the last frame to lunock, or IMAGE_ALL_FRAMES.
+/// @param thread_alloc The allocator used to submit cache control commands from the calling thread.
+public_function void image_cache_unlock_frames(image_cache_t *cache, uintptr_t id, size_t first_frame, size_t final_frame, uint32_t options, image_command_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_cache_command_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item.CommandId   = IMAGE_CACHE_COMMAND_UNLOCK;
+    n->Item.ImageId     = id;
+    n->Item.Options     = options;
+    n->Item.FirstFrame  = first_frame;
+    n->Item.FinalFrame  = final_frame;
+    n->Item.ErrorQueue  = NULL;
+    n->Item.ResultQueue = NULL;
+    n->Item.Priority    = 0;
+    mpsc_fifo_u_produce(&cache->CommandQueue, n);
+}
+
 /// @summary Executes a single update tick for an image cache.
 /// @param cache The image cache to update.
 public_function void image_cache_update(image_cache_t *cache)
@@ -1368,6 +1645,7 @@ public_function void image_cache_update(image_cache_t *cache)
     image_location_t imgpos;
     while (mpsc_fifo_u_consume(&cache->LocationQueue, imgpos))
     {
+        image_cache_update_location(cache, imgpos, now_time);
     }
 
     // process all newly received commands. unlock commands and lock 
@@ -1393,4 +1671,89 @@ public_function void image_cache_update(image_cache_t *cache)
             break;
         }
     }
+}
+
+/// @summary Default constructor. Call thread_image_cache_t::initialize() prior to use.
+thread_image_cache_t::thread_image_cache_t(void)
+    :
+    Cache(NULL)
+{
+    fifo_allocator_init(&CommandAlloc);
+    fifo_allocator_init(&DeclarationAlloc);
+}
+
+/// @summary Frees resources and invalidates all outstanding queue entries.
+thread_image_cache_t::~thread_image_cache_t(void)
+{
+    fifo_allocator_reinit(&DeclarationAlloc);
+    fifo_allocator_reinit(&CommandAlloc);
+    Cache = NULL;
+}
+
+/// @summary Set the image cache used as the target of all operations.
+/// @param cache The target image cache.
+void thread_image_cache_t::initialize(image_cache_t *cache)
+{
+    Cache = cache;
+}
+
+/// @summary Synchronously reconfigure the target image cache.
+/// @param config The image cache configuration to apply.
+void thread_image_cache_t::configure(image_cache_config_t const &config)
+{
+    image_cache_configure(Cache, config);
+}
+
+/// @summary Define an image and declare the source file for one or more frames of data.
+/// @param id The application-defined identifier of the image.
+/// @param path The NULL-terminated UTF-8 string specifying the virtual file path. The string will be copied.
+/// @param first_frame The zero-based index of the first frame defined in the file.
+/// @param final_frame The zero-based index of the last frame defined in the file, or IMAGE_ALL_FRAMES.
+/// @param file_hints A combination of vfs_file_hint_e specifying hints used to open the file, or VFS_FILE_HINT_NONE to let the implementation decide.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the type of decoder to create, or VFS_DECODER_HINT_NONE to let the implementation decide.
+void thread_image_cache_t::add_source(uintptr_t id, char const *path, size_t first_frame, size_t final_frame, uint32_t file_hints, int decoder_hint)
+{
+    image_cache_add_frames(Cache, id, path, first_frame, final_frame, file_hints, decoder_hint, &DeclarationAlloc);
+}
+
+/// @summary Retrieve cache statistics as of the most recent update.
+/// @param stats The cache statistics information to populate.
+void thread_image_cache_t::stat(image_cache_stat_t &stats)
+{
+    image_cache_stats(Cache, stats);
+}
+
+/// @summary Lock one or more frames of an image into cache memory for access.
+/// @param id The application-defined identifier of the image to lock.
+/// @param first_frame The zero-based index of the first frame to lock.
+/// @param final_frame The zero-based index of the last frame to lock, or IMAGE_ALL_FRAMES.
+/// @param result_queue The queue where results will be placed for each frame when available.
+/// @param error_queue The queue where errors will be placed for each frame.
+/// @param priority The priority value to use if a frame needs to be re-loaded into cache memory.
+void thread_image_cache_t::lock(uintptr_t id, size_t first_frame, size_t final_frame, image_cache_result_queue_t *result_queue, image_cache_error_queue_t *error_queue, uint8_t priority)
+{
+    image_cache_lock_frames(Cache, id, first_frame, final_frame, result_queue, error_queue, priority, &CommandAlloc);
+}
+
+/// @summary Request that one or more frames of an image be unlocked in cache memory, allowing them to be evicted.
+/// @param id The application-defined identifier of the image to unlock.
+/// @param first_frame The zero-based index of the first frame to unlock.
+/// @param final_frame The zero-based index of the last frame to lunock, or IMAGE_ALL_FRAMES.
+void thread_image_cache_t::unlock(uintptr_t id, size_t first_frame, size_t final_frame, uint32_t options)
+{
+    image_cache_unlock_frames(Cache, id, first_frame, final_frame, options, &CommandAlloc);
+}
+
+/// @summary Mark all frames of an image to be evicted from cache memory.
+/// @param id The application-defined image identifier.
+void thread_image_cache_t::evict(uintptr_t id)
+{
+    image_cache_evict_image(Cache, id, &CommandAlloc);
+}
+
+/// @summary Mark all frames of an image to be evicted from cache memory, and then drop the image to prevent it from being reloaded.
+/// @param id The application-defined image identifier.
+void thread_image_cache_t::drop(uintptr_t id)
+{
+    image_cache_drop_image(Cache, id, &CommandAlloc);
 }
