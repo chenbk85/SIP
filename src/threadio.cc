@@ -26,51 +26,60 @@ struct thread_io_t
     thread_io_t(void);
     ~thread_io_t(void);
 
-    void                    initialize(
+    void                    initialize
+    (
         vfs_driver_t       *vfs
     );                                        /// Set the target driver interfaces to use.
 
-    bool                    mount(
+    bool                    mount
+    (
         int                 path_id, 
         char const         *mount_path, 
         uint32_t            priority, 
         uintptr_t           mount_id
     );                                        /// Mount a well-known path in the virtual file system.
 
-    bool                    mount(
+    bool                    mount
+    (
         char const         *native_path, 
         char const         *mount_path, 
         uint32_t            priority, 
         uintptr_t           mount_id
     );                                        /// Mount a native filesystem path in the virtual file system.
 
-    bool                    mountv(
+    bool                    mountv
+    (
         char const         *virtual_path, 
         char const         *mount_path, 
         uint32_t            priority, 
         uintptr_t           mount_id
     );                                        /// Mount a virtual path in the virtual file system.
 
-    void                    unmount_all(
+    void                    unmount_all
+    (
         char const         *mount_path
     );                                        /// Delete all mounts at a given mount path.
 
-    void                    unmount(
+    void                    unmount
+    (
         uintptr_t           mount_id
     );                                        /// Delete a specific mount point.
 
-    bool                    put_file(
+    bool                    put_file
+    (
         char const         *virtual_path, 
         void const         *data, 
         int64_t             size_in_bytes
     );                                        /// Synchronously and atomically write an entire file.
 
-    stream_decoder_t*       get_file(
+    stream_decoder_t*       get_file
+    (
         char const         *virtual_path, 
         int                 decoder_hint
     );                                        /// Synchronously read an entire file.
 
-    stream_decoder_t*       load_file(
+    stream_decoder_t*       load_file
+    (
         char const         *virtual_path, 
         int                 file_hints, 
         int                 decoder_hint, 
@@ -79,7 +88,8 @@ struct thread_io_t
         stream_control_t   *control
     );                                        /// Asynchronously stream a file into memory, then close it.
 
-    stream_decoder_t*       stream_file(
+    stream_decoder_t*       stream_file
+    (
         char const         *virtual_path, 
         int                 file_hints, 
         int                 decoder_hint, 
@@ -91,7 +101,31 @@ struct thread_io_t
         stream_control_t   *control
     );                                        /// Asynchronously stream a file into memory with a fixed delivery interval.
 
-    // TODO(rlk): add stream control helpers so you don't have to have a stream_control_t instance.
+    void                    pause_stream
+    (
+        uintptr_t           stream_id
+    );                                        /// Suspend stream-in, but do not close the stream.
+
+    void                    resume_stream
+    (
+        uintptr_t           stream_id
+    );                                        /// Resume stream-in of a paused stream.
+
+    void                    rewind_stream
+    (
+        uintptr_t           stream_id
+    );                                        /// Seek to the beginning of a stream and resume stream-in.
+
+    void                    seek_stream
+    (
+        uintptr_t           stream_id, 
+        int64_t             absolute_offset
+    );                                        /// Seek to a byte offset in a stream and resume stream-in.
+
+    void                    stop_stream
+    (
+        uintptr_t           stream_id
+    );                                        /// Stop stream-in and close the stream.
 
     pio_sti_control_alloc_t PIOControlAlloc;  /// The stream-in control allocator for the thread.
     pio_sti_pending_alloc_t PIOStreamInAlloc; /// The stream-in request allocator for the thread.
@@ -236,4 +270,40 @@ stream_decoder_t* thread_io_t::load_file(char const *virtual_path, int file_hint
 stream_decoder_t* thread_io_t::stream_file(char const *virtual_path, int file_hints, int decoder_hint, uintptr_t stream_id, uint8_t priority, uint64_t interval_ns, size_t chunk_size, size_t chunk_count, stream_control_t *control)
 {
     return vfs_stream_file(VFSDriver, virtual_path, stream_id, priority, file_hints, decoder_hint, interval_ns, chunk_size, chunk_count, &PIOStreamInAlloc, &PIOControlAlloc, control);
+}
+
+/// @summary Pause stream-in of a given stream.
+/// @param stream_id The application-defined identifier of the stream.
+void thread_io_t::pause_stream(uintptr_t stream_id)
+{
+    pio_driver_pause_stream(PIODriver, stream_id, &PIOControlAlloc);
+}
+
+/// @summary Resume stream-in from the previous read location.
+/// @param stream_id The application-defined identifier of the stream.
+void thread_io_t::resume_stream(uintptr_t stream_id)
+{
+    pio_driver_resume_stream(PIODriver, stream_id, &PIOControlAlloc);
+}
+
+/// @summary Seek to the beginning of a stream and resume stream-in.
+/// @param stream_id The application-defined identifier of the stream.
+void thread_io_t::rewind_stream(uintptr_t stream_id)
+{
+    pio_driver_rewind_stream(PIODriver, stream_id, &PIOControlAlloc);
+}
+
+/// @summary Seek to a given location in a stream, and resume stream-in from that point. Note that due to alignment restrictions, stream-in may resume from before the specified byte offset.
+/// @param stream_id The application-defined identifier of the stream.
+/// @param absolute_offset The byte offset to seek to, relative to the start of the stream.
+void thread_io_t::seek_stream(uintptr_t stream_id, int64_t absolute_offset)
+{
+    pio_driver_seek_stream(PIODriver, stream_id, absolute_offset, &PIOControlAlloc);
+}
+
+/// @summary Halt stream-in for a stream, and close the underlying file.
+/// @param stream_id The application-defined identifier of the stream.
+void thread_io_t::stop_stream(uintptr_t stream_id)
+{
+    pio_driver_stop_stream(PIODriver, stream_id, &PIOControlAlloc);
 }
