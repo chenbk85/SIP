@@ -384,6 +384,12 @@ struct thread_image_cache_t
         image_cache_stat_t &stats 
     );                                            /// Synchronously retrieve cache statistics.
 
+    bool image_attributes
+    (
+        uintptr_t          id, 
+        image_basic_data_t&attribs
+    );                                            /// Synchronoulsy retrieve image attributes.
+
     void lock
     (
         uintptr_t          id, 
@@ -546,8 +552,8 @@ internal_function bool image_cache_path_match(char const *a, char const *b)
 /// @return true if the specified image was found and deleted.
 internal_function bool image_cache_drop_image_record(image_cache_t *cache, uintptr_t image_id)
 {
-    image_files_data_t files;
-    image_basic_data_t attribs;
+    image_files_data_t files  = {};
+    image_basic_data_t attribs= {};
     bool  deleted_item = false;
 
     AcquireSRWLockExclusive(&cache->MetadataLock);
@@ -595,7 +601,7 @@ internal_function bool image_cache_drop_image_record(image_cache_t *cache, uintp
 /// If, after evicting frames, the entry has no frames in-cache, it is deleted from the cache table.
 /// @param cache The image cache to update.
 /// @param entry_index The zero-based index of the cache entry to process.
-internal_function bool image_cache_process_pending_evict_and_drop(image_cache_t *cache, size_t entry_index)
+internal_function void image_cache_process_pending_evict_and_drop(image_cache_t *cache, size_t entry_index)
 {
     image_cache_entry_t &entry = cache->EntryList[entry_index];
     size_t       bytes_dropped = 0;
@@ -769,6 +775,7 @@ internal_function uint32_t image_cache_complete_lock(image_cache_t *cache, image
         n->Item.BytesReserved  = loc.BytesReserved;
         mpsc_fifo_u_produce(result_queue, n);
     }
+    return ERROR_SUCCESS;
 }
 
 /// @summary Generates an error event for an image cache control command.
@@ -1224,7 +1231,7 @@ internal_function void image_cache_define_image(image_cache_t *cache, image_decl
         image_files_data_t &file_info    = cache->FileData[cache->ImageCount];
         image_basic_data_t &meta_data    = cache->MetaData[cache->ImageCount];
         file_info.ImageId                = decl.ImageId;
-        file_info.FileCount              = 0;
+        file_info.FileCount              = 1;
         file_info.FileCapacity           = 1;
         file_info.FileList               =(image_file_t*) malloc(sizeof(image_file_t));
         file_info.FileList[0].FilePath   = decl.FilePath;
@@ -1555,6 +1562,28 @@ public_function void image_cache_define_frames(image_cache_t *cache, image_defin
     mpsc_fifo_u_produce(&cache->DefinitionQueue, n);
 }
 
+/// @summary Retrieve image metadata.
+/// @param cache The image cache to query.
+/// @param id The application-defined identifier of the image.
+/// @param attribs On return, if the image is known, its attributes are copied to this location.
+/// @return true if the image attributes have been set.
+public_function bool image_cache_image_attributes(image_cache_t *cache, uintptr_t id, image_basic_data_t &attribs)
+{
+    AcquireSRWLockShared(&cache->MetadataLock);
+    size_t index;
+    if (id_table_get(&cache->ImageIds, id, &index))
+    {
+        attribs = cache->MetaData[index];
+        ReleaseSRWLockShared(&cache->MetadataLock);
+        return(attribs.ImageFormat != DXGI_FORMAT_UNKNOWN);
+    }
+    else
+    {
+        ReleaseSRWLockShared(&cache->MetadataLock);
+        return false;
+    }
+}
+
 /// @summary Specify that a single frame has been placed in cache memory. This is usually performed by the image loader.
 /// @param cache The image cache managing the image.
 /// @param pos Information about the location of the frame in cache memory.
@@ -1721,6 +1750,15 @@ void thread_image_cache_t::add_source(uintptr_t id, char const *path, size_t fir
 void thread_image_cache_t::stat(image_cache_stat_t &stats)
 {
     image_cache_stats(Cache, stats);
+}
+
+/// @summary Synchronously retrieve image attributes.
+/// @param id The application-defined identifier of the image.
+/// @param attribs On return, if the image is known, its attributes are copied to this location.
+/// @return true if the image attributes have been set.
+bool thread_image_cache_t::image_attributes(uintptr_t id, image_basic_data_t &attribs)
+{
+    return image_cache_image_attributes(Cache, id, attribs);
 }
 
 /// @summary Lock one or more frames of an image into cache memory for access.
