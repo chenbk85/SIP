@@ -49,6 +49,7 @@
 
 #include "parseutl.cc"
 #include "parsedds.cc"
+//#include "imloader.cc"
 
 #include "prcmdlist.cc"
 #include "presentation.cc"
@@ -303,6 +304,71 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     OutputDebugStringA(string_table_get(&st, ofs_b));
     assert(string_table_put(&st, "String A", ofs_c) == string_table_get(&st, ofs_a));
     string_table_delete(&st);
+
+    aio_driver_open(&aio);
+    pio_driver_open(&pio, &aio);
+    vfs_driver_open(&vfs, &aio, &pio);
+    io.initialize(&vfs);
+    io.mount(VFS_KNOWN_PATH_EXECUTABLE, "/exec", 0, 0);
+    io.mountv("/exec/images", "/images", 0, 1);
+
+    image_cache_t        imc;
+    image_cache_config_t imcc;
+    imcc.Behavior      = IMAGE_CACHE_BEHAVIOR_MANUAL;
+    imcc.CacheSize     = 16 * 1024 * 1024; // 16MB
+    image_cache_create (&imc , 256, imcc);
+
+    image_cache_error_queue_t  errq;
+    image_cache_result_queue_t resq;
+    mpsc_fifo_u_init(&errq);
+    mpsc_fifo_u_init(&resq);
+
+    thread_image_cache_t       cache;
+    cache.initialize(&imc);
+    cache.add_source(0, "/images/test.dds");
+    cache.lock(0, 0, IMAGE_ALL_FRAMES, &resq, &errq, 0);
+
+    size_t nexpected  = 1;
+    size_t ncomplete  = 0;
+    while (ncomplete != nexpected)
+    {
+        image_load_t ld;
+        while(spsc_fifo_u_consume(&imc.LoadQueue, ld))
+        {   // TODO(rlk): dispatch the load request.
+            fprintf(stdout, "Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
+        }
+
+        image_location_t ev;
+        while (spsc_fifo_u_consume(&imc.EvictQueue, ev))
+        {   // TODO(rlk): dispatch the eviction request.
+            fprintf(stdout, "Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
+        }
+
+        image_basic_data_t attribs;
+        if (cache.image_attributes(0, attribs))
+        {
+            nexpected = attribs.ElementCount;
+        }
+
+        image_cache_error_t err;
+        while (mpsc_fifo_u_consume(&errq, err))
+        {   // TODO(rlk): handle errors.
+            fprintf(stdout, "Error: %08X on image %Iu frames %Iu-%Iu.\n", err.ErrorCode, err.ImageId, err.FirstFrame, err.FinalFrame);
+        }
+
+        image_cache_result_t res;
+        while (mpsc_fifo_u_consume(&resq, res))
+        {   // TODO(rlk): process the pixel data.
+            fprintf(stdout, "Lock : Frame %Iu of image %Iu at %p (%Iu bytes).\n", res.FrameIndex, res.ImageId, res.BaseAddress, res.BytesReserved);
+            cache.unlock(res.ImageId, res.FrameIndex, res.FrameIndex, IMAGE_CACHE_COMMAND_OPTION_EVICT);
+        }
+
+        image_cache_update(&imc);
+    }
+
+    vfs_driver_close(&vfs);
+    pio_driver_close(&pio);
+    aio_driver_close(&aio);
 
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
