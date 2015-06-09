@@ -49,7 +49,8 @@
 
 #include "parseutl.cc"
 #include "parsedds.cc"
-//#include "imloader.cc"
+#include "immemory.cc"
+#include "imloader.cc"
 
 #include "prcmdlist.cc"
 #include "presentation.cc"
