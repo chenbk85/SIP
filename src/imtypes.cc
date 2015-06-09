@@ -299,6 +299,24 @@ enum image_compression_e : int
     IMAGE_COMPRESSION_NONE         = 0,  /// The image has no additional compression applied.
 };
 
+/// @summary Define the recognized image access and storage types.
+enum image_access_e : int
+{
+    IMAGE_ACCESS_UNKNOWN           = 0,  /// The image type is not known.
+    IMAGE_ACCESS_1D                = 1,  /// The image is accessed as a 1D buffer.
+    IMAGE_ACCESS_2D                = 2,  /// The image is accessed as a 2D buffer.
+    IMAGE_ACCESS_3D                = 3,  /// The image is accessed as a 3D buffer.
+    IMAGE_ACCESS_CUBEMAP           = 4,  /// The image is accessed as a cubemap.
+    IMAGE_ACCESS_1D_ARRAY          = 5,  /// The image is accessed as a 1D buffer, with multiple elements.
+    IMAGE_ACCESS_2D_ARRAY          = 6,  /// The image is accessed as a 2D buffer, with multiple elements.
+    IMAGE_ACCESS_3D_ARRAY          = 7,  /// The image is accessed as a 3D buffer, with multiple elements.
+    IMAGE_ACCESS_CUBEMAP_ARRAY     = 8,  /// The image is accessed as a cubemap, with multiple elements.
+    IMAGE_ACCESS_1D_SEQUENCE       = 9,  /// The image is accessed as a 1D buffer, with multiple frames.
+    IMAGE_ACCESS_2D_SEQUENCE       = 10, /// The image is accessed as a 2D buffer, with multiple frames.
+    IMAGE_ACCESS_3D_SEQUENCE       = 11, /// The image is accessed as a 3D buffer, with multiple frames.
+    IMAGE_ACCESS_CUBEMAP_SEQUENCE  = 12  /// The image is accessed as a cubemap, with multiple frames.
+};
+
 
 
 /// @summary The equivalent of the DDS_PIXELFORMAT structure. See MSDN at:
