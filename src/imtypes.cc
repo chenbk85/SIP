@@ -300,7 +300,7 @@ enum image_compression_e : int
 };
 
 /// @summary Define the recognized image access and storage types.
-enum image_access_e : int
+enum image_access_type_e : int
 {
     IMAGE_ACCESS_UNKNOWN           = 0,  /// The image type is not known.
     IMAGE_ACCESS_1D                = 1,  /// The image is accessed as a 1D buffer.
