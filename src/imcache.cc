@@ -1298,6 +1298,7 @@ internal_function void image_cache_update_image_definition(image_cache_t *cache,
                 size_t  ofs_index = def.ElementIndex * meta.LevelCount;
                 size_t copy_bytes = def.ElementCount * meta.LevelCount * sizeof(int64_t);
                 meta.ElementCount = new_count;
+                meta.FileOffsets  = new_offsets;
                 memcpy(&meta.FileOffsets[ofs_index], def.FileOffsets, copy_bytes);
             }
         }
@@ -1408,10 +1409,10 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
                     {   // update the ID look up table so it can find the relocated item.
                         id_table_update(&cache->LoadIds, cache->LoadList[last_load].ImageId, load_index, NULL);
                         cache->LoadList[this_load]     = cache->LoadList[last_load];
-                        cache->LoadCount--;
                     }
                     // remove the unused item from the ID look up table.
                     id_table_remove(&cache->LoadIds, pos.ImageId, NULL);
+                    cache->LoadCount--;
                 }
                 break;
             }
@@ -1426,6 +1427,8 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
     }
 
     // update the state of the frame in the cache.
+    // TODO(rlk): problem here; on new load, entry.FrameCount is zero
+    // because there are no frames in-cache. need to define a new frame.
     image_cache_entry_t &entry = cache->EntryList[entry_index];
     for (size_t i = 0, n = entry.FrameCount; i < n; ++i)
     {

@@ -46,10 +46,10 @@
 
 #include "imtypes.cc"
 #include "imcache.cc"
+#include "immemory.cc"
 
 #include "parseutl.cc"
 #include "parsedds.cc"
-#include "immemory.cc"
 #include "imloader.cc"
 
 #include "prcmdlist.cc"
@@ -351,6 +351,9 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     io.mount(VFS_KNOWN_PATH_EXECUTABLE, "/exec", 0, 0);
     io.mountv("/exec/images", "/images", 0, 1);
 
+    image_memory_t       imm;
+    image_memory_create(&imm, 256);
+
     image_cache_t        imc;
     image_cache_config_t imcc;
     imcc.Behavior      = IMAGE_CACHE_BEHAVIOR_MANUAL;
@@ -367,6 +370,12 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     cache.add_source(0, "/images/test.dds");
     cache.lock(0, 0, IMAGE_ALL_FRAMES, &resq, &errq, 0);
 
+    // the following items are owned by the image loader.
+    image_definition_alloc_t   imgdef_alloc;
+    fifo_allocator_init(&imgdef_alloc);
+    image_location_alloc_t     imgpos_alloc;
+    fifo_allocator_init(&imgpos_alloc);
+
     size_t nexpected  = 1;
     size_t ncomplete  = 0;
     while (ncomplete != nexpected)
@@ -375,12 +384,50 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         while(spsc_fifo_u_consume(&imc.LoadQueue, ld))
         {   // TODO(rlk): dispatch the load request.
             fprintf(stdout, "Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
+            // pretend that we're loading some data here.
+            // re-use our image_definition_t from up above.
+            // TODO(rlk): API problem here. image_definition_t::FreeBuffers - 
+            // we could define_frames first, which will free the buffers if 
+            // FreeBuffers is true, but then try and pass the same definiton
+            // to the image memory manager! probably should get rid of FreeBuffers
+            // and always make the caller responsible for freeing the buffers.
+            // they are copied everywhere anyway...
+            // below is what our image loader would do.
+            // TODO(rlk): kind of a funky mix of async and sync APIs here. 
+            // ultimately it doesn't matter because we process everything in the correct order.
+            img.FreeBuffers = false;
+            image_cache_define_frames(&imc, img, &imgdef_alloc);
+            image_memory_reserve_image(&imm, 0, img, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D);
+            for (size_t i = 0, n = img.ElementCount; i < n; ++i)
+            {
+                for (size_t j = 0, m = img.LevelCount; j < m; ++j)
+                {
+                    dds_level_desc_t l;
+                    image_storage_info_t s;
+                    void *p = image_memory_lock_level(&imm, 0, 0, 0, l, s);
+                    // TODO(rlk): copy some data into the image here...
+                    image_memory_unlock_level(&imm, 0, 0, 0);
+                }
+                // TODO(rlk): emit an image_location_t.
+                // TODO(rlk): this is kind of awful - don't want to have to lock the element.
+                image_storage_info_t frame_stor;
+                void *frame_l0 = image_memory_lock_element(&imm, 0, i, NULL, frame_stor);
+                image_location_t pos;
+                pos.ImageId = 0;
+                pos.FrameIndex = i;
+                pos.BaseAddress = frame_l0;
+                pos.BytesReserved = frame_stor.BytesReserved;
+                pos.Context = (uintptr_t) &imm;
+                image_cache_place_frame(&imc, pos, &imgpos_alloc);
+                image_memory_unlock_element(&imm, 0, i);
+            }
         }
 
         image_location_t ev;
         while (spsc_fifo_u_consume(&imc.EvictQueue, ev))
         {   // TODO(rlk): dispatch the eviction request.
             fprintf(stdout, "Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
+            image_memory_evict_element(&imm, ev.ImageId, ev.FrameIndex);
         }
 
         image_basic_data_t attribs;
