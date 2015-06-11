@@ -19,6 +19,11 @@
 /// to indicate that the specified image file defines all frames of the image.
 static size_t const IMAGE_ALL_FRAMES  = ~size_t(0);
 
+/// @summary Define the default size of a hash bucket in the image cache ID table.
+#ifndef IMAGE_CACHE_BUCKET_SIZE
+#define IMAGE_CACHE_BUCKET_SIZE          128U
+#endif
+
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
@@ -1312,6 +1317,64 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
     if (id_table_get(&cache->LoadIds, pos.ImageId, &load_index))
     {   // locate the completed frame in the load list, and emit the error or result.
         image_loads_data_t  &load = cache->LoadList[load_index];
+
+        // we may not have known the number of frames beforehand; for example, the 
+        // initial load of an image sequence where all frames are stored in one file.
+        // in this case, we need to create new frame load records from the metadata 
+        // that would have been set when parsing the source file(s).
+        if (load.TotalFrames == IMAGE_ALL_FRAMES)
+        {   // look up the image metadata and grab the real frame count.
+            AcquireSRWLockShared(&cache->MetadataLock);
+            size_t meta_index;
+            if (id_table_get(&cache->ImageIds, pos.ImageId, &meta_index))
+            {   // save off the real frame count for the image.
+                load.TotalFrames = cache->MetaData[meta_index].ElementCount;
+            }
+            ReleaseSRWLockShared(&cache->MetadataLock);
+
+            // the load for frame IMAGE_ALL_FRAMES becomes the load for pos.FrameIndex.
+            // save off the index for the IMAGE_ALL_FRAMES record. we'll need it to 
+            // copy data over to the new frame records.
+            size_t all_frames_ix = 0;
+            for (size_t i = 0, n = load.FrameCount; i < n; ++i)
+            {
+                if (load.FrameList[i] == IMAGE_ALL_FRAMES)
+                {
+                    load.FrameList[i]  = pos.FrameIndex;
+                    all_frames_ix      = i;
+                    break;
+                }
+            }
+
+            // set up frame list records for each frame.
+            for (size_t i = 0, n = load.TotalFrames; i < n; ++i)
+            {
+                bool      new_frame  = false;
+                uint32_t  error      = ERROR_SUCCESS;
+                size_t    list_index = image_cache_frame_load_list_put(load, i, new_frame, error);
+                if (new_frame)
+                {   // copy the request time to the new record.
+                    load.RequestTime[list_index] = load.RequestTime[all_frames_ix];
+                }
+                if (list_index != all_frames_ix)
+                {   // copy the request and error queues to the new record.
+                    for (size_t j = 0, m = load.ErrorQueues[all_frames_ix].QueueCount; j < m; ++j)
+                    {
+                        frame_load_queue_list_put(
+                            &load.ErrorQueues[list_index], 
+                             load.ErrorQueues[all_frames_ix].QueueList[j]);
+                    }
+                    for (size_t j = 0, m = load.ResultQueues[all_frames_ix].QueueCount; j < m; ++j)
+                    {  
+                        frame_load_queue_list_put(
+                            &load.ResultQueues[list_index], 
+                             load.ResultQueues[all_frames_ix].QueueList[j]);
+                    }
+                }
+            }
+        }
+        
+        // complete the load for the specified frame.
         for (size_t   frame_index = 0, frame_count = load.FrameCount; frame_index < frame_count; ++frame_count)
         {
             if (load.FrameList[frame_index] == pos.FrameIndex)
@@ -1417,11 +1480,11 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
 /// @param config Behavior and size configuration options for the cache.
 public_function void image_cache_create(image_cache_t *cache, size_t expected_image_count, image_cache_config_t const &config)
 {
-    if (expected_image_count < 128)
+    if (expected_image_count < IMAGE_CACHE_BUCKET_SIZE)
     {   // enforce a minimum value.
-        expected_image_count = 128;
+        expected_image_count = IMAGE_CACHE_BUCKET_SIZE;
     }
-    size_t bucket_count = expected_image_count / 128;
+    size_t bucket_count = expected_image_count / IMAGE_CACHE_BUCKET_SIZE;
 
     QueryPerformanceFrequency(&cache->ClockFrequency);
 
