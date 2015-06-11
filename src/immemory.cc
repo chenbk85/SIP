@@ -377,7 +377,7 @@ public_function uint32_t image_memory_reserve_image(image_memory_t *mem, uintptr
     image_memory_level_t  *la =(image_memory_level_t*) malloc(def.LevelCount   * sizeof(image_memory_level_t));
     if (reserve_buffer == NULL || es == NULL || la == NULL)
     {   // memory allocation failed. 
-        free(la); free(es); VirtualFree(reserve_buffer, reserve_bytes, MEM_RELEASE);
+        free(la); free(es); VirtualFree(reserve_buffer, 0, MEM_RELEASE);
         return ERROR_OUTOFMEMORY;
     }
 
