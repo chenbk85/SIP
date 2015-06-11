@@ -294,6 +294,44 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     pio_driver_close(&pio);
     aio_driver_close(&aio);
 
+    image_memory_t mem;
+    image_memory_create(&mem, 128);
+
+    image_definition_t img;
+    img.ImageId        = 0;
+    img.ImageFormat    = DXGI_FORMAT_R8G8B8A8_UNORM;
+    img.Width          = 16;
+    img.Height         = 16;
+    img.SliceCount     = 1;
+    img.ElementIndex   = 0;
+    img.ElementCount   = 1;
+    img.BytesPerPixel  = 4;
+    img.BytesPerBlock  = 0;
+    img.Compression    = IMAGE_COMPRESSION_NONE;
+    img.LevelCount     = 1;
+    img.FreeBuffers    = true;
+    img.FileOffsets    =(int64_t*) malloc(1 * sizeof(int64_t));
+    img.FileOffsets[0] = 0;
+    img.LevelInfo      =(dds_level_desc_t*) malloc(1 * sizeof(dds_level_desc_t));
+    img.LevelInfo[0].Index  = 0;
+    img.LevelInfo[0].Width  = 16;
+    img.LevelInfo[0].Height = 16;
+    img.LevelInfo[0].Slices = 1;
+    img.LevelInfo[0].BytesPerElement = 4;
+    img.LevelInfo[0].BytesPerRow     = 4 * 16;
+    img.LevelInfo[0].BytesPerSlice   = 4 * 16 * 16;
+    img.LevelInfo[0].DataSize        = 4 * 16 * 16;
+    img.LevelInfo[0].Format          = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+    uint32_t ime = image_memory_reserve_image(&mem, 0, img, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D);
+    dds_level_desc_t l0;
+    image_storage_info_t stor;
+    void    *pel = image_memory_lock_element(&mem, 0, 0, &l0, stor);
+    image_memory_unlock_element(&mem, 0, 0);
+    image_memory_evict_element(&mem, 0, pel, stor.BytesReserved, false);
+    image_memory_drop_image(&mem, 0);
+    image_memory_delete(&mem);
+
     size_t ofs_a = 0;
     size_t ofs_b = 0;
     size_t ofs_c = 0;
