@@ -92,7 +92,6 @@ struct image_definition_t
     dds_header_dxt10_t   DX10Header;              /// Metadata defining extended image attributes.
     dds_level_desc_t    *LevelInfo;               /// An array of LevelCount entries describing the levels in the mipmap chain.
     int64_t             *FileOffsets;             /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
-    bool                 FreeBuffers;             /// true if LevelInfo and FileOffsets should be freed by the image cache.
 };
 typedef fifo_allocator_t<image_definition_t>          image_definition_alloc_t;
 typedef mpsc_fifo_u_t   <image_definition_t>          image_definition_queue_t;
@@ -1502,6 +1501,10 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
             // TODO(rlk): maybe we want to emit some event?
             // otherwise, how will "the user" know?
             break;
+
+        case IMAGE_CACHE_BEHAVIOR_IMAGE_LRU_FRAME_MRU:
+            // ...
+            break;
         }
     }
     return ERROR_SUCCESS;
@@ -1762,11 +1765,6 @@ public_function void image_cache_update(image_cache_t *cache)
         AcquireSRWLockExclusive(&cache->MetadataLock);
         image_cache_update_image_definition(cache, imgdef);
         ReleaseSRWLockExclusive(&cache->MetadataLock);
-        if (imgdef.FreeBuffers)
-        {   // automatically free caller-allocated buffers.
-            free(imgdef.LevelInfo);
-            free(imgdef.FileOffsets);
-        }
     }
 
     // process all completed loads of image frames to cache memory.
