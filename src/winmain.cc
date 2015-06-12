@@ -300,28 +300,38 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     image_definition_t img;
     img.ImageId        = 0;
     img.ImageFormat    = DXGI_FORMAT_R8G8B8A8_UNORM;
-    img.Width          = 16;
-    img.Height         = 16;
+    img.Width          = 2048;
+    img.Height         = 2048;
     img.SliceCount     = 1;
     img.ElementIndex   = 0;
-    img.ElementCount   = 1;
+    img.ElementCount   = 2;
     img.BytesPerPixel  = 4;
     img.BytesPerBlock  = 0;
     img.Compression    = IMAGE_COMPRESSION_NONE;
     img.LevelCount     = 1;
     img.FreeBuffers    = true;
-    img.FileOffsets    =(int64_t*) malloc(1 * sizeof(int64_t));
+    img.FileOffsets    =(int64_t*) malloc(2 * sizeof(int64_t));
     img.FileOffsets[0] = 0;
-    img.LevelInfo      =(dds_level_desc_t*) malloc(1 * sizeof(dds_level_desc_t));
-    img.LevelInfo[0].Index  = 0;
-    img.LevelInfo[0].Width  = 16;
-    img.LevelInfo[0].Height = 16;
-    img.LevelInfo[0].Slices = 1;
+    img.FileOffsets[1] = 4 * 2048 * 2048;
+    img.LevelInfo      =(dds_level_desc_t*) malloc(2 * sizeof(dds_level_desc_t));
+    img.LevelInfo[0].Index           = 0;
+    img.LevelInfo[0].Width           = 2048;
+    img.LevelInfo[0].Height          = 2048;
+    img.LevelInfo[0].Slices          = 1;
     img.LevelInfo[0].BytesPerElement = 4;
-    img.LevelInfo[0].BytesPerRow     = 4 * 16;
-    img.LevelInfo[0].BytesPerSlice   = 4 * 16 * 16;
-    img.LevelInfo[0].DataSize        = 4 * 16 * 16;
+    img.LevelInfo[0].BytesPerRow     = 4 * 2048;
+    img.LevelInfo[0].BytesPerSlice   = 4 * 2048 * 2048;
+    img.LevelInfo[0].DataSize        = 4 * 2048 * 2048;
     img.LevelInfo[0].Format          = DXGI_FORMAT_R8G8B8A8_UNORM;
+    img.LevelInfo[1].Index           = 0;
+    img.LevelInfo[1].Width           = 2048;
+    img.LevelInfo[1].Height          = 2048;
+    img.LevelInfo[1].Slices          = 1;
+    img.LevelInfo[1].BytesPerElement = 4;
+    img.LevelInfo[1].BytesPerRow     = 4 * 2048;
+    img.LevelInfo[1].BytesPerSlice   = 4 * 2048 * 2048;
+    img.LevelInfo[1].DataSize        = 4 * 2048 * 2048;
+    img.LevelInfo[1].Format          = DXGI_FORMAT_R8G8B8A8_UNORM;
 
     uint32_t ime = image_memory_reserve_image(&mem, 0, img, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D);
     dds_level_desc_t l0;
@@ -383,7 +393,9 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         image_load_t ld;
         while(spsc_fifo_u_consume(&imc.LoadQueue, ld))
         {   // TODO(rlk): dispatch the load request.
-            fprintf(stdout, "Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
+            char b[1024] = {};
+            sprintf_s(b, "Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
+            OutputDebugStringA(b);
             // pretend that we're loading some data here.
             // re-use our image_definition_t from up above.
             // TODO(rlk): API problem here. image_definition_t::FreeBuffers - 
@@ -404,9 +416,9 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
                 {
                     dds_level_desc_t l;
                     image_storage_info_t s;
-                    void *p = image_memory_lock_level(&imm, 0, 0, 0, l, s);
+                    void *p = image_memory_lock_level(&imm, 0, i, j, l, s);
                     // TODO(rlk): copy some data into the image here...
-                    image_memory_unlock_level(&imm, 0, 0, 0);
+                    image_memory_unlock_level(&imm, 0, i, j);
                 }
                 // TODO(rlk): emit an image_location_t.
                 // TODO(rlk): this is kind of awful - don't want to have to lock the element.
@@ -426,8 +438,11 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         image_location_t ev;
         while (spsc_fifo_u_consume(&imc.EvictQueue, ev))
         {   // TODO(rlk): dispatch the eviction request.
-            fprintf(stdout, "Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
+            char b[1024] = {};
+            sprintf_s(b, "Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
+            OutputDebugStringA(b);
             image_memory_evict_element(&imm, ev.ImageId, ev.FrameIndex);
+            ncomplete++;
         }
 
         image_basic_data_t attribs;
@@ -439,13 +454,17 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         image_cache_error_t err;
         while (mpsc_fifo_u_consume(&errq, err))
         {   // TODO(rlk): handle errors.
-            fprintf(stdout, "Error: %08X on image %Iu frames %Iu-%Iu.\n", err.ErrorCode, err.ImageId, err.FirstFrame, err.FinalFrame);
+            char b[1024] = {};
+            sprintf_s(b, "Error: %08X on image %Iu frames %Iu-%Iu.\n", err.ErrorCode, err.ImageId, err.FirstFrame, err.FinalFrame);
+            OutputDebugStringA(b);
         }
 
         image_cache_result_t res;
         while (mpsc_fifo_u_consume(&resq, res))
         {   // TODO(rlk): process the pixel data.
-            fprintf(stdout, "Lock : Frame %Iu of image %Iu at %p (%Iu bytes).\n", res.FrameIndex, res.ImageId, res.BaseAddress, res.BytesReserved);
+            char b[1024] = {};
+            sprintf_s(b, "Lock : Frame %Iu of image %Iu at %p (%Iu bytes).\n", res.FrameIndex, res.ImageId, res.BaseAddress, res.BytesReserved);
+            OutputDebugStringA(b);
             cache.unlock(res.ImageId, res.FrameIndex, res.FrameIndex, IMAGE_CACHE_COMMAND_OPTION_EVICT);
         }
 
