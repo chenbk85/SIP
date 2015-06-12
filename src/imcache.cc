@@ -805,7 +805,7 @@ internal_function uint32_t image_cache_complete_error(image_cache_t *cache, imag
 }
 
 /// @summary Initializes a new cache entry for a given image.
-/// @param cache The image cacge managing the image.
+/// @param cache The image cache managing the image.
 /// @param image_id The application-defined identifier of the image associated with the cache entry.
 /// @param now_time The current cache update timestamp, specified in nanoseconds.
 /// @param index On return, this location is updated with the zero-based index of the new entry.
@@ -1311,10 +1311,26 @@ internal_function void image_cache_update_image_definition(image_cache_t *cache,
 /// @param now_time The nanosecond timestamp of the current update tick.
 /// @return ERROR_SUCCESS, or a system error code.
 internal_function uint32_t image_cache_update_location(image_cache_t *cache, image_location_t const &pos, uint64_t now_time)
-{   // retire pending load commands by posting to their result queue.
-    uint64_t  t_start = 0;
-    bool   lock_frame = false;
-    size_t load_index;
+{   
+    uint64_t  t_start   = 0;
+    bool   lock_frame   = false;
+    size_t load_index   = 0;
+    size_t total_frames = 0;
+
+    // determine the total number of image elements.
+    AcquireSRWLockShared(&cache->MetadataLock);
+    size_t meta_index;
+    if (id_table_get(&cache->ImageIds, pos.ImageId, &meta_index))
+    {   // save off the total number of image elements/frames.
+        total_frames  = cache->MetaData[meta_index].ElementCount;
+    }
+    ReleaseSRWLockShared(&cache->MetadataLock);
+    if (total_frames == 0)
+    {   // the image is not known - ignore the update request.
+        return ERROR_NOT_FOUND;
+    }
+
+    // retire pending load commands by posting to their result queue.
     if (id_table_get(&cache->LoadIds, pos.ImageId, &load_index))
     {   // locate the completed frame in the load list, and emit the error or result.
         image_loads_data_t  &load = cache->LoadList[load_index];
@@ -1324,14 +1340,8 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
         // in this case, we need to create new frame load records from the metadata 
         // that would have been set when parsing the source file(s).
         if (load.TotalFrames == IMAGE_ALL_FRAMES)
-        {   // look up the image metadata and grab the real frame count.
-            AcquireSRWLockShared(&cache->MetadataLock);
-            size_t meta_index;
-            if (id_table_get(&cache->ImageIds, pos.ImageId, &meta_index))
-            {   // save off the real frame count for the image.
-                load.TotalFrames = cache->MetaData[meta_index].ElementCount;
-            }
-            ReleaseSRWLockShared(&cache->MetadataLock);
+        {   // update the load request with the real frame count.
+            load.TotalFrames  = total_frames;
 
             // the load for frame IMAGE_ALL_FRAMES becomes the load for pos.FrameIndex.
             // save off the index for the IMAGE_ALL_FRAMES record. we'll need it to 
@@ -1355,6 +1365,7 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
                 size_t    list_index = image_cache_frame_load_list_put(load, i, new_frame, error);
                 if (new_frame)
                 {   // copy the request time to the new record.
+                    load.FrameList  [list_index] = i;
                     load.RequestTime[list_index] = load.RequestTime[all_frames_ix];
                 }
                 if (list_index != all_frames_ix)
@@ -1376,7 +1387,7 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
         }
         
         // complete the load for the specified frame.
-        for (size_t   frame_index = 0, frame_count = load.FrameCount; frame_index < frame_count; ++frame_count)
+        for (size_t frame_index = 0, frame_count = load.FrameCount; frame_index < frame_count; ++frame_index)
         {
             if (load.FrameList[frame_index] == pos.FrameIndex)
             {   // post the lock result to every registered queue.
@@ -1427,9 +1438,8 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
     }
 
     // update the state of the frame in the cache.
-    // TODO(rlk): problem here; on new load, entry.FrameCount is zero
-    // because there are no frames in-cache. need to define a new frame.
-    image_cache_entry_t &entry = cache->EntryList[entry_index];
+    bool             found_frame = false;
+    image_cache_entry_t   &entry = cache->EntryList[entry_index];
     for (size_t i = 0, n = entry.FrameCount; i < n; ++i)
     {
         if (entry.FrameList[i] == pos.FrameIndex)
@@ -1443,8 +1453,31 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
                 entry.FrameState[i].LockCount++;
                 entry.FrameState[i].TimeToLoad = now_time - t_start;
             }
+            found_frame = true;
             break;
         }
+    }
+    if (!found_frame)
+    {   // this frame is being added to the cache.
+        size_t   frame_index  = entry.FrameCount;
+        if (entry.FrameCount == entry.FrameCapacity)
+        {   // grow entry frame list storage.
+            size_t             *fl = (size_t            *) realloc(entry.FrameList , total_frames * sizeof(size_t));
+            image_frame_info_t *fi = (image_frame_info_t*) realloc(entry.FrameData , total_frames * sizeof(image_frame_info_t));
+            image_cache_info_t *ci = (image_cache_info_t*) realloc(entry.FrameState, total_frames * sizeof(image_cache_info_t));
+            if (fl != NULL) entry.FrameList  = fl;
+            if (fi != NULL) entry.FrameData  = fi;
+            if (ci != NULL) entry.FrameState = ci;
+            if (fl != NULL && fi != NULL && ci != NULL) entry.FrameCapacity = total_frames;
+        }
+        // update the frame with location data.
+        entry.FrameList [frame_index]               = pos.FrameIndex;
+        entry.FrameData [frame_index].BaseAddress   = pos.BaseAddress;
+        entry.FrameData [frame_index].BytesReserved = pos.BytesReserved;
+        entry.FrameData [frame_index].Context       = pos.Context;
+        entry.FrameState[frame_index].LockCount     = 1;
+        entry.FrameState[frame_index].TimeToLoad    = now_time - t_start;
+        entry.FrameCount++;
     }
 
     // update the cache memory load status.
