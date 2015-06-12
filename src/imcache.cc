@@ -1257,9 +1257,7 @@ internal_function void image_cache_update_image_definition(image_cache_t *cache,
 {
     size_t index;
     if (id_table_get(&cache->ImageIds, def.ImageId, &index))
-    {   // the internal image metadata record takes ownership of 
-        // the data provided as part of the image definition. 
-        // allocated memory will be freed when the image is dropped.
+    {   // allocated memory will be freed when the image is dropped.
         image_basic_data_t &meta = cache->MetaData[index];
         if (meta.ImageFormat    == DXGI_FORMAT_UNKNOWN)
         {   // store the basic image attributes as none have yet been set.
@@ -1660,7 +1658,26 @@ public_function void image_cache_add_image(image_cache_t *cache, uintptr_t id, c
 public_function void image_cache_define_frames(image_cache_t *cache, image_definition_t const &def, image_definition_alloc_t *thread_alloc)
 {
     fifo_node_t<image_definition_t> *n = fifo_allocator_get(thread_alloc);
-    n->Item = def;
+    // need to copy LevelInfo and FileOffsets from def since this item could
+    // be sitting in the queue for some period if time, and the caller could 
+    // free their memory buffers in the meantime.
+    n->Item.ImageId       = def.ImageId;
+    n->Item.ImageFormat   = def.ImageFormat;
+    n->Item.Compression   = def.Compression;
+    n->Item.Width         = def.Width;
+    n->Item.Height        = def.Height;
+    n->Item.SliceCount    = def.SliceCount;
+    n->Item.ElementIndex  = def.ElementIndex;
+    n->Item.ElementCount  = def.ElementCount;
+    n->Item.LevelCount    = def.LevelCount;
+    n->Item.BytesPerPixel = def.BytesPerPixel;
+    n->Item.BytesPerBlock = def.BytesPerBlock;
+    n->Item.DDSHeader     = def.DDSHeader;
+    n->Item.DX10Header    = def.DX10Header;
+    n->Item.LevelInfo     =(dds_level_desc_t*)   malloc(def.LevelCount   * sizeof(dds_level_desc_t));
+    n->Item.FileOffsets   =(int64_t*)            malloc(def.ElementCount * def.LevelCount * sizeof(int64_t));
+    memcpy(n->Item.LevelInfo  , def.LevelInfo,   def.LevelCount   * sizeof(dds_level_desc_t));
+    memcpy(n->Item.FileOffsets, def.FileOffsets, def.ElementCount * def.LevelCount * sizeof(int64_t));
     mpsc_fifo_u_produce(&cache->DefinitionQueue, n);
 }
 

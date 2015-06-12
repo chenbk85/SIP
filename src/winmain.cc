@@ -397,14 +397,6 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             OutputDebugStringA(b);
             // pretend that we're loading some data here.
             // re-use our image_definition_t from up above.
-            // TODO(rlk): API problem here. image_definition_t::FreeBuffers - 
-            // we could define_frames first, which will free the buffers if 
-            // FreeBuffers is true, but then try and pass the same definiton
-            // to the image memory manager! probably should get rid of FreeBuffers
-            // and always make the caller responsible for freeing the buffers.
-            // they are copied everywhere anyway - but there's another issue 
-            // in that they need to live until they are picked up by the next
-            // cache update. 
             //
             // below is what our image loader would do.
             // TODO(rlk): kind of a funky mix of async and sync APIs here. 
