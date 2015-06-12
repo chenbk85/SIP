@@ -114,6 +114,8 @@ struct image_storage_info_t
     size_t                ElementCount;       /// The number of image elements (array items or frames.)
     size_t                LevelCount;         /// The number of mip-levels defined for each image element.
     size_t                BytesReserved;      /// The number of bytes of address space reserved for the image.
+    void                 *BaseAddress;        /// The address of the start of the image, element or level data.
+                                              /// Portions of this memory may not be committed and thus not safe to access.
 };
 
 /*///////////////
@@ -280,18 +282,28 @@ public_function void image_memory_delete(image_memory_t *mem)
     mem->AttributeList  = NULL;
 }
 
-/// @summary Retrieves information required to access an image.
+/// @summary Retrieves information required to access an image. The image data is not guaranteed to be mapped into memory.
 /// @param mem The image memory manager that owns the image data.
 /// @param image_id The application-defined image identifier.
+/// @param desc On return, this structure is updated with image dimension attributes.
 /// @param storage On return, this structure is updated with image storage attributes.
 /// @return true if storage information was retrieved.
-public_function bool image_memory_storage_info(image_memory_t *mem, uintptr_t image_id, image_storage_info_t &storage)
+public_function bool image_memory_storage_info(image_memory_t *mem, uintptr_t image_id, dds_level_desc_t &desc, image_storage_info_t &storage)
 {
     size_t image_index;
     if (id_table_get(&mem->ImageIds , image_id, &image_index))
     {   // copy the image information into the output structure.
         image_memory_addr_t   &addr = mem->AddressList  [image_index];
         image_memory_info_t   &info = mem->AttributeList[image_index];
+        desc.Index            = 0;
+        desc.Width            = info.Levels[0].LevelWidth;
+        desc.Height           = info.Levels[0].LevelHeight;
+        desc.Slices           = info.Levels[0].LevelSlices;
+        desc.BytesPerElement  = info.Levels[0].BytesPerElement;
+        desc.BytesPerRow      = info.Levels[0].BytesPerRow;
+        desc.BytesPerSlice    = info.Levels[0].BytesPerSlice;
+        desc.DataSize         = info.BytesPerElementUsed;
+        desc.Format           = info.Format;
         storage.ImageFormat   = info.Format;
         storage.Compression   = info.Compression;
         storage.Encoding      = info.Encoding;
@@ -299,10 +311,20 @@ public_function bool image_memory_storage_info(image_memory_t *mem, uintptr_t im
         storage.ElementCount  = info.ElementCount;
         storage.LevelCount    = info.LevelCount;
         storage.BytesReserved = addr.BytesReserved;
+        storage.BaseAddress   = addr.BaseAddress;
         return true;
     }
     else
     {   // this image is not known. return data indicating this.
+        desc.Index            = 0;
+        desc.Width            = 0;
+        desc.Height           = 0;
+        desc.Slices           = 0;
+        desc.BytesPerElement  = 0;
+        desc.BytesPerRow      = 0;
+        desc.BytesPerSlice    = 0;
+        desc.DataSize         = 0;
+        desc.Format           = DXGI_FORMAT_UNKNOWN;
         storage.ImageFormat   = DXGI_FORMAT_UNKNOWN;
         storage.Compression   = IMAGE_COMPRESSION_NONE;
         storage.Encoding      = IMAGE_ENCODING_RAW;
@@ -310,6 +332,120 @@ public_function bool image_memory_storage_info(image_memory_t *mem, uintptr_t im
         storage.ElementCount  = 0;
         storage.LevelCount    = 0;
         storage.BytesReserved = 0;
+        storage.BaseAddress   = NULL;
+        return false;
+    }
+}
+
+/// @summary Retrieves information required to access an image element. The image element is not guaranteed to be mapped into memory.
+/// @param mem The image memory manager that owns the image data.
+/// @param image_id The application-defined image identifier.
+/// @param element The zero-based index of the image element.
+/// @param desc On return, this structure is updated with element dimension attributes.
+/// @param storage On return, this structure is updated with element storage attributes.
+/// @return true if storage information was retrieved.
+public_function bool image_memory_element_info(image_memory_t *mem, uintptr_t image_id, size_t element, dds_level_desc_t &desc, image_storage_info_t &storage)
+{
+    size_t image_index;
+    if (id_table_get(&mem->ImageIds , image_id, &image_index))
+    {   // copy the image information into the output structure.
+        image_memory_addr_t   &addr = mem->AddressList  [image_index];
+        image_memory_info_t   &info = mem->AttributeList[image_index];
+        desc.Index            = 0;
+        desc.Width            = info.Levels[0].LevelWidth;
+        desc.Height           = info.Levels[0].LevelHeight;
+        desc.Slices           = info.Levels[0].LevelSlices;
+        desc.BytesPerElement  = info.Levels[0].BytesPerElement;
+        desc.BytesPerRow      = info.Levels[0].BytesPerRow;
+        desc.BytesPerSlice    = info.Levels[0].BytesPerSlice;
+        desc.DataSize         = info.BytesPerElementUsed;
+        desc.Format           = info.Format;
+        storage.ImageFormat   = info.Format;
+        storage.Compression   = info.Compression;
+        storage.Encoding      = info.Encoding;
+        storage.AccessType    = info.AccessType;
+        storage.ElementCount  = info.ElementCount;
+        storage.LevelCount    = info.LevelCount;
+        storage.BytesReserved = info.BytesPerElement;
+        storage.BaseAddress   =((uint8_t*) addr.BaseAddress) + (info.BytesPerElement * element);
+        return true;
+    }
+    else
+    {   // this image is not known. return data indicating this.
+        desc.Index            = 0;
+        desc.Width            = 0;
+        desc.Height           = 0;
+        desc.Slices           = 0;
+        desc.BytesPerElement  = 0;
+        desc.BytesPerRow      = 0;
+        desc.BytesPerSlice    = 0;
+        desc.DataSize         = 0;
+        desc.Format           = DXGI_FORMAT_UNKNOWN;
+        storage.ImageFormat   = DXGI_FORMAT_UNKNOWN;
+        storage.Compression   = IMAGE_COMPRESSION_NONE;
+        storage.Encoding      = IMAGE_ENCODING_RAW;
+        storage.AccessType    = IMAGE_ACCESS_UNKNOWN;
+        storage.ElementCount  = 0;
+        storage.LevelCount    = 0;
+        storage.BytesReserved = 0;
+        storage.BaseAddress   = NULL;
+        return false;
+    }
+}
+
+/// @summary Retrieves information required to access a single mipmap level of an image element. The mipmap level is not guaranteed to be mapped into memory.
+/// @param mem The image memory manager that owns the data.
+/// @param image_id The application-defined image identifier.
+/// @param element The zero-based index of the image element.
+/// @param level The zero-based index of the mipmap level (0 = highest resolution.)
+/// @param desc On return, this structure is updated with mipmap level dimension attributes.
+/// @param storage ON return, this structure is updated with mipmap level storage attributes.
+/// @return true if storage information was retrieved.
+public_function bool image_memory_level_info(image_memory_t *mem, uintptr_t image_id, size_t element, size_t level, dds_level_desc_t &desc, image_storage_info_t &storage)
+{
+    size_t image_index;
+    if (id_table_get(&mem->ImageIds , image_id, &image_index))
+    {   // copy the image information into the output structure.
+        image_memory_addr_t   &addr = mem->AddressList  [image_index];
+        image_memory_info_t   &info = mem->AttributeList[image_index];
+        desc.Index            = level;
+        desc.Width            = info.Levels[level].LevelWidth;
+        desc.Height           = info.Levels[level].LevelHeight;
+        desc.Slices           = info.Levels[level].LevelSlices;
+        desc.BytesPerElement  = info.Levels[level].BytesPerElement;
+        desc.BytesPerRow      = info.Levels[level].BytesPerRow;
+        desc.BytesPerSlice    = info.Levels[level].BytesPerSlice;
+        desc.DataSize         = info.Levels[level].BytesPerSlice * info.Levels[level].LevelSlices;
+        desc.Format           = info.Format;
+        storage.ImageFormat   = info.Format;
+        storage.Compression   = info.Compression;
+        storage.Encoding      = info.Encoding;
+        storage.AccessType    = info.AccessType;
+        storage.ElementCount  = info.ElementCount;
+        storage.LevelCount    = info.LevelCount;
+        storage.BytesReserved = info.BytesPerElement;
+        storage.BaseAddress   =((uint8_t*) addr.BaseAddress) + (info.BytesPerElement * element) + info.Levels[level].LevelOffset;
+        return true;
+    }
+    else
+    {   // this image is not known. return data indicating this.
+        desc.Index            = 0;
+        desc.Width            = 0;
+        desc.Height           = 0;
+        desc.Slices           = 0;
+        desc.BytesPerElement  = 0;
+        desc.BytesPerRow      = 0;
+        desc.BytesPerSlice    = 0;
+        desc.DataSize         = 0;
+        desc.Format           = DXGI_FORMAT_UNKNOWN;
+        storage.ImageFormat   = DXGI_FORMAT_UNKNOWN;
+        storage.Compression   = IMAGE_COMPRESSION_NONE;
+        storage.Encoding      = IMAGE_ENCODING_RAW;
+        storage.AccessType    = IMAGE_ACCESS_UNKNOWN;
+        storage.ElementCount  = 0;
+        storage.LevelCount    = 0;
+        storage.BytesReserved = 0;
+        storage.BaseAddress   = NULL;
         return false;
     }
 }
