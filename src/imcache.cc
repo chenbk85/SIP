@@ -4,6 +4,9 @@
 /// cache memory, and eviction of images to limit cache memory usage.
 ///////////////////////////////////////////////////////////////////////////80*/
 
+// TODO(rlk): Review and clean up hard-coded integer constants
+// TODO(rlk): Implement victim selection algorithm(s)
+
 /*////////////////
 //   Includes   //
 ////////////////*/
