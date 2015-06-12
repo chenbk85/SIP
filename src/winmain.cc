@@ -309,7 +309,6 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     img.BytesPerBlock  = 0;
     img.Compression    = IMAGE_COMPRESSION_NONE;
     img.LevelCount     = 1;
-    img.FreeBuffers    = true;
     img.FileOffsets    =(int64_t*) malloc(2 * sizeof(int64_t));
     img.FileOffsets[0] = 0;
     img.FileOffsets[1] = 4 * 2048 * 2048;
@@ -403,13 +402,15 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             // FreeBuffers is true, but then try and pass the same definiton
             // to the image memory manager! probably should get rid of FreeBuffers
             // and always make the caller responsible for freeing the buffers.
-            // they are copied everywhere anyway...
+            // they are copied everywhere anyway - but there's another issue 
+            // in that they need to live until they are picked up by the next
+            // cache update. 
+            //
             // below is what our image loader would do.
             // TODO(rlk): kind of a funky mix of async and sync APIs here. 
             // ultimately it doesn't matter because we process everything in the correct order.
-            img.FreeBuffers = false;
-            image_cache_define_frames(&imc, img, &imgdef_alloc);
-            image_memory_reserve_image(&imm, 0, img, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D);
+            image_cache_define_frames(&imc, img, &imgdef_alloc); // async
+            image_memory_reserve_image(&imm, 0, img, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D); // sync
             for (size_t i = 0, n = img.ElementCount; i < n; ++i)
             {
                 for (size_t j = 0, m = img.LevelCount; j < m; ++j)
@@ -420,18 +421,19 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
                     // TODO(rlk): copy some data into the image here...
                     image_memory_unlock_level(&imm, 0, i, j);
                 }
-                // TODO(rlk): emit an image_location_t.
-                // TODO(rlk): this is kind of awful - don't want to have to lock the element.
+                // notify the cache of where the frame data is located in memory.
+                dds_level_desc_t frame_desc;
                 image_storage_info_t frame_stor;
-                void *frame_l0 = image_memory_lock_element(&imm, 0, i, NULL, frame_stor);
-                image_location_t pos;
-                pos.ImageId = 0;
-                pos.FrameIndex = i;
-                pos.BaseAddress = frame_l0;
-                pos.BytesReserved = frame_stor.BytesReserved;
-                pos.Context = (uintptr_t) &imm;
-                image_cache_place_frame(&imc, pos, &imgpos_alloc);
-                image_memory_unlock_element(&imm, 0, i);
+                if (image_memory_element_info(&imm, 0, 0, frame_desc, frame_stor))
+                {
+                    image_location_t pos;
+                    pos.ImageId      = 0;
+                    pos.FrameIndex    = i;
+                    pos.BaseAddress   = frame_stor.BaseAddress;
+                    pos.BytesReserved = frame_stor.BytesReserved;
+                    pos.Context       = (uintptr_t) &imm;
+                    image_cache_place_frame(&imc, pos, &imgpos_alloc);
+                }
             }
         }
 
