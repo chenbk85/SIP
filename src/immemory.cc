@@ -68,6 +68,9 @@ struct image_memory_size_t
 {
     size_t                BytesUsed;          /// The number of bytes actually used.
     size_t                BytesCommitted;     /// The number of bytes with backing storage.
+    size_t                LevelsEmitted;      /// The number of mip-levels written (index of the current level.)
+    size_t                LevelOffset;        /// The byte offset of the start of the current level, from the start of the element.
+    size_t                LevelSize;          /// The number of bytes written to the current level so far.
 };
 
 /// @summary Define the data describing a single logical image. Each image reserves enough 
@@ -474,6 +477,14 @@ public_function bool image_memory_level_info(image_memory_t *mem, uintptr_t imag
     }
 }
 
+/// @summary Reserves process address space for image storage. The image may be stored compressed or encoded.
+/// @param mem The image memory manager.
+/// @param image_id The application-defined image identifier.
+/// @param element_size The maximum size of a single array item or frame, in bytes. The actual size may be less than this value.
+/// @param def Image dimension attributes used to deteremine how much address space to reserve.
+/// @param encoding One of image_encoding_e specifying the storage encoding for the image.
+/// @param access_type One of image_access_type_e specifying how the image data will be accessed.
+/// @return ERROR_SUCCESS, ERROR_ALREADY_EXISTS, or ERROR_OUTOFMEMORY.
 public_function uint32_t image_memory_reserve_image(image_memory_t *mem, uintptr_t image_id, size_t element_size, image_definition_t const &def, int encoding, int access_type)
 {
     size_t image_index;
@@ -617,6 +628,7 @@ public_function uint32_t image_memory_reserve_image(image_memory_t *mem, uintptr
         }
 
     }
+    UNREFERENCED_PARAMETER(element_size);
     return make_result;
 }
 
@@ -891,25 +903,146 @@ public_function void image_memory_drop_image(image_memory_t *mem, uintptr_t imag
     }
 }
 
-public_function void* image_memory_begin_element_storage(image_memory_t *mem, uintptr_t image_id, size_t element)
+/// @summary Begin specifying the data stored in an image element. Any existing data is overwritten.
+/// @param mem The image memory manager.
+/// @param image_id The application-defined image identifier.
+/// @param element The zero-based index of the array item or frame to start writing.
+/// @return The base address of the image element data (level 0 in the mipmap chain.) 
+/// Do not write any data without calling image_memory_increase_commit(), or use image_memory_write().
+/// The address space has been reserved, but is not backed by memory or the system page file.
+public_function void* image_memory_reset_element_storage(image_memory_t *mem, uintptr_t image_id, size_t element)
 {
-    // reset element used and element committed, return start of element
+    size_t image_index;
+    if (id_table_get(&mem->ImageIds, image_id, &image_index))
+    {
+        image_memory_addr_t &addr  = mem->AddressList  [image_index];
+        image_memory_info_t &info  = mem->AttributeList[image_index];
+        image_memory_size_t &size  = info.ElementCommit[element];
+        uint8_t     *element_data  = ((uint8_t*)   addr.BaseAddress) + (info.BytesPerElement * element);
+        if (size.BytesCommitted > 0)
+        {   // free any currently committed address space.
+            VirtualFree(element_data, size.BytesCommitted, MEM_DECOMMIT);
+        }
+        // (re-)initialize the per-element write data:
+        size.BytesUsed      = 0;
+        size.BytesCommitted = 0;
+        size.LevelsEmitted  = 0;
+        size.LevelOffset    = 0;
+        size.LevelSize      = 0;
+        return element_data;
+    }
+    else return NULL;
 }
 
+/// @summary Increases the number of bytes of memory committed for an image element.
+/// @param mem The image memory manager.
+/// @param image_id The application-defined image identifier.
+/// @param element The zero-based index of the array item or frame being written.
+/// @param new_commit The total number of bytes to commit for the entire element. This is the number of bytes already written, plus the number of bytes you intend to write.
+/// @return A pointer to the current write position.
 public_function void* image_memory_increase_commit(image_memory_t *mem, uintptr_t image_id, size_t element, size_t new_commit)
 {
-    // VirtualAlloc(MEM_COMMIT) new_commit bytes from element start
-    // update element used (new_commit) and element committed (new_commit aligned up to page size)
-    // return start of element
-    // user calls this to make sure there's enough committed space to write to
+    size_t image_index;
+    if (id_table_get(&mem->ImageIds, image_id, &image_index))
+    {
+        image_memory_addr_t &addr  = mem->AddressList  [image_index];
+        image_memory_info_t &info  = mem->AttributeList[image_index];
+        image_memory_size_t &size  = info.ElementCommit[element];
+        uint8_t     *element_data  = ((uint8_t*)   addr.BaseAddress) + (info.BytesPerElement * element);
+        uint8_t      *write_ptr    = ((uint8_t*)   addr.BaseAddress) + (info.BytesPerElement * element) + size.BytesUsed;
+        if (new_commit > size.BytesCommitted)
+        {
+            size_t bytes_committed = align_up(new_commit, mem->PageSize);
+            if (VirtualAlloc(element_data, bytes_committed, MEM_COMMIT, PAGE_READWRITE) == NULL)
+            {   // failed to increase the number of bytes committed.
+                return NULL;
+            }
+            size.BytesCommitted = bytes_committed;
+        }
+        size.LevelSize +=(new_commit - size.BytesUsed);
+        size.BytesUsed  = new_commit;
+        return write_ptr;
+    }
+    else return NULL;
 }
 
-public_function void  image_memory_mark_level_end(image_memory_t *mem, uintptr_t image_id, size_t element, size_t level)
+/// @summary Writes data into the current level of an image element. If necessary, the commit size is increased.
+/// @param mem The image memory manager.
+/// @param image_id The application-defined image identifier.
+/// @param element The zero-based index of the array item or frame being written.
+/// @param data The data to copy into the image element memory.
+/// @param data_size The number of bytes to read from data and copy into the image element.
+/// @return ERROR_SUCCESS, ERROR_NOT_FOUND or a system error code.
+public_function uint32_t image_memory_write(image_memory_t *mem, uintptr_t image_id, size_t element, void const *data, size_t data_size)
 {
-    // emit an image block here
+    size_t image_index;
+    if (id_table_get(&mem->ImageIds, image_id, &image_index))
+    {
+        image_memory_addr_t &addr  = mem->AddressList  [image_index];
+        image_memory_info_t &info  = mem->AttributeList[image_index];
+        image_memory_size_t &size  = info.ElementCommit[element];
+        uint8_t     *element_data  = ((uint8_t*)   addr.BaseAddress) + (info.BytesPerElement * element);
+        uint8_t      *write_ptr    = ((uint8_t*)   addr.BaseAddress) + (info.BytesPerElement * element) + size.BytesUsed;
+        size_t        new_commit   = size.BytesUsed  +  data_size;
+        if (new_commit > size.BytesCommitted)
+        {
+            size_t bytes_committed = align_up(new_commit, mem->PageSize);
+            if (VirtualAlloc(element_data, bytes_committed, MEM_COMMIT, PAGE_READWRITE) == NULL)
+            {   // failed to increase the number of bytes committed.
+                return GetLastError();
+            }
+            size.BytesCommitted = bytes_committed;
+        }
+        size.LevelSize += data_size;
+        size.BytesUsed += data_size;
+        memcpy(write_ptr, data, data_size);
+        return ERROR_SUCCESS;
+    }
+    else return ERROR_NOT_FOUND;
 }
 
-public_function void  image_memory_end_element_storage(image_memory_t *mem, uintptr_t image_id, size_t element)
+/// @summary Marks the end of the current mipmap level. Subsequent writes will target the next level in the mipmap chain.
+/// @param mem The image memory manager.
+/// @param image_id The application-defined image identifier.
+/// @param element The zero-based index of the array item or frame being written.
+/// @return The zero-based index of the mipmap level you just finished writing to.
+public_function size_t image_memory_mark_level_end(image_memory_t *mem, uintptr_t image_id, size_t element)
 {
-    // does anything need to be done here?
+    size_t image_index;
+    if (id_table_get(&mem->ImageIds, image_id, &image_index))
+    {
+        image_memory_info_t &info  = mem->AttributeList[image_index];
+        image_memory_size_t &size  = info.ElementCommit[element];
+        size_t        first_block  = info.LevelCount *  element;
+        size_t        level_index  = size.LevelsEmitted;
+        assert(level_index < info.LevelCount);
+        info.ImageBlocks[first_block+level_index].ByteOffset = size.LevelOffset;
+        info.ImageBlocks[first_block+level_index].StoredSize = size.LevelSize;
+        size.LevelOffset  += size.LevelSize;
+        size.LevelSize     = 0;
+        return size.LevelsEmitted++;
+    }
+    else return 0;
+}
+
+/// @summary Marks the end of an image element, indicating that all data has been written.
+/// @param mem The image memory manager.
+/// @param image_id The application-defined image identifier.
+/// @param element The zero-based index of the array item or frame being written.
+public_function void image_memory_mark_element_end(image_memory_t *mem, uintptr_t image_id, size_t element)
+{
+    size_t image_index;
+    if (id_table_get(&mem->ImageIds, image_id, &image_index))
+    {
+        image_memory_addr_t &addr  = mem->AddressList  [image_index];
+        image_memory_info_t &info  = mem->AttributeList[image_index];
+        image_memory_size_t &size  = info.ElementCommit[element];
+        uint8_t     *element_data  = ((uint8_t*)   addr.BaseAddress) + (info.BytesPerElement * element);
+        if ((size.BytesCommitted   - size.BytesUsed) >  mem->PageSize)
+        {   // decommit any whole unused pages. 
+            size_t      bytes_used = align_up(size.BytesUsed, mem->PageSize);
+            VirtualFree(element_data+bytes_used, size.BytesCommitted-bytes_used, MEM_DECOMMIT);
+            size.BytesCommitted    = bytes_used;
+        }
+    }
 }

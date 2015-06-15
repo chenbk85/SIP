@@ -47,6 +47,8 @@
 #include "imtypes.cc"
 #include "imcache.cc"
 #include "immemory.cc"
+#include "imencode.cc"
+#include "imparser.cc"
 
 #include "parseutl.cc"
 #include "parsedds.cc"
@@ -332,7 +334,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     img.LevelInfo[1].DataSize        = 4 * 2048 * 2048;
     img.LevelInfo[1].Format          = DXGI_FORMAT_R8G8B8A8_UNORM;
 
-    uint32_t ime = image_memory_reserve_image(&mem, 0, img, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D);
+    uint32_t ime = image_memory_reserve_image(&mem, 0, img, IMAGE_ACCESS_2D);
     dds_level_desc_t l0;
     image_storage_info_t stor;
     void    *pel = image_memory_lock_element(&mem, 0, 0, &l0, stor);
@@ -402,7 +404,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             // TODO(rlk): kind of a funky mix of async and sync APIs here. 
             // ultimately it doesn't matter because we process everything in the correct order.
             image_cache_define_frames(&imc, img, &imgdef_alloc); // async
-            image_memory_reserve_image(&imm, 0, img, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D); // sync
+            image_memory_reserve_image(&imm, 0, img, IMAGE_ACCESS_2D); // sync
             for (size_t i = 0, n = img.ElementCount; i < n; ++i)
             {
                 for (size_t j = 0, m = img.LevelCount; j < m; ++j)
