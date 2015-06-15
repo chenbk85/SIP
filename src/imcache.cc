@@ -94,7 +94,7 @@ struct image_definition_t
     dds_header_t         DDSHeader;               /// Metadata defining basic image attributes.
     dds_header_dxt10_t   DX10Header;              /// Metadata defining extended image attributes.
     dds_level_desc_t    *LevelInfo;               /// An array of LevelCount entries describing the levels in the mipmap chain.
-    int64_t             *FileOffsets;             /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
+    stream_decode_pos_t *BlockOffsets;            /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
 };
 typedef fifo_allocator_t<image_definition_t>          image_definition_alloc_t;
 typedef mpsc_fifo_u_t   <image_definition_t>          image_definition_queue_t;
@@ -126,7 +126,8 @@ struct image_load_t
     char const          *FilePath;                /// The NULL-terminated UTF-8 virtual file path.
     size_t               FirstFrame;              /// The zero-based index of the first frame to load.
     size_t               FinalFrame;              /// The zero-based index of the last frame to load, or IMAGE_ALL_FRAMES.
-    int64_t              FileOffset;              /// The byte offset of the start of the first frame to load, or 0.
+    size_t               DecodeOffset;            /// The number of bytes of decoded data to read from the chunk to reach the start of the first frame.
+    int64_t              FileOffset;              /// The byte offset of the chunk of encoded data containing the start of the first frame to load, or 0.
     int                  FileHints;               /// A combination of vfs_file_hint_t to use when opening the file.
     int                  DecoderHint;             /// One of vfs_decoder_hint_e to use when opening the file.
     uint8_t              Priority;                /// The file load priority.
@@ -256,7 +257,7 @@ struct image_basic_data_t
     dds_header_t         DDSHeader;               /// Metadata defining basic image attributes.
     dds_header_dxt10_t   DX10Header;              /// Metadata defining extended image attributes.
     dds_level_desc_t    *LevelInfo;               /// An array of LevelCount entries describing the levels in the mipmap chain.
-    int64_t             *FileOffsets;             /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
+    stream_decode_pos_t *BlockOffsets;            /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
 };
 #define IMAGE_BASIC_DATA_STATIC_INIT(iid) \
     { (iid), DXGI_FORMAT_UNKNOWN, IMAGE_COMPRESSION_NONE, 0, 0, 0, 0, 0, 0, 0, {}, {}, NULL, NULL }
@@ -595,8 +596,8 @@ internal_function bool image_cache_drop_image_record(image_cache_t *cache, uintp
         files.FileCount     = 0;
 
         // free memory associated with the image metadata.
-        free(attribs.FileOffsets); attribs.FileOffsets = NULL;
-        free(attribs.LevelInfo);   attribs.LevelInfo   = NULL;
+        free(attribs.BlockOffsets); attribs.BlockOffsets = NULL;
+        free(attribs.LevelInfo);    attribs.LevelInfo    = NULL;
         attribs.ImageFormat  = DXGI_FORMAT_UNKNOWN;
         attribs.ElementCount = 0;
         attribs.LevelCount   = 0;
@@ -936,7 +937,6 @@ internal_function size_t image_cache_frame_load_list_put(image_loads_data_t &loa
 /// @return ERROR_SUCCESS or a system error code.
 internal_function uint32_t image_cache_load_frame(image_cache_t *cache, image_loads_data_t &load, image_cache_command_t const &cmd, image_basic_data_t const &image_info, image_files_data_t const &file_info, size_t frame_index, uint64_t now_time)
 {
-    int64_t  offset      = 0;
     size_t   first_frame = frame_index;
     size_t   final_frame = frame_index;
     bool     new_frame   = false;
@@ -944,14 +944,16 @@ internal_function uint32_t image_cache_load_frame(image_cache_t *cache, image_lo
     size_t   list_index  = image_cache_frame_load_list_put(load, frame_index, new_frame, error);
     if (FAILED(error))     return error;
 
+    stream_decode_pos_t frame_pos;
     if (frame_index < image_info.ElementCount)
-    {   // supply the byte offset of the start of the image.
-        offset      = image_info.FileOffsets[frame_index];
+    {   // supply the byte offset of the start of the frame.
+        frame_pos   = image_info.BlockOffsets[frame_index * image_info.LevelCount];
     }
     else// frame_index = IMAGE_ALL_FRAMES
     {   // begin loading from the beginning of the file.
-        offset      = 0;
-        first_frame = 0;
+        frame_pos.FileOffset   = 0;
+        frame_pos.DecodeOffset = 0;
+        first_frame            = 0;
     }
     
     if (new_frame)
@@ -966,14 +968,15 @@ internal_function uint32_t image_cache_load_frame(image_cache_t *cache, image_lo
             if (frame_index >=  f.FirstFrame && frame_index <= f.FinalFrame)
             {   // found the matching source file record. emit the notification.
                 fifo_node_t<image_load_t> *n  = fifo_allocator_get(&cache->LoadAlloc);
-                n->Item.ImageId     = cmd.ImageId;
-                n->Item.FilePath    = f.FilePath;
-                n->Item.FirstFrame  = first_frame;
-                n->Item.FinalFrame  = final_frame;
-                n->Item.FileOffset  = offset;
-                n->Item.FileHints   = file_info.FileHints;
-                n->Item.DecoderHint = file_info.DecoderHint;
-                n->Item.Priority    = cmd.Priority;
+                n->Item.ImageId       = cmd.ImageId;
+                n->Item.FilePath      = f.FilePath;
+                n->Item.FirstFrame    = first_frame;
+                n->Item.FinalFrame    = final_frame;
+                n->Item.DecodeOffset  = frame_pos.DecodeOffset;
+                n->Item.FileOffset    = frame_pos.FileOffset;
+                n->Item.FileHints     = file_info.FileHints;
+                n->Item.DecoderHint   = file_info.DecoderHint;
+                n->Item.Priority      = cmd.Priority;
                 spsc_fifo_u_produce(&cache->LoadQueue, n);
                 file_error = ERROR_SUCCESS;
                 break;
@@ -1277,7 +1280,7 @@ internal_function void image_cache_update_image_definition(image_cache_t *cache,
             meta.DDSHeader       = def.DDSHeader;
             meta.DX10Header      = def.DX10Header;
             meta.LevelInfo       = NULL;              // copied below
-            meta.FileOffsets     = NULL;              // copied below
+            meta.BlockOffsets    = NULL;              // copied below
             if (def.LevelCount   > 0)
             {   // copy the mip-level descriptors over.
                 // these remain constant for all elements.
@@ -1291,15 +1294,15 @@ internal_function void image_cache_update_image_definition(image_cache_t *cache,
         {   // ensure that file offsets get copied to the correct location.
             // it's possible that frame 0 might not be the first frame received.
             size_t   new_count    = def.ElementIndex + def.ElementCount;
-            size_t   new_bytes    = new_count * meta.LevelCount * sizeof(int64_t);
-            int64_t *new_offsets  =(int64_t*)realloc(meta.FileOffsets, new_bytes);
+            size_t   new_bytes    = new_count * meta.LevelCount * sizeof(stream_decode_pos_t);
+            stream_decode_pos_t    *new_offsets = (stream_decode_pos_t*) realloc(meta.BlockOffsets, new_bytes);
             if (new_offsets != NULL)
             {   // copy the file offsets for the new elements.
                 size_t  ofs_index = def.ElementIndex * meta.LevelCount;
-                size_t copy_bytes = def.ElementCount * meta.LevelCount * sizeof(int64_t);
+                size_t copy_bytes = def.ElementCount * meta.LevelCount * sizeof(stream_decode_pos_t);
                 meta.ElementCount = new_count;
-                meta.FileOffsets  = new_offsets;
-                memcpy(&meta.FileOffsets[ofs_index], def.FileOffsets, copy_bytes);
+                meta.BlockOffsets = new_offsets;
+                memcpy(&meta.BlockOffsets[ofs_index], def.BlockOffsets, copy_bytes);
             }
         }
     }
@@ -1677,10 +1680,12 @@ public_function void image_cache_define_frames(image_cache_t *cache, image_defin
     n->Item.BytesPerBlock = def.BytesPerBlock;
     n->Item.DDSHeader     = def.DDSHeader;
     n->Item.DX10Header    = def.DX10Header;
-    n->Item.LevelInfo     =(dds_level_desc_t*)   malloc(def.LevelCount   * sizeof(dds_level_desc_t));
-    n->Item.FileOffsets   =(int64_t*)            malloc(def.ElementCount * def.LevelCount * sizeof(int64_t));
-    memcpy(n->Item.LevelInfo  , def.LevelInfo,   def.LevelCount   * sizeof(dds_level_desc_t));
-    memcpy(n->Item.FileOffsets, def.FileOffsets, def.ElementCount * def.LevelCount * sizeof(int64_t));
+    size_t  level_size    = def.LevelCount * sizeof(dds_level_desc_t);
+    size_t  block_size    = def.LevelCount * def.ElementCount * sizeof(stream_decode_pos_t);
+    n->Item.LevelInfo     =(dds_level_desc_t     *)malloc(level_size);
+    n->Item.BlockOffsets  =(stream_decode_pos_t  *)malloc(block_size);
+    memcpy(n->Item.LevelInfo   , def.LevelInfo   , level_size);
+    memcpy(n->Item.BlockOffsets, def.BlockOffsets, block_size);
     mpsc_fifo_u_produce(&cache->DefinitionQueue, n);
 }
 

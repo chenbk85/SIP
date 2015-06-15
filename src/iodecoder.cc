@@ -51,6 +51,16 @@ enum stream_decode_status_e : uint32_t
     // ...
 };
 
+/// @summary Defines the data required to represent a position within a stream.
+/// The file or source offset defines the start of the encoded data block, and 
+/// then the number of bytes decoded from the encoded data block is required to
+/// be able to map a client's concept of byte offset into an encoded stream.
+struct stream_decode_pos_t
+{
+    int64_t                FileOffset;            /// The byte offset of the encoded data chunk in the file.
+    size_t                 DecodeOffset;          /// The number of decoded bytes consumed by the client.
+};
+
 /// @summary Defines the interface to a stream decoder. The default decoder
 /// implementation performs no decoding at all. Derived decoder types may 
 /// add additional buffers (for decompressed data, for example) and custom 
@@ -69,6 +79,7 @@ struct stream_decoder_t
     size_t         amount (void) const;           /// Get the number of decoded bytes available.
     bool           atend  (void) const;           /// Test the current status flags for ENDOFSTREAM.
     void*          nextbuf(void);                 /// Dequeue the next queued encoded data buffer, if any.
+    void           pos(stream_decode_pos_t  &p);  /// Retrieve the current stream position.
     int          (*refill)(stream_decoder_t *s);  /// Decode the next chunk of encoded data buffer. Return stream_refill_result_e.
 
     virtual void   reset  (void);                 /// Reset the decoder state in preparation for stream restart.
@@ -80,6 +91,8 @@ struct stream_decoder_t
     uint8_t               *ReadCursor;            /// The current read cursor within the decoded buffer.
     uint32_t               StatusFlags;           /// Status flags associated with the current buffer.
     uint32_t               ErrorCode;             /// The sticky error code value.
+    int64_t                FileOffset;            /// The file offset of the start of the encoded data block.
+    size_t                 DecodeOffset;          /// The number of bytes of decoded data read from the current file data block.
     uint8_t               *EncodedData;           /// The current block of encoded data.
     size_t                 EncodedDataOffset;     /// The current byte offset within the encoded data block.
     size_t                 EncodedDataSize;       /// The number of bytes in the current encoded data block.
@@ -134,10 +147,11 @@ internal_function int stream_decode_fail(stream_decoder_t *s, uint32_t error)
 /// @param s The stream decoder being refilled.
 /// @return One of stream_refill_result_e specifying the current status.
 internal_function int stream_refill_zeroes(stream_decoder_t *s)
-{   local_persist  uint8_t ZERO_DATA[256] = {0};
-    s->FirstByte   = ZERO_DATA;
-    s->FinalByte   = ZERO_DATA + sizeof(ZERO_DATA);
-    s->ReadCursor  = ZERO_DATA;
+{   local_persist uint8_t ZERO_DATA[256] = {0};
+    s->FirstByte        = ZERO_DATA;
+    s->FinalByte        = ZERO_DATA + sizeof(ZERO_DATA);
+    s->ReadCursor       = ZERO_DATA;
+    s->DecodeOffset    += sizeof(ZERO_DATA);
     return s->ErrorCode ? STREAM_REFILL_RESULT_ERROR : STREAM_REFILL_RESULT_START;
 }
 
@@ -173,6 +187,7 @@ internal_function int stream_refill_nextbuf(stream_decoder_t *s)
         // ...
         // and then increment s->EncodedDataOffset by the decoded buffer size.
         // s->FirstByte, s->FinalByte and s->ReadCursor point to the decoded buffer.
+        s->DecodeOffset  +=(s->FinalByte - s->FirstByte); // consumed decoded buffer size bytes.
         rc = s->ErrorCode ? STREAM_REFILL_RESULT_ERROR : STREAM_REFILL_RESULT_START;
     }
     return rc;
@@ -243,6 +258,14 @@ inline bool stream_decoder_t::atend(void) const
     return (StatusFlags & STREAM_DECODE_STATUS_ENDOFSTREAM) != 0;
 }
 
+/// @summary Retrieves the current stream position.
+/// @param p On return, stores the current stream position.
+inline void stream_decoder_t::pos(stream_decode_pos_t &p)
+{
+    p.FileOffset   = FileOffset;
+    p.DecodeOffset = size_t(ReadCursor-FirstByte);
+}
+
 /// @summary Allows the implementation to reset internal state in preparation for
 /// a stream reset, which could indicate the start of a nested stream, or looping
 /// back to the beginning of the current data set. Assume that buffers are not 
@@ -289,6 +312,8 @@ void* stream_decoder_t::nextbuf(void)
         if (io_result.DataBuffer != NULL && io_result.DataActual > 0)
         {   // some data was returned from a read.
             io_buffer         = (uint8_t*)  io_result.DataBuffer;
+            FileOffset        = io_result.FileOffset;
+            DecodeOffset      = 0;
             EncodedData       = io_buffer;
             EncodedDataOffset = 0;
             EncodedDataSize   = io_result.DataActual;
