@@ -1005,8 +1005,8 @@ public_function uint32_t image_memory_write(image_memory_t *mem, uintptr_t image
 /// @param mem The image memory manager.
 /// @param image_id The application-defined image identifier.
 /// @param element The zero-based index of the array item or frame being written.
-/// @return The zero-based index of the mipmap level you just finished writing to.
-public_function size_t image_memory_mark_level_end(image_memory_t *mem, uintptr_t image_id, size_t element)
+/// @return ERROR_SUCCESS or ERROR_NOT_FOUND.
+public_function uint32_t image_memory_mark_level_end(image_memory_t *mem, uintptr_t image_id, size_t element)
 {
     size_t image_index;
     if (id_table_get(&mem->ImageIds, image_id, &image_index))
@@ -1020,16 +1020,18 @@ public_function size_t image_memory_mark_level_end(image_memory_t *mem, uintptr_
         info.ImageBlocks[first_block+level_index].StoredSize = size.LevelSize;
         size.LevelOffset  += size.LevelSize;
         size.LevelSize     = 0;
-        return size.LevelsEmitted++;
+        return ERROR_SUCCESS;
     }
-    else return 0;
+    else return ERROR_NOT_FOUND;
 }
 
 /// @summary Marks the end of an image element, indicating that all data has been written.
+/// This function should be called after calling image_memory_mark_level_end().
 /// @param mem The image memory manager.
 /// @param image_id The application-defined image identifier.
 /// @param element The zero-based index of the array item or frame being written.
-public_function void image_memory_mark_element_end(image_memory_t *mem, uintptr_t image_id, size_t element)
+/// @return ERROR_SUCCESS or ERROR_NOT_FOUND.
+public_function uint32_t image_memory_mark_element_end(image_memory_t *mem, uintptr_t image_id, size_t element)
 {
     size_t image_index;
     if (id_table_get(&mem->ImageIds, image_id, &image_index))
@@ -1044,5 +1046,16 @@ public_function void image_memory_mark_element_end(image_memory_t *mem, uintptr_
             VirtualFree(element_data+bytes_used, size.BytesCommitted-bytes_used, MEM_DECOMMIT);
             size.BytesCommitted    = bytes_used;
         }
+        return ERROR_SUCCESS;
     }
+    else return ERROR_NOT_FOUND;
+}
+
+/// @summary Helper function to calculate the size of an image element when stored with no compression (except for DXGI compression) and raw encoding.
+/// @param def The image definition.
+/// @return The base size of the image element, in bytes, including all defined levels in the mipmap chain.
+public_function size_t image_memory_base_element_size(image_definition_t const &def)
+{
+    size_t element_used = 0; UNREFERENCED_PARAMETER(element_used);
+    return image_memory_element_size(def, 1, element_used);
 }
