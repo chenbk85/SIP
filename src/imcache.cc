@@ -1531,6 +1531,43 @@ public_function void image_cache_create(image_cache_t *cache, size_t expected_im
     fifo_allocator_table_create(&cache->ResultAlloc, 8);
 }
 
+/// @summary Frees resources associated with an image cache instance.
+/// @param cache The image cache to delete.
+public_function void image_cache_delete(image_cache_t *cache)
+{
+    fifo_allocator_table_delete(&cache->ResultAlloc);
+    fifo_allocator_table_delete(&cache->ErrorAlloc);
+
+    mpsc_fifo_u_delete(&cache->CommandQueue);
+    mpsc_fifo_u_delete(&cache->LocationQueue);
+    mpsc_fifo_u_delete(&cache->DefinitionQueue);
+    mpsc_fifo_u_delete(&cache->DeclarationQueue);
+
+    spsc_fifo_u_delete(&cache->EvictQueue);
+    fifo_allocator_reinit(&cache->EvictAlloc);
+
+    spsc_fifo_u_delete(&cache->LoadQueue);
+    fifo_allocator_reinit(&cache->LoadAlloc);
+
+    free(cache->LoadList);
+    cache->LoadCount    = 0;
+    cache->LoadCapacity = 0;
+    cache->LoadList     = NULL;
+    id_table_delete(&cache->LoadIds);
+
+    free(cache->EntryList);
+    cache->EntryCount    = 0;
+    cache->EntryCapacity = 0;
+    cache->EntryList     = NULL;
+    id_table_delete(&cache->EntryIds);
+
+    free(cache->MetaData);
+    free(cache->FileData);
+    cache->ImageCount    = 0;
+    cache->ImageCapacity = 0;
+    id_table_delete(&cache->ImageIds);
+}
+
 /// @summary Reconfigure the image cache, modifying the victim selection algorithm and memory budget.
 /// @param cache The image cache to reconfigure.
 /// @param config The new cache configuration values.
