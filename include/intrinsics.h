@@ -294,6 +294,11 @@
 #define ENOERROR                            0
 #endif
 
+/// @summary Helper macro to check a result code for ERROR_SUCCESS.
+#ifndef SUCCESS
+#define SUCCESS(e)                          ((e) == ERROR_SUCCESS)
+#endif
+
 /*/////////////////
 //   Constants   //
 /////////////////*/

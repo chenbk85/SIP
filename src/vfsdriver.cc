@@ -1856,7 +1856,7 @@ public_function bool vfs_mount_virtual(vfs_driver_t *driver, char const *virtual
 {   // convert the virtual path to a native filesystem path.
     DWORD  source_attr  = 0;
     WCHAR  source_wide[MAX_PATH_CHARS]; // 64KB - probably overkill
-    if (FAILED(vfs_resolve_filesystem_path(driver, virtual_path, source_wide, MAX_PATH_CHARS)))
+    if (!SUCCESS(vfs_resolve_filesystem_path(driver, virtual_path, source_wide, MAX_PATH_CHARS)))
     {   // cannot resolve the virtual path to a filesystem mount point.
         return false;
     }
@@ -2038,14 +2038,14 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
 /// @return The stream decoder that can be used to access the file data. When finished accessing the file data, call the stream_decoder_t::release() method to delete the stream decoder instance.
 public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t user_hints, int32_t decoder_hint, pio_sti_pending_alloc_t *thread_alloc_open, pio_sti_control_alloc_t *thread_alloc_control, stream_control_t *control)
 {   // open the file and retrieve relevant information.
-    vfs_file_t  file_info;
-    char const *relpath     = NULL;
-    int32_t     usage       = VFS_USAGE_STREAM_IN_LOAD;
-    uint32_t    file_hints  =(user_hints == VFS_FILE_HINT_NONE) ? VFS_FILE_HINT_UNBUFFERED | VFS_FILE_HINT_ASYNCHRONOUS : user_hints;
-    DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
-    if (open_result != ERROR_SUCCESS) return NULL;
-    DWORD       asio_result = aio_driver_prepare(driver->AIO, file_info.Fildes);
-    if (FAILED (asio_result))
+    vfs_file_t   file_info;
+    char const  *relpath     = NULL;
+    int32_t      usage       = VFS_USAGE_STREAM_IN_LOAD;
+    uint32_t     file_hints  =(user_hints == VFS_FILE_HINT_NONE) ? VFS_FILE_HINT_UNBUFFERED | VFS_FILE_HINT_ASYNCHRONOUS : user_hints;
+    DWORD        open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
+    if (!SUCCESS(open_result)) return NULL;
+    DWORD        asio_result = aio_driver_prepare(driver->AIO, file_info.Fildes);
+    if (!SUCCESS(asio_result))
     {   // could not associate the file handle with the I/O completion port.
         vfs_close_file(&file_info);
         return NULL;
@@ -2100,14 +2100,14 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
 public_function stream_decoder_t* vfs_stream_file(vfs_driver_t *driver, char const *path, uintptr_t id, uint8_t priority, int32_t user_hints, int32_t decoder_hint, uint64_t interval_ns, size_t chunk_size, size_t chunk_count, pio_sti_pending_alloc_t *thread_alloc_open, pio_sti_control_alloc_t *thread_alloc_control, stream_control_t *control)
 {   // open the file and retrieve relevant information.
     // interval-based delivery prefers buffered I/O, if possible.
-    vfs_file_t  file_info;
-    char const *relpath     = NULL;
-    int32_t     usage       = VFS_USAGE_STREAM_IN;
-    uint32_t    file_hints  =(user_hints == VFS_FILE_HINT_NONE) ? VFS_FILE_HINT_ASYNCHRONOUS : user_hints;
-    DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
-    if (FAILED (open_result)) return NULL;
-    DWORD       asio_result = aio_driver_prepare(driver->AIO, file_info.Fildes);
-    if (FAILED (asio_result))
+    vfs_file_t   file_info;
+    char const  *relpath     = NULL;
+    int32_t      usage       = VFS_USAGE_STREAM_IN;
+    uint32_t     file_hints  =(user_hints == VFS_FILE_HINT_NONE) ? VFS_FILE_HINT_ASYNCHRONOUS : user_hints;
+    DWORD        open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
+    if (!SUCCESS(open_result)) return NULL;
+    DWORD        asio_result = aio_driver_prepare(driver->AIO, file_info.Fildes);
+    if (!SUCCESS(asio_result))
     {   // could not associate the file handle with the I/O completion port.
         vfs_close_file(&file_info);
         return NULL;
