@@ -35,6 +35,7 @@
 
 #include "idtable.cc"
 #include "strtable.cc"
+#include "parseutl.cc"
 
 #include "filepath.cc"
 #include "iobuffer.cc"
@@ -45,14 +46,12 @@
 #include "threadio.cc"
 
 #include "imtypes.cc"
-#include "imcache.cc"
 #include "immemory.cc"
 #include "imencode.cc"
 #include "imparser.cc"
-
-#include "parseutl.cc"
-#include "parsedds.cc"
-#include "imloader.cc"
+#include "imparser_dds.cc"
+#include "imcache.cc"
+//#include "imloader.cc"
 
 #include "prcmdlist.cc"
 #include "presentation.cc"
@@ -311,10 +310,12 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     img.BytesPerBlock  = 0;
     img.Compression    = IMAGE_COMPRESSION_NONE;
     img.LevelCount     = 1;
-    img.FileOffsets    =(int64_t*) malloc(2 * sizeof(int64_t));
-    img.FileOffsets[0] = 0;
-    img.FileOffsets[1] = 4 * 2048 * 2048;
-    img.LevelInfo      =(dds_level_desc_t*) malloc(2 * sizeof(dds_level_desc_t));
+    img.BlockOffsets    =(stream_decode_pos_t*) malloc(2 * sizeof(stream_decode_pos_t));
+    img.BlockOffsets[0].FileOffset   = 0;
+    img.BlockOffsets[0].DecodeOffset = 0;
+    img.BlockOffsets[1].FileOffset   = 4 * 2048 * 2048;
+    img.BlockOffsets[1].DecodeOffset = 0;
+    img.LevelInfo      =(dds_level_desc_t    *) malloc(2 * sizeof(dds_level_desc_t));
     img.LevelInfo[0].Index           = 0;
     img.LevelInfo[0].Width           = 2048;
     img.LevelInfo[0].Height          = 2048;
@@ -334,7 +335,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     img.LevelInfo[1].DataSize        = 4 * 2048 * 2048;
     img.LevelInfo[1].Format          = DXGI_FORMAT_R8G8B8A8_UNORM;
 
-    uint32_t ime = image_memory_reserve_image(&mem, 0, img, IMAGE_ACCESS_2D);
+    uint32_t ime = image_memory_reserve_image(&mem, &img, IMAGE_ACCESS_2D);
     dds_level_desc_t l0;
     image_storage_info_t stor;
     void    *pel = image_memory_lock_element(&mem, 0, 0, &l0, stor);
@@ -387,6 +388,11 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     image_location_alloc_t     imgpos_alloc;
     fifo_allocator_init(&imgpos_alloc);
 
+    stream_decoder_t  *dds = NULL;
+    image_encoder_t   *enc = NULL;
+    dds_parser_state_t dds_parser;
+    image_definition_t dds_info;
+
     size_t nexpected  = 1;
     size_t ncomplete  = 0;
     while (ncomplete != nexpected)
@@ -397,38 +403,34 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             char b[1024] = {};
             sprintf_s(b, "Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
             OutputDebugStringA(b);
-            // pretend that we're loading some data here.
-            // re-use our image_definition_t from up above.
-            //
-            // below is what our image loader would do.
-            // TODO(rlk): kind of a funky mix of async and sync APIs here. 
-            // ultimately it doesn't matter because we process everything in the correct order.
-            image_cache_define_frames(&imc, img, &imgdef_alloc); // async
-            image_memory_reserve_image(&imm, 0, img, IMAGE_ACCESS_2D); // sync
-            for (size_t i = 0, n = img.ElementCount; i < n; ++i)
-            {
-                for (size_t j = 0, m = img.LevelCount; j < m; ++j)
-                {
-                    dds_level_desc_t l;
-                    image_storage_info_t s;
-                    void *p = image_memory_lock_level(&imm, 0, i, j, l, s);
-                    // TODO(rlk): copy some data into the image here...
-                    image_memory_unlock_level(&imm, 0, i, j);
-                }
-                // notify the cache of where the frame data is located in memory.
-                dds_level_desc_t frame_desc;
-                image_storage_info_t frame_stor;
-                if (image_memory_element_info(&imm, 0, 0, frame_desc, frame_stor))
-                {
-                    image_location_t pos;
-                    pos.ImageId      = 0;
-                    pos.FrameIndex    = i;
-                    pos.BaseAddress   = frame_stor.BaseAddress;
-                    pos.BytesReserved = frame_stor.BytesReserved;
-                    pos.Context       = (uintptr_t) &imm;
-                    image_cache_place_frame(&imc, pos, &imgpos_alloc);
-                }
-            }
+
+            // load the data from the file.
+            dds = io.load_file(ld.FilePath, ld.FileHints, ld.DecoderHint, ld.ImageId, 0, NULL);
+            enc = create_image_encoder(
+                ld.ImageId, &imm, 
+                IMAGE_COMPRESSION_NONE, 
+                IMAGE_ENCODING_RAW, 
+                IMAGE_COMPRESSION_NONE, 
+                IMAGE_ENCODING_RAW, 
+                IMAGE_ACCESS_2D_ARRAY, 
+                &imc.DefinitionQueue, 
+                &imgdef_alloc, 
+                &imc.LocationQueue, 
+                &imgpos_alloc);
+
+            // set up the parser.
+            image_parser_config_t         parse_config;
+            parse_config.ImageId          = ld.ImageId;
+            parse_config.Context          = (uintptr_t) &imc; // the image cache
+            parse_config.FirstFrame       = ld.FirstFrame;
+            parse_config.FinalFrame       = ld.FinalFrame;
+            parse_config.Metadata         =&dds_info;         // obviously wrong for real-world usage
+            parse_config.ParseFlags       = IMAGE_PARSER_FLAGS_READ_ALL_DATA | IMAGE_PARSER_FLAGS_START_AT_OFFSET;
+            parse_config.StartOffset      ={0, 0};
+            if (ld.FinalFrame == IMAGE_ALL_FRAMES)   parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_ALL_FRAMES;
+            else if (ld.FirstFrame != ld.FinalFrame) parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_FRAME_RANGE;
+            else                                     parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_SINGLE_FRAME;
+            dds_parser_state_init(&dds_parser, parse_config);
         }
 
         image_location_t ev;
@@ -464,6 +466,32 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             cache.unlock(res.ImageId, res.FrameIndex, res.FrameIndex, IMAGE_CACHE_COMMAND_OPTION_EVICT);
         }
 
+        // drive file I/O:
+        pio_driver_poll(&pio);
+        aio_driver_poll(&aio);
+
+        // drive file parsing:
+        if (dds != NULL)
+        {
+            int state  = dds_parser_update(dds, &dds_parser, enc);
+            if (state == DDS_PARSE_STATE_COMPLETE)
+            {
+                dds->release();
+                delete enc;
+                dds = NULL; enc = NULL;
+            }
+            if (state == DDS_PARSE_STATE_ERROR)
+            {
+                char b[1024];
+                sprintf_s(b, "Error %u parsing DDS file for image %Iu\n.", dds->ErrorCode, dds->Identifier);
+                OutputDebugStringA(b);
+                dds->release();
+                delete enc;
+                dds = NULL; enc = NULL;
+            }
+        }
+
+        // drive the image cache.
         image_cache_update(&imc);
     }
 
