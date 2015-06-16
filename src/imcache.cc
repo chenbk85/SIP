@@ -76,47 +76,6 @@ struct image_declaration_t
 typedef fifo_allocator_t<image_declaration_t>         image_declaration_alloc_t;
 typedef mpsc_fifo_u_t   <image_declaration_t>         image_declaration_queue_t;
 
-/// @summary Defines the metadata describing the runtime attributes of a logical image.
-/// This information is usually obtained during parsing from the image header fields.
-struct image_definition_t
-{
-    uintptr_t            ImageId;                 /// The application-defined logical image identifier.
-    uint32_t             ImageFormat;             /// One of dxgi_format_e specifying the storage format of the pixel data.
-    uint32_t             Compression;             /// One of image_compression_e specifying the compression format of the pixel data.
-    size_t               Width;                   /// The width of the highest-resolution level of the image, in pixels.
-    size_t               Height;                  /// The height of the highest-resolution level of the image, in pixels.
-    size_t               SliceCount;              /// The number of slices in the highest-resolution level of the image.
-    size_t               ElementIndex;            /// The zero-based index of the first element definition being specified.
-    size_t               ElementCount;            /// The number of array elements, cubemap faces, or frames.
-    size_t               LevelCount;              /// The number of levels in the mipmap chain.
-    size_t               BytesPerPixel;           /// The number of bytes per-pixel of the image data.
-    size_t               BytesPerBlock;           /// The number of bytes per-block, for block-compressed data, or zero.
-    dds_header_t         DDSHeader;               /// Metadata defining basic image attributes.
-    dds_header_dxt10_t   DX10Header;              /// Metadata defining extended image attributes.
-    dds_level_desc_t    *LevelInfo;               /// An array of LevelCount entries describing the levels in the mipmap chain.
-    stream_decode_pos_t *BlockOffsets;            /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
-};
-typedef fifo_allocator_t<image_definition_t>          image_definition_alloc_t;
-typedef mpsc_fifo_u_t   <image_definition_t>          image_definition_queue_t;
-
-/// @summary Defines the data used to specify where an individual frame of an image has 
-/// been loaded into memory. This data can be used to indicate that a frame has just been
-/// loaded into cache, or to specify the location from which the frame should be evicted.
-struct image_location_t
-{
-    uintptr_t            ImageId;                 /// The application-defined logical image identifier.
-    size_t               FrameIndex;              /// The zero-based index of the frame.
-    void                *BaseAddress;             /// The address of the start of the frame data.
-    size_t               BytesReserved;           /// The number of bytes reserved for the frame data.
-    uintptr_t            Context;                 /// Opaque information associated with the frame.
-};
-typedef fifo_allocator_t<image_location_t>            image_location_alloc_t;
-typedef fifo_allocator_t<image_location_t>            image_eviction_alloc_t;
-typedef mpsc_fifo_u_t   <image_location_t>            image_location_queue_t;
-typedef spsc_fifo_u_t   <image_location_t>            image_eviction_queue_t;
-#define IMAGE_LOCATION_STATIC_INIT(iid, fid)      \
-    { (iid), (fid), NULL, 0, 0 }
-
 /// @summary Defines the data output by the cache when it needs to load a frames from a file.
 /// For images where the frame data is spread across multiple files (like a PNG sequence), 
 /// one load request is generated for each file.
@@ -292,6 +251,10 @@ struct image_cache_entry_t
     image_frame_info_t  *FrameData;               /// The unordered list of frame memory location information.
     image_cache_info_t  *FrameState;              /// The unordered list of frame cache state information.
 };
+
+/// @summary Define the queue and allocator types used for emitting frame eviction notifications.
+typedef fifo_allocator_t<image_location_t>            image_eviction_alloc_t;
+typedef spsc_fifo_u_t   <image_location_t>            image_eviction_queue_t;
 
 /// @summary Defines the data and queues associated with an image cache. The image 
 /// cache is not responsible for allocating or committing image memory.
@@ -1657,38 +1620,6 @@ public_function void image_cache_add_image(image_cache_t *cache, uintptr_t id, c
     image_cache_add_frames(cache, id, file_path, 0, IMAGE_ALL_FRAMES, VFS_FILE_HINT_NONE, VFS_DECODER_HINT_USE_DEFAULT, thread_alloc);
 }
 
-/// @summary Specify image metadata for one or more frames of an image. This is usually performed by the image loader.
-/// @param cache The image cache managing the image.
-/// @param def The image metadata.
-/// @param thread_alloc The allocator used to submit image metadata from the calling thread.
-public_function void image_cache_define_frames(image_cache_t *cache, image_definition_t const &def, image_definition_alloc_t *thread_alloc)
-{
-    fifo_node_t<image_definition_t> *n = fifo_allocator_get(thread_alloc);
-    // need to copy LevelInfo and FileOffsets from def since this item could
-    // be sitting in the queue for some period if time, and the caller could 
-    // free their memory buffers in the meantime.
-    n->Item.ImageId       = def.ImageId;
-    n->Item.ImageFormat   = def.ImageFormat;
-    n->Item.Compression   = def.Compression;
-    n->Item.Width         = def.Width;
-    n->Item.Height        = def.Height;
-    n->Item.SliceCount    = def.SliceCount;
-    n->Item.ElementIndex  = def.ElementIndex;
-    n->Item.ElementCount  = def.ElementCount;
-    n->Item.LevelCount    = def.LevelCount;
-    n->Item.BytesPerPixel = def.BytesPerPixel;
-    n->Item.BytesPerBlock = def.BytesPerBlock;
-    n->Item.DDSHeader     = def.DDSHeader;
-    n->Item.DX10Header    = def.DX10Header;
-    size_t  level_size    = def.LevelCount * sizeof(dds_level_desc_t);
-    size_t  block_size    = def.LevelCount * def.ElementCount * sizeof(stream_decode_pos_t);
-    n->Item.LevelInfo     =(dds_level_desc_t     *)malloc(level_size);
-    n->Item.BlockOffsets  =(stream_decode_pos_t  *)malloc(block_size);
-    memcpy(n->Item.LevelInfo   , def.LevelInfo   , level_size);
-    memcpy(n->Item.BlockOffsets, def.BlockOffsets, block_size);
-    mpsc_fifo_u_produce(&cache->DefinitionQueue, n);
-}
-
 /// @summary Retrieve image metadata.
 /// @param cache The image cache to query.
 /// @param id The application-defined identifier of the image.
@@ -1709,17 +1640,6 @@ public_function bool image_cache_image_attributes(image_cache_t *cache, uintptr_
         ReleaseSRWLockShared(&cache->MetadataLock);
         return false;
     }
-}
-
-/// @summary Specify that a single frame has been placed in cache memory. This is usually performed by the image loader.
-/// @param cache The image cache managing the image.
-/// @param pos Information about the location of the frame in cache memory.
-/// @param thread_alloc The allocator used to submit image placement information from the calling thread.
-public_function void image_cache_place_frame(image_cache_t *cache, image_location_t const &pos, image_location_alloc_t *thread_alloc)
-{
-    fifo_node_t<image_location_t> *n = fifo_allocator_get(thread_alloc);
-    n->Item = pos;
-    mpsc_fifo_u_produce(&cache->LocationQueue, n);
 }
 
 /// @summary Request that one or more frames of an image be locked in cache memory for access.
@@ -1790,6 +1710,7 @@ public_function void image_cache_update(image_cache_t *cache)
         AcquireSRWLockExclusive(&cache->MetadataLock);
         image_cache_update_image_definition(cache, imgdef);
         ReleaseSRWLockExclusive(&cache->MetadataLock);
+        image_definition_free(&imgdef);
     }
 
     // process all completed loads of image frames to cache memory.

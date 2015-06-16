@@ -134,6 +134,45 @@ struct image_storage_info_t
                                               /// Portions of this memory may not be committed and thus not safe to access.
 };
 
+/// @summary Defines the metadata describing the runtime attributes of a logical image.
+/// This information is usually obtained during parsing from the image header fields.
+struct image_definition_t
+{
+    uintptr_t            ImageId;                 /// The application-defined logical image identifier.
+    uint32_t             ImageFormat;             /// One of dxgi_format_e specifying the storage format of the pixel data.
+    uint32_t             Compression;             /// One of image_compression_e specifying the compression format of the pixel data.
+    size_t               Width;                   /// The width of the highest-resolution level of the image, in pixels.
+    size_t               Height;                  /// The height of the highest-resolution level of the image, in pixels.
+    size_t               SliceCount;              /// The number of slices in the highest-resolution level of the image.
+    size_t               ElementIndex;            /// The zero-based index of the first element definition being specified.
+    size_t               ElementCount;            /// The number of array elements, cubemap faces, or frames.
+    size_t               LevelCount;              /// The number of levels in the mipmap chain.
+    size_t               BytesPerPixel;           /// The number of bytes per-pixel of the image data.
+    size_t               BytesPerBlock;           /// The number of bytes per-block, for block-compressed data, or zero.
+    dds_header_t         DDSHeader;               /// Metadata defining basic image attributes.
+    dds_header_dxt10_t   DX10Header;              /// Metadata defining extended image attributes.
+    dds_level_desc_t    *LevelInfo;               /// An array of LevelCount entries describing the levels in the mipmap chain.
+    stream_decode_pos_t *BlockOffsets;            /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
+};
+typedef fifo_allocator_t<image_definition_t>          image_definition_alloc_t;
+typedef mpsc_fifo_u_t   <image_definition_t>          image_definition_queue_t;
+
+/// @summary Defines the data used to specify where an individual frame of an image has 
+/// been loaded into memory. This data can be used to indicate that a frame has just been
+/// loaded into cache, or to specify the location from which the frame should be evicted.
+struct image_location_t
+{
+    uintptr_t            ImageId;                 /// The application-defined logical image identifier.
+    size_t               FrameIndex;              /// The zero-based index of the frame.
+    void                *BaseAddress;             /// The address of the start of the frame data.
+    size_t               BytesReserved;           /// The number of bytes reserved for the frame data.
+    uintptr_t            Context;                 /// Opaque information associated with the frame.
+};
+typedef fifo_allocator_t<image_location_t>            image_location_alloc_t;
+typedef mpsc_fifo_u_t   <image_location_t>            image_location_queue_t;
+#define IMAGE_LOCATION_STATIC_INIT(iid, fid)      \
+    { (iid), (fid), NULL, 0, 0 }
+
 /*///////////////
 //   Globals   //
 ///////////////*/
@@ -171,13 +210,13 @@ internal_function inline uint32_t image_memory_make_element_status(uint32_t stat
 /// @param page_size The size of a system virtual memory page, in bytes.
 /// @param used On return, stores the number of bytes per-element actually used.
 /// @return The size of a single image element, in bytes, rounded up to the nearest page size multiple.
-internal_function size_t image_memory_element_size(image_definition_t const &def, size_t page_size, size_t &used)
+internal_function size_t image_memory_element_size(image_definition_t const *def, size_t page_size, size_t &used)
 {   // sum the sizes of all mip-levels defined for each element.
     size_t s_base = 0;
-    for (size_t i = 0, n = def.LevelCount; i < n; ++i)
+    for (size_t i = 0, n = def->LevelCount; i < n; ++i)
     {
-        s_base   += def.LevelInfo[i].Slices  * 
-                    def.LevelInfo[i].BytesPerSlice;
+        s_base   += def->LevelInfo[i].Slices  * 
+                    def->LevelInfo[i].BytesPerSlice;
     }
     // elements must start at even multiples of the page size, 
     // and since they're tightly packed, that means they must 
@@ -251,6 +290,86 @@ internal_function void image_memory_process_pending_drop(image_memory_t *mem, si
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
+/// @summary Initializes an image definition. The LevelInfo, BlockOffsets, ElementCount and LevelCount fields are set. Other fields are untouched.
+/// @param dst The image definition to initialize.
+/// @param element_count The number of array items or frames in the image.
+/// @param level_count The number of levels in the mipmap chain.
+public_function void image_definition_init(image_definition_t *dst, size_t element_count=0, size_t level_count=0)
+{
+    if (element_count > 0 && level_count > 0)
+    {   // allocate and initialize storage for dynamic attributes.
+        size_t level_size  = level_count * sizeof(dds_level_desc_t);
+        size_t block_size  = level_count * element_count * sizeof(stream_decode_pos_t);
+        dst->LevelInfo     = (dds_level_desc_t    *)malloc(level_size);
+        dst->BlockOffsets  = (stream_decode_pos_t *)malloc(block_size);
+        memset(dst->LevelInfo, 0, level_size);
+        memset(dst->BlockOffsets, 0, block_size);
+    }
+    else
+    {   // set pointers to NULL, caller can init later.
+        dst->LevelInfo     = NULL;
+        dst->BlockOffsets  = NULL;
+    }
+    dst->ElementCount      = element_count;
+    dst->LevelCount        = level_count;
+}
+
+/// @summary Copies an image definition.
+/// @param dst The destination object.
+/// @param src The source object.
+public_function void image_definition_copy(image_definition_t *dst, image_definition_t const *src)
+{
+    dst->ImageId       = src->ImageId;
+    dst->ImageFormat   = src->ImageFormat;
+    dst->Compression   = src->Compression;
+    dst->Width         = src->Width;
+    dst->Height        = src->Height;
+    dst->SliceCount    = src->SliceCount;
+    dst->ElementIndex  = src->ElementIndex;
+    dst->ElementCount  = src->ElementCount;
+    dst->LevelCount    = src->LevelCount;
+    dst->BytesPerPixel = src->BytesPerPixel;
+    dst->BytesPerBlock = src->BytesPerBlock;
+    dst->DDSHeader     = src->DDSHeader;
+    dst->DX10Header    = src->DX10Header;
+    dst->LevelInfo     = NULL;
+    dst->BlockOffsets  = NULL;
+    size_t level_size  = src->LevelCount * sizeof(dds_level_desc_t);
+    size_t block_size  = src->LevelCount * src->ElementCount * sizeof(stream_decode_pos_t);
+    if (level_size > 0 && block_size > 0)
+    {
+        dst->LevelInfo     = (dds_level_desc_t     *)malloc(level_size);
+        dst->BlockOffsets  = (stream_decode_pos_t  *)malloc(block_size);
+        memcpy(dst->LevelInfo   , src->LevelInfo   , level_size);
+        memcpy(dst->BlockOffsets, src->BlockOffsets, block_size);
+    }
+}
+
+/// @summary Posts an image definition to an unbounded MPSC queue.
+/// @param def The image definition to post. The definition will be copied, and can safely be freed after the function returns.
+/// @param queue The target MPSC unbounded queue.
+/// @param thread_alloc The FIFO node allocator used to write to the target queue from the calling thread.
+public_function void image_definition_post(image_definition_t const *def, image_definition_queue_t *queue, image_definition_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_definition_t> *n = fifo_allocator_get(thread_alloc);
+    image_definition_copy(&n->Item, def);
+    mpsc_fifo_u_produce(queue, n);
+}
+
+/// @summary Frees resources associated with an image definition.
+/// @param def The image definition to delete.
+public_function void image_definition_free(image_definition_t *def)
+{
+    free(def->BlockOffsets);
+    free(def->LevelInfo);
+    def->ImageFormat  = DXGI_FORMAT_UNKNOWN;
+    def->ElementIndex = 0;
+    def->ElementCount = 0;
+    def->LevelCount   = 0;
+    def->LevelInfo    = NULL;
+    def->BlockOffsets = NULL;
+}
+
 /// @summary Initializes a new image memory manager.
 /// @param mem The image memory manager.
 /// @param expected_image_count The maximum number of images expected to be loaded at any one time.
@@ -479,24 +598,25 @@ public_function bool image_memory_level_info(image_memory_t *mem, uintptr_t imag
 
 /// @summary Reserves process address space for image storage. The image may be stored compressed or encoded.
 /// @param mem The image memory manager.
-/// @param image_id The application-defined image identifier.
 /// @param element_size The maximum size of a single array item or frame, in bytes. The actual size may be less than this value.
 /// @param def Image dimension attributes used to deteremine how much address space to reserve.
 /// @param encoding One of image_encoding_e specifying the storage encoding for the image.
 /// @param access_type One of image_access_type_e specifying how the image data will be accessed.
+/// @param definition_queue The unbounded MPSC queue to post the image attributes to.
+/// @param thread_alloc The FIFO node allocator used to write to the target queue from the calling thread.
 /// @return ERROR_SUCCESS, ERROR_ALREADY_EXISTS, or ERROR_OUTOFMEMORY.
-public_function uint32_t image_memory_reserve_image(image_memory_t *mem, uintptr_t image_id, size_t element_size, image_definition_t const &def, int encoding, int access_type)
+public_function uint32_t image_memory_reserve_image(image_memory_t *mem, size_t element_size, image_definition_t const *def, int encoding, int access_type, image_definition_queue_t *definition_queue=NULL, image_definition_alloc_t *thread_alloc=NULL)
 {
     size_t image_index;
-    if (id_table_get(&mem->ImageIds, image_id, &image_index))
+    if (id_table_get(&mem->ImageIds, def->ImageId, &image_index))
     {   // this image is already defined. is this definition identical?
         image_memory_info_t const &existing = mem->AttributeList[image_index];
-        if (def.ElementCount    == existing.ElementCount                   && 
-            def.LevelCount      == existing.LevelCount                     && 
-            def.ImageFormat     == existing.Format                         && 
-            def.Width           == existing.LevelDimension[0].LevelWidth   && 
-            def.Height          == existing.LevelDimension[0].LevelHeight  && 
-            def.SliceCount      == existing.LevelDimension[0].LevelSlices)
+        if (def->ElementCount   == existing.ElementCount                   && 
+            def->LevelCount     == existing.LevelCount                     && 
+            def->ImageFormat    == existing.Format                         && 
+            def->Width          == existing.LevelDimension[0].LevelWidth   && 
+            def->Height         == existing.LevelDimension[0].LevelHeight  && 
+            def->SliceCount     == existing.LevelDimension[0].LevelSlices)
         {   // the definitions are identical; we're done.
             return ERROR_SUCCESS;
         }
@@ -535,12 +655,12 @@ public_function uint32_t image_memory_reserve_image(image_memory_t *mem, uintptr
     // figure out how much memory needs to be allocated.
     size_t element_max_used   = element_size;
     size_t element_reserved   = align_up(element_size, mem->PageSize);
-    size_t reserve_bytes      = def.ElementCount * element_reserved;
-    void  *reserve_buffer     = VirtualAlloc(NULL, reserve_bytes, MEM_RESERVE, PAGE_READWRITE);
-    uint32_t              *es =(uint32_t            *) malloc(def.ElementCount * sizeof(uint32_t));
-    image_memory_size_t   *ec =(image_memory_size_t *) malloc(def.ElementCount * sizeof(image_memory_size_t));
-    image_memory_level_t  *la =(image_memory_level_t*) malloc(def.LevelCount   * sizeof(image_memory_level_t));
-    image_memory_block_t  *ib =(image_memory_block_t*) malloc(def.ElementCount * def.LevelCount * sizeof(image_memory_block_t));
+    size_t reserve_bytes      = def->ElementCount * element_reserved;
+    void  *reserve_buffer     = VirtualAlloc(NULL , reserve_bytes, MEM_RESERVE, PAGE_READWRITE);
+    uint32_t              *es =(uint32_t            *) malloc(def->ElementCount * sizeof(uint32_t));
+    image_memory_size_t   *ec =(image_memory_size_t *) malloc(def->ElementCount * sizeof(image_memory_size_t));
+    image_memory_level_t  *la =(image_memory_level_t*) malloc(def->LevelCount   * sizeof(image_memory_level_t));
+    image_memory_block_t  *ib =(image_memory_block_t*) malloc(def->ElementCount * def->LevelCount * sizeof(image_memory_block_t));
     if (reserve_buffer == NULL || es == NULL || ec == NULL || la == NULL || ib == NULL)
     {   // memory allocation failed. 
         free(ib); free(la); free(ec); free(es); 
@@ -555,15 +675,15 @@ public_function uint32_t image_memory_reserve_image(image_memory_t *mem, uintptr
     addr.ImageStatus          = IMAGE_MEMORY_FLAG_NONE;
     
     // initialize the image attribute block.
-    info.ImageId              = image_id;
-    info.Format               = def.ImageFormat;
-    info.Compression          = def.Compression;
+    info.ImageId              = def->ImageId;
+    info.Format               = def->ImageFormat;
+    info.Compression          = def->Compression;
     info.Encoding             = encoding;
     info.AccessType           = access_type;
-    info.ElementCount         = def.ElementCount;
-    info.LevelCount           = def.LevelCount;
-    info.BytesPerPixel        = def.BytesPerPixel;
-    info.BytesPerBlock        = def.BytesPerBlock;
+    info.ElementCount         = def->ElementCount;
+    info.LevelCount           = def->LevelCount;
+    info.BytesPerPixel        = def->BytesPerPixel;
+    info.BytesPerBlock        = def->BytesPerBlock;
     info.BytesPerElement      = element_reserved;
     info.BytesPerElementMax   = element_max_used;
     info.ElementStatus        = es;
@@ -572,61 +692,72 @@ public_function uint32_t image_memory_reserve_image(image_memory_t *mem, uintptr
     info.ImageBlocks          = ib;
 
     // element status start out as zero (no locks, no commits):
-    memset(info.ElementStatus, 0, def.ElementCount * sizeof(uint32_t));
+    memset(info.ElementStatus, 0, def->ElementCount * sizeof(uint32_t));
 
     // element commit starts out as zero (no bytes used, no bytes committed):
-    memset(info.ElementCommit, 0, def.ElementCount * sizeof(image_memory_size_t));
+    memset(info.ElementCommit, 0, def->ElementCount * sizeof(image_memory_size_t));
 
     // generate level attributes from the dds_level_desc_t list:
-    for (size_t i = 0, n = def.LevelCount; i < n; ++i)
+    for (size_t i = 0, n = def->LevelCount; i < n; ++i)
     {   // not storing index or format in image_memory_level_t.
-        info.LevelDimension[i].LevelWidth      = def.LevelInfo[i].Width;
-        info.LevelDimension[i].LevelHeight     = def.LevelInfo[i].Height;
-        info.LevelDimension[i].LevelSlices     = def.LevelInfo[i].Slices;
-        info.LevelDimension[i].BytesPerElement = def.LevelInfo[i].BytesPerElement;
-        info.LevelDimension[i].BytesPerRow     = def.LevelInfo[i].BytesPerRow;
-        info.LevelDimension[i].BytesPerSlice   = def.LevelInfo[i].BytesPerSlice;
+        info.LevelDimension[i].LevelWidth      = def->LevelInfo[i].Width;
+        info.LevelDimension[i].LevelHeight     = def->LevelInfo[i].Height;
+        info.LevelDimension[i].LevelSlices     = def->LevelInfo[i].Slices;
+        info.LevelDimension[i].BytesPerElement = def->LevelInfo[i].BytesPerElement;
+        info.LevelDimension[i].BytesPerRow     = def->LevelInfo[i].BytesPerRow;
+        info.LevelDimension[i].BytesPerSlice   = def->LevelInfo[i].BytesPerSlice;
     }
 
     // block (offset, size) pairs start out as zero (undefined).
-    memset(info.ImageBlocks, 0, def.ElementCount * def.LevelCount * sizeof(image_memory_block_t));
+    memset(info.ImageBlocks, 0 , def->ElementCount * def->LevelCount * sizeof(image_memory_block_t));
 
     // make the image visible to the rest of the system.
-    id_table_put(&mem->ImageIds, image_id, image_index);
+    id_table_put(&mem->ImageIds, def->ImageId, image_index);
     mem->BytesReserved += reserve_bytes;
     mem->ImageCount++;
+
+    // publish the image definition, if requested.
+    if (definition_queue != NULL)
+    {
+        image_definition_post(def, definition_queue, thread_alloc);
+    }
     return ERROR_SUCCESS;
 }
 
 /// @summary Reserves address space for all elements of an image stored without compression or encoding.
 /// @param mem The image memory manager to allocate from.
-/// @param image_id The application-defined identifier of the image.
 /// @param def The complete image attributes, specifying the total element and level count.
 /// @param access_type One of image_access_type_e specifying the storage access type of the image data.
+/// @param definition_queue The unbounded MPSC queue to post the image attributes to.
+/// @param thread_alloc The FIFO node allocator used to write to the target queue from the calling thread.
 /// @return ERROR_SUCCESS or a system error code.
-public_function uint32_t image_memory_reserve_image(image_memory_t *mem, uintptr_t image_id, image_definition_t const &def, int access_type)
+public_function uint32_t image_memory_reserve_image(image_memory_t *mem, image_definition_t const *def, int access_type, image_definition_queue_t *definition_queue=NULL, image_definition_alloc_t *thread_alloc=NULL)
 {
     size_t   image_index  = mem->ImageCount;
     size_t   block_index  = 0;
     size_t   element_used = 0;
     size_t   element_size = image_memory_element_size (def, mem->PageSize, element_used);
-    uint32_t make_result  = image_memory_reserve_image(mem, image_id, element_used, def, IMAGE_ENCODING_RAW, access_type);
+    uint32_t make_result  = image_memory_reserve_image(mem, element_used, def, IMAGE_ENCODING_RAW, access_type, NULL, NULL);
     if (SUCCEEDED(make_result))
     {   // initialize the block offsets and sizes.
         image_memory_info_t &info = mem->AttributeList[image_index];
-        for (size_t element_index = 0, element_count = def.ElementCount; element_index < element_count; element_index++)
+        for (size_t element_index = 0, element_count = def->ElementCount; element_index < element_count; element_index++)
         {
             size_t      level_offset= 0; // byte offset relative to the start of the element.
-            for (size_t level_index = 0, level_count = def.LevelCount; level_index < level_count; ++level_index, ++block_index)
+            for (size_t level_index = 0, level_count = def->LevelCount; level_index < level_count; ++level_index, ++block_index)
             {
                 info.ImageBlocks[block_index].ByteOffset = level_offset;
-                info.ImageBlocks[block_index].StoredSize = def.LevelInfo[level_index].DataSize;
-                level_offset += def.LevelInfo[level_index].DataSize;
+                info.ImageBlocks[block_index].StoredSize = def->LevelInfo[level_index].DataSize;
+                level_offset += def->LevelInfo[level_index].DataSize;
             }
             info.ElementCommit[element_index].BytesUsed  = level_offset;
             info.ElementCommit[element_index].BytesCommitted = 0;
         }
 
+    }
+    if (definition_queue != NULL)
+    {
+        image_definition_post(def, definition_queue, thread_alloc);
     }
     UNREFERENCED_PARAMETER(element_size);
     return make_result;
@@ -1030,8 +1161,10 @@ public_function uint32_t image_memory_mark_level_end(image_memory_t *mem, uintpt
 /// @param mem The image memory manager.
 /// @param image_id The application-defined image identifier.
 /// @param element The zero-based index of the array item or frame being written.
+/// @param placement_queue The unbounded MPSC queue to notify with the location of the element in memory.
+/// @param thread_alloc The FIFO node allocator used to write to the placement queue from the calling thread.
 /// @return ERROR_SUCCESS or ERROR_NOT_FOUND.
-public_function uint32_t image_memory_mark_element_end(image_memory_t *mem, uintptr_t image_id, size_t element)
+public_function uint32_t image_memory_mark_element_end(image_memory_t *mem, uintptr_t image_id, size_t element, image_location_queue_t *placement_queue=NULL, image_location_alloc_t *thread_alloc=NULL)
 {
     size_t image_index;
     if (id_table_get(&mem->ImageIds, image_id, &image_index))
@@ -1046,6 +1179,16 @@ public_function uint32_t image_memory_mark_element_end(image_memory_t *mem, uint
             VirtualFree(element_data+bytes_used, size.BytesCommitted-bytes_used, MEM_DECOMMIT);
             size.BytesCommitted    = bytes_used;
         }
+        if (placement_queue != NULL)
+        {   // post the placement notification to the target queue.
+            fifo_node_t<image_location_t> *n = fifo_allocator_get(thread_alloc);
+            n->Item.ImageId        = image_id;
+            n->Item.FrameIndex     = element;
+            n->Item.BaseAddress    = element_data;
+            n->Item.BytesReserved  = size.BytesCommitted;
+            n->Item.Context        =(uintptr_t) mem;
+            mpsc_fifo_u_produce(placement_queue, n);
+        }
         return ERROR_SUCCESS;
     }
     else return ERROR_NOT_FOUND;
@@ -1054,7 +1197,7 @@ public_function uint32_t image_memory_mark_element_end(image_memory_t *mem, uint
 /// @summary Helper function to calculate the size of an image element when stored with no compression (except for DXGI compression) and raw encoding.
 /// @param def The image definition.
 /// @return The base size of the image element, in bytes, including all defined levels in the mipmap chain.
-public_function size_t image_memory_base_element_size(image_definition_t const &def)
+public_function size_t image_memory_base_element_size(image_definition_t const *def)
 {
     size_t element_used = 0; UNREFERENCED_PARAMETER(element_used);
     return image_memory_element_size(def, 1, element_used);

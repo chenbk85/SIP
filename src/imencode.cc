@@ -28,42 +28,46 @@ struct image_encoder_t
     image_encoder_t(void);
     virtual ~image_encoder_t(void);
 
-    virtual uint32_t   define_image
+    virtual uint32_t          define_image
     (
-        image_definition_t const &def
-    ) = 0;                                   /// Reserve address space, if required.
+        image_definition_t const *def
+    ) = 0;                                       /// Reserve address space, if required.
 
-    virtual uint32_t   reset_element
+    virtual uint32_t          reset_element
     (
-        size_t         element
-    ) = 0;                                   /// Start writing data to an image element.
-                                             /// Existing contents are lost and overwritten.
+        size_t                   element
+    ) = 0;                                       /// Start writing data to an image element.
+                                                 /// Existing contents are lost and overwritten.
 
-    virtual uint32_t   encode
+    virtual uint32_t          encode
     (
-        size_t         element, 
-        void const    *src_data, 
-        size_t         src_size
-    ) = 0;                                   /// Encode and append data to an image element.
+        size_t                   element, 
+        void const              *src_data, 
+        size_t                   src_size
+    ) = 0;                                       /// Encode and append data to an image element.
 
-    virtual uint32_t   mark_level
+    virtual uint32_t          mark_level
     (
-        size_t         element
-    ) = 0;                                   /// Mark the end of the current level.
+        size_t                   element
+    ) = 0;                                       /// Mark the end of the current level.
 
-    virtual uint32_t   mark_element
+    virtual uint32_t          mark_element
     (
-        size_t         element
-    ) = 0;                                   /// Mark the end of the current element.
+        size_t                   element
+    ) = 0;                                       /// Mark the end of the current element.
 
-    image_memory_t    *Memory;               /// The image memory manager to which output data is written.
-    uintptr_t          ImageId;              /// The application-defined image identifier. Constant.
-    int                AccessType;           /// The image data access type. Constant.
-    int                SourceCompression;    /// The image_compression_e of the source data. Constant.
-    int                TargetCompression;    /// The image_compression_e of the output data. Constant.
-    int                SourceEncoding;       /// The image_encoding_e of the source data. Constant.
-    int                TargetEncoding;       /// The image_encoding_e of the target data. Constant.
-    image_definition_t Metadata;             /// The generic image definiton. Constant; read-only.
+    image_memory_t           *Memory;            /// The image memory manager to which output data is written.
+    image_definition_queue_t *DefinitionQueue;
+    image_definition_alloc_t *DefinitionAlloc;
+    image_location_queue_t   *PlacementQueue;
+    image_location_alloc_t   *PlacementAlloc;
+    uintptr_t                 ImageId;           /// The application-defined image identifier. Constant.
+    int                       AccessType;        /// The image data access type. Constant.
+    int                       SourceCompression; /// The image_compression_e of the source data. Constant.
+    int                       TargetCompression; /// The image_compression_e of the output data. Constant.
+    int                       SourceEncoding;    /// The image_encoding_e of the source data. Constant.
+    int                       TargetEncoding;    /// The image_encoding_e of the target data. Constant.
+    image_definition_t const *Metadata;          /// The generic image definiton. Constant; read-only.
 
 private: // non-copyable
     image_encoder_t(image_encoder_t const&);
@@ -76,32 +80,32 @@ struct image_encoder_identity_t final : public image_encoder_t
     image_encoder_identity_t(void);
     ~image_encoder_identity_t(void);
 
-    uint32_t           define_image
+    uint32_t                  define_image
     (
-        image_definition_t const &def
-    ) override;                              /// Reserve address space, if required.
+        image_definition_t const *def
+    ) override;                                  /// Reserve address space, if required.
 
-    uint32_t           reset_element
+    uint32_t                  reset_element
     (
-        size_t         element
-    ) override;                              /// Start writing data to an image element.
+        size_t                   element
+    ) override;                                  /// Start writing data to an image element.
 
-    uint32_t           encode
+    uint32_t                  encode
     (
-        size_t         element,
-        void const    *src_data, 
-        size_t         src_size
-    ) override;                              /// Encode and append data to the current level.
+        size_t                   element,
+        void const              *src_data, 
+        size_t                   src_size
+    ) override;                                  /// Encode and append data to the current level.
 
-    uint32_t           mark_level
+    uint32_t                  mark_level
     (
-        size_t         element
-    ) override;                              /// Mark the end of the current level.
+        size_t                   element
+    ) override;                                  /// Mark the end of the current level.
 
-    uint32_t           mark_element
+    uint32_t                  mark_element
     (
-        size_t         element
-    ) override;                              /// Mark the end of the current element.
+        size_t                   element
+    ) override;                                  /// Mark the end of the current element.
 };
 
 /*///////////////
@@ -123,29 +127,29 @@ struct image_encoder_identity_t final : public image_encoder_t
 /// @param dst_comp One of image_compression_e specifying the target data compression type.
 /// @param dst_enc One of image_encoding_e specifying the target data encoding type.
 /// @param access_type One of image_access_type_e specifying how the data will be accessed.
-/// @param def Image metadata specifying basic layout and attributes.
+/// @param defq The unbounded MPSC queue to which image definitions will be posted.
+/// @param defa The FIFO node allocator used to write to the image definition queue from the encoder thread.
+/// @param locq The unbounded MPSC queue to which image placement data will be posted.
+/// @param loca The FIFO node allocator used to write to the image placement queue from the encoder thread.
 /// @return The image encoder, or NULL if no encoder type can perform the specified conversion.
-public_function image_encoder_t* create_image_encoder(uintptr_t image_id, image_memory_t *mem, int src_comp, int src_enc, int dst_comp, int dst_enc, int access_type, image_definition_t const &def)
+public_function image_encoder_t* create_image_encoder(uintptr_t image_id, image_memory_t *mem, int src_comp, int src_enc, int dst_comp, int dst_enc, int access_type, image_definition_queue_t *defq=NULL, image_definition_alloc_t *defa=NULL, image_location_queue_t *locq=NULL, image_location_alloc_t *loca=NULL)
 {
     if (src_comp == dst_comp && src_enc == dst_enc)
     {   // use the most common encoder type - the identity encoder.
         image_encoder_identity_t *enc = new image_encoder_identity_t();
-        enc->Memory            = mem;
-        enc->ImageId           = image_id;
-        enc->AccessType        = access_type;
-        enc->SourceCompression = src_comp;
-        enc->SourceEncoding    = src_enc;
-        enc->TargetCompression = dst_comp;
-        enc->TargetEncoding    = dst_enc;
-        if (SUCCEEDED(enc->define_image(def)))
-        {   // the encoder is initialized and ready to go.
-            return enc;
-        }
-        else
-        {   // something wrong with the image definition.
-            delete enc;
-            return NULL;
-        }
+        enc->Memory            =  mem;
+        enc->DefinitionQueue   =  defq;
+        enc->DefinitionAlloc   =  defa;
+        enc->PlacementQueue    =  locq;
+        enc->PlacementAlloc    =  loca;
+        enc->ImageId           =  image_id;
+        enc->AccessType        =  access_type;
+        enc->SourceCompression =  src_comp;
+        enc->SourceEncoding    =  src_enc;
+        enc->TargetCompression =  dst_comp;
+        enc->TargetEncoding    =  dst_enc;
+        enc->Metadata          =  NULL;
+        return enc;
     }
     return NULL;
 }
@@ -177,11 +181,13 @@ image_encoder_identity_t::~image_encoder_identity_t(void)
 /// @summary Defines the complete attributes of an image and reserves process address space for image storage.
 /// @param def The image definition. The ElementCount field must be set to the total number of array elements or frames in the image.
 /// @return ERROR_SUCCESS, or a system error code.
-uint32_t image_encoder_identity_t::define_image(image_definition_t const &def)
-{   // no additional transformation will be performed, so the size won't change as long as the image dimension attributes are the same. 
+uint32_t image_encoder_identity_t::define_image(image_definition_t const *def)
+{   // save a reference to the metadata for later access.
+    Metadata = def;
+    // no additional transformation will be performed, so the size won't change as long as the image dimension attributes are the same. 
     size_t base_element_size  = image_memory_base_element_size(def);
     // TODO(rlk): determine scale factor for base_element_size using source compression/encoding.
-    return image_memory_reserve_image(Memory, ImageId, base_element_size, def, TargetEncoding, AccessType);
+    return image_memory_reserve_image(Memory,base_element_size,def, TargetEncoding, AccessType, DefinitionQueue, DefinitionAlloc);
 }
 
 /// @summary Decommits all memory associated with an image array element or frame. Subsequent encode calls targeting the element will begin writing data to level 0.
@@ -224,5 +230,5 @@ uint32_t image_encoder_identity_t::mark_level(size_t element)
 /// @return ERROR_SUCCESS, ERROR_NOT_FOUND or a system error code.
 uint32_t image_encoder_identity_t::mark_element(size_t element)
 {   // do not increment the element index here. pick it up during the encode call.
-    return image_memory_mark_element_end(Memory, ImageId, element);
+    return image_memory_mark_element_end(Memory, ImageId, element, PlacementQueue, PlacementAlloc);
 }
