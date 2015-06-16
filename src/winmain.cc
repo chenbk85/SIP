@@ -14,6 +14,12 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
+#ifdef  _DEBUG
+#define _CRTDBG_MAP_ALLOC
+#include <stdlib.h>
+#include <crtdbg.h>
+#endif
+
 /*////////////////
 //   Includes   //
 ////////////////*/
@@ -223,6 +229,10 @@ internal_function LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wPar
 /// @return Zero if the message loop was not entered, or the value of the WM_QUIT wParam.
 int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int nCmdShow)
 {
+#ifdef  _DEBUG
+    _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
+#endif
+
     file_list_t      image_files;
 	display_driver_t display;
     int result = 0; // return zero if the message loop isn't entered.
@@ -343,6 +353,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     image_memory_evict_element(&mem, 0, pel, stor.BytesReserved, false);
     image_memory_drop_image(&mem, 0);
     image_memory_delete(&mem);
+    image_definition_free(&img);
 
     size_t ofs_a = 0;
     size_t ofs_b = 0;
@@ -406,17 +417,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
             // load the data from the file.
             dds = io.load_file(ld.FilePath, ld.FileHints, ld.DecoderHint, ld.ImageId, 0, NULL);
-            enc = create_image_encoder(
-                ld.ImageId, &imm, 
-                IMAGE_COMPRESSION_NONE, 
-                IMAGE_ENCODING_RAW, 
-                IMAGE_COMPRESSION_NONE, 
-                IMAGE_ENCODING_RAW, 
-                IMAGE_ACCESS_2D_ARRAY, 
-                &imc.DefinitionQueue, 
-                &imgdef_alloc, 
-                &imc.LocationQueue, 
-                &imgpos_alloc);
+            enc = create_image_encoder(ld.ImageId, &imm, IMAGE_COMPRESSION_NONE, IMAGE_ENCODING_RAW, IMAGE_COMPRESSION_NONE, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D_ARRAY, &imc.DefinitionQueue, &imgdef_alloc, &imc.LocationQueue, &imgpos_alloc);
 
             // set up the parser.
             image_parser_config_t         parse_config;
@@ -474,13 +475,13 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         if (dds != NULL)
         {
             int state  = dds_parser_update(dds, &dds_parser, enc);
-            if (state == DDS_PARSE_STATE_COMPLETE)
+            if (state == DDS_PARSE_RESULT_COMPLETE)
             {
                 dds->release();
                 delete enc;
                 dds = NULL; enc = NULL;
             }
-            if (state == DDS_PARSE_STATE_ERROR)
+            if (state == DDS_PARSE_RESULT_ERROR)
             {
                 char b[1024];
                 sprintf_s(b, "Error %u parsing DDS file for image %Iu\n.", dds->ErrorCode, dds->Identifier);
@@ -498,6 +499,11 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     vfs_driver_close(&vfs);
     pio_driver_close(&pio);
     aio_driver_close(&aio);
+
+    image_cache_delete(&imc);
+    image_memory_delete(&imm);
+    fifo_allocator_reinit(&imgpos_alloc);
+    fifo_allocator_reinit(&imgdef_alloc);
 
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
