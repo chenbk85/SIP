@@ -50,6 +50,7 @@ enum aio_close_flags_e : uint32_t
     AIO_CLOSE_FLAGS_NONE    = (0 << 0), /// Do not close the underlying file handle.
     AIO_CLOSE_ON_ERROR      = (1 << 0), /// Close the underlying file handle if an error occurs.
     AIO_CLOSE_ON_COMPLETE   = (1 << 1), /// Close the underlying file handle when the request has completed.
+    AIO_CLOSE_EXTERNAL      = (1 << 2), /// The underlying file handle was closed at command completion time.
 };
 
 /// @summary Defines the data associated with a completed AIO operation. The
@@ -89,6 +90,17 @@ struct aio_request_t
     uint32_t        Priority;     /// The application-defined priority value for the operation. Passthrough.
 };
 
+/// @summary Defines the data associated with a single item in the completion list.
+/// The completion list tracks all outstanding requests for a file identifier and 
+/// ensures that the results are submitted back to the requestor in the order they
+/// were requested. This is necessary because overlapped I/O requests can and will
+/// complete in a different order than they were submitted.
+struct aio_cnode_t
+{
+    aio_request_t   Req;          /// The AIO driver request data. This data is always valid.
+    aio_result_t    Res;          /// The AIO driver result data. If set, the Fildes field will not be INVALID_HANDLE_VALUE.
+};
+
 /// @summary Defines the data associated with the asynchronous I/O (AIO) driver.
 /// The AIO driver typically executes on a background thread due to the blocking
 /// nature of some operations. Sitting above the AIO driver is the prioritized I/O
@@ -97,6 +109,8 @@ struct aio_request_t
 struct aio_driver_t
 {   typedef aio_request_t    req_t;
     typedef spsc_fifo_b_t   <req_t>   request_queue_t;
+    typedef aio_cnode_t      node_t;
+    typedef lplc_fifo_u_t   <node_t>  finish_queue_t;
     static  size_t const     N      = WINDOWS_AIO_MAX_ACTIVE;
     request_queue_t RequestQueue; /// The bounded queue of pending requests from the PIO driver.
     HANDLE          AIOContext;   /// The kernel AIO context descriptor.
@@ -105,6 +119,11 @@ struct aio_driver_t
     aio_request_t   AIOCList[N];  /// The list of active AIO command descriptors.
     OVERLAPPED     *IOCBFree[N];  /// The list of unused kernel iocb descriptors.
     OVERLAPPED      IOCBPool[N];  /// The pool of kernel iocb descriptors.
+
+    size_t          FileCount;    /// The number of items in the file list.
+    size_t          FileCapacity; /// The capacity of the file list.
+    uintptr_t      *FileIds;      /// The set of identifiers for each file with outstanding requests.
+    finish_queue_t *FileRequests; /// The queue of outstandinf requests for each file.
 };
 
 /// @summary Some typedefs for user code to hide template ugliness.
@@ -121,68 +140,187 @@ typedef fifo_allocator_t<void*>         aio_return_alloc_t;
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
-/// @summary Initialize an aio_result_t with data in response to a completed
-/// command and post the result to the target result queue.
-/// @param cmd The AIO driver command that completed.
-/// @param oserr The system error code result (0 indicates success/no error.)
-/// @param amount The number of bytes transferred, or 0.
-/// @return The input value oserr.
-internal_function DWORD aio_driver_post_result(aio_request_t const &cmd, DWORD oserr, uint32_t amount)
+/// @summary Post an aio_result_t to the target result queue.
+/// @param cmd The AIO driver completion list entry.
+/// @return true if the underlying file handle was closed.
+internal_function bool aio_driver_post_result(aio_cnode_t const &cmd)
 {   // post the operation result to the result queue specified in the request.
-    fifo_node_t<aio_result_t> *node = fifo_allocator_get(cmd.ResultAlloc);
-    aio_result_t &res = node->Item;
-    res.Fildes        = cmd.Fildes;
-    res.OSError       = oserr;
-    res.DataAmount    = amount;
-    res.DataActual    = cmd.DataActual;
-    res.FileOffset    = cmd.FileOffset;
-    res.DataBuffer    = cmd.DataBuffer;
-    res.Identifier    = cmd.Identifier;
-    res.StatusFlags   = cmd.StatusFlags;
-    res.Priority      = cmd.Priority;
-    spsc_fifo_u_produce(cmd.ResultQueue, node);
+    fifo_node_t<aio_result_t> *node = fifo_allocator_get(cmd.Req.ResultAlloc);
+    node->Item = cmd.Res;  //  copy the result data to the FIFO node.
+    spsc_fifo_u_produce(cmd.Req.ResultQueue, node);
     // close the underlying file handle, if requested.
-    if (cmd.CloseFlags != AIO_CLOSE_FLAGS_NONE)
+    if (cmd.Req.CloseFlags != AIO_CLOSE_FLAGS_NONE)
     {
-        if ( ((cmd.CloseFlags & AIO_CLOSE_ON_COMPLETE) != 0) ||
-            (((cmd.CloseFlags & AIO_CLOSE_ON_ERROR   ) != 0) && FAILED(oserr)) )
+        if ( ((cmd.Req.CloseFlags & AIO_CLOSE_ON_COMPLETE) != 0) ||
+            (((cmd.Req.CloseFlags & AIO_CLOSE_ON_ERROR   ) != 0) && FAILED(cmd.Res.OSError)) )
         {   // the close condition has been satisfied.
-            CloseHandle(cmd.Fildes);
+            CloseHandle(cmd.Req.Fildes);
+            return true;
+        }
+        if   ((cmd.Req.CloseFlags & AIO_CLOSE_EXTERNAL   ) != 0)
+        {   // the file handle was closed prior to this call.
+            return true;
         }
     }
+    return false;
+}
+
+/// @summary Helper function to look at a completion list node and determine whether the result has been noted.
+/// @param node The completion list node to check.
+/// @return true if the result has been noted.
+internal_function inline bool aio_driver_request_completed(aio_cnode_t const &node)
+{
+    return (node.Res.Fildes != INVALID_HANDLE_VALUE);
+}
+
+/// @summary Save a record of an AIO driver request to the pending-completion queue for a file.
+/// @param driver The AIO driver state processing the AIO request.
+/// @param cmd The AIO driver request being processed.
+internal_function void aio_driver_note_request(aio_driver_t *driver, aio_request_t const &cmd)
+{   // look for an existing completion list entry for this file:
+    uintptr_t  id = cmd.Identifier;
+    for (size_t i = 0, n = driver->FileCount; i < n; ++i)
+    {
+        if (driver->FileIds[i] == id)
+        {   // add this request to completion queue for the file.
+            aio_cnode_t n;
+            n.Req        = cmd;
+            n.Res.Fildes = INVALID_HANDLE_VALUE;
+            lplc_fifo_u_produce(&driver->FileRequests[i], n);
+            return;
+        }
+    }
+    // else, no entry for this file, so create a new completion list.
+    if (driver->FileCount == driver->FileCapacity)
+    {   // increase the file list capacity. this might happen because 
+        // a request may complete out of order, in which case the next
+        // request is allowed to proceed, but this result isn't delivered
+        // to the target queue until preceeding requests have completed.
+        size_t old_amount  = driver->FileCapacity;
+        size_t new_amount  = calculate_capacity(old_amount, old_amount+1, WINDOWS_AIO_MAX_ACTIVE, WINDOWS_AIO_MAX_ACTIVE);
+        uintptr_t                   *il = (uintptr_t                   *) realloc(driver->FileIds     , new_amount * sizeof(uintptr_t));
+        lplc_fifo_u_t<aio_cnode_t>  *ql = (lplc_fifo_u_t<aio_cnode_t>  *) realloc(driver->FileRequests, new_amount * sizeof(lplc_fifo_u_t<aio_cnode_t>));
+        if (il != NULL) driver->FileIds      = il;
+        if (ql != NULL) driver->FileRequests = ql;
+        if (il != NULL && ql != NULL) driver->FileCapacity= new_amount;
+    }
+    aio_cnode_t  node;
+    size_t list_idx  = driver->FileCount++;
+    node.Req         = cmd;
+    node.Res.Fildes  = INVALID_HANDLE_VALUE;
+    driver->FileIds[list_idx] = cmd.Identifier;
+    lplc_fifo_u_init(&driver->FileRequests[list_idx]);
+    lplc_fifo_u_produce(&driver->FileRequests[list_idx], node);
+}
+
+/// @summary Save a record of a completed AIO driver request and generate the result.
+/// The result will not be submitted to the target queue until all preceeding requests have been completed.
+/// @param driver The AIO driver state processing the AIO result.
+/// @param cmd The AIO driver request that has been completed.
+/// @param oserr The system error code to post with the result, or ERROR_SUCCESS.
+/// @param amount The number of bytes transferred by the request, or 0.
+/// @return The value of oserr.
+internal_function DWORD aio_driver_note_result(aio_driver_t *driver, aio_request_t const &cmd, DWORD oserr, uint32_t amount)
+{   // look for an existing completion list entry for this file:
+    uintptr_t  id = cmd.Identifier;
+    for (size_t i = 0, n = driver->FileCount; i < n; ++i)
+    {
+        if (driver->FileIds[i] == id)
+        {   // locate this request in the list of outstanding requests.
+            lplc_fifo_u_t<aio_cnode_t>     &request_queue = driver->FileRequests[i];
+            lplc_fifo_u_t<aio_cnode_t>::lplc_node_t *iter = request_queue.Head->Next;
+            while (iter != NULL)
+            {   // TODO(rlk): some faster way to match the requests?
+                if (memcmp(&iter->Item.Req, &cmd, sizeof(aio_request_t)) == 0)
+                {   // found the exactly matching request data.
+                    // generate and save the result.
+                    aio_result_t &res = iter->Item.Res;
+                    res.Fildes        = cmd.Fildes;
+                    res.OSError       = oserr;
+                    res.DataAmount    = amount;
+                    res.DataActual    = cmd.DataActual;
+                    res.FileOffset    = cmd.FileOffset;
+                    res.DataBuffer    = cmd.DataBuffer;
+                    res.Identifier    = cmd.Identifier;
+                    res.StatusFlags   = cmd.StatusFlags;
+                    res.Priority      = cmd.Priority;
+                    break;
+                }
+                iter = iter->Next;
+            }
+            // else, this request was not found, and the result is dropped.
+            break;
+        }
+    }
+    // else, there's no entry for this file, and the result is dropped.
     return oserr;
 }
 
+/// @summary Dispatch any completed driver requests to their target queue.
+/// A request is dispatched only when all of its preceeding requests have been dispatched.
+/// @param driver The AIO driver state that processed the AIO command.
+internal_function void aio_driver_dispatch_results(aio_driver_t *driver)
+{
+    for (size_t i = 0; i < driver->FileCount; /* empty */)
+    {
+        lplc_fifo_u_t<aio_cnode_t> *completion_queue = &driver->FileRequests[i];
+        aio_cnode_t n; // the first completion entry
+        bool closed = false;
+        while (lplc_fifo_u_front(completion_queue, n))
+        {   // if this item hasn't completed, stop processing this queue.
+            if (aio_driver_request_completed(n) == false)
+            {   // move on to the next queue.
+                ++i; break;
+            }
+            // dispatch the completed request.
+            closed = aio_driver_post_result(n);
+            lplc_fifo_u_consume(completion_queue, n);
+        }
+        if (lplc_fifo_u_empty(completion_queue) && closed)
+        {   // there are no outstanding requests, and the file handle was closed.
+            // the completion queue can be safely deleted. 
+            lplc_fifo_u_delete(completion_queue);
+            size_t last_index       = driver->FileCount - 1;
+            driver->FileIds[i]      = driver->FileIds[last_index];
+            driver->FileRequests[i] = driver->FileRequests[last_index];
+            driver->FileCount--;   // don't increment i. check this slot again.
+        }
+        else ++i; // move on to the next queue.
+    }
+}
+
 /// @summary Synchronously processes a file flush operation.
+/// @param driver The AIO driver state processing the AIO request.
 /// @param cmd The data associated with the flush operation.
 /// @return Either ERROR_SUCCESS or the result of calling GetLastError().
-internal_function DWORD aio_driver_flush_file(aio_request_t &cmd)
+internal_function DWORD aio_driver_flush_file(aio_driver_t *driver, aio_request_t &cmd)
 {   // synchronously flush all pending writes to the file.
     DWORD error = ERROR_SUCCESS;
     BOOL result = FlushFileBuffers(cmd.Fildes);
     if (!result)  error = GetLastError();
     // generate the completion and push it to the queue.
-    return aio_driver_post_result(cmd, error, 0);
+    return aio_driver_note_result(driver, cmd, error, 0);
 }
 
-/// @summary Synchronously process a file close command. This closes both the
-/// file handle and the eventfd handle, and posts the result to the target queue.
+/// @summary Synchronously process a file close command. This closes both the file handle and the eventfd handle.
+/// @param driver The AIO driver state processing the AIO request.
 /// @param cmd The data associated with the close operation.
 /// @return Either ERROR_SUCCESS or the result of calling GetLastError().
-internal_function DWORD aio_driver_close_file(aio_request_t &cmd)
+internal_function DWORD aio_driver_close_file(aio_driver_t *driver, aio_request_t &cmd)
 {   // close the file descriptors associated with the file.
-    cmd.CloseFlags |= AIO_CLOSE_ON_COMPLETE;
+    CloseHandle(cmd.Fildes); cmd.CloseFlags = AIO_CLOSE_EXTERNAL;
     // generate the completion result and push it to the queue.
-    return aio_driver_post_result(cmd, ERROR_SUCCESS, 0);
+    return aio_driver_note_result(driver, cmd, ERROR_SUCCESS, 0);
 }
 
 /// @summary Synchronously process a finalize command. This closes both the
 /// file handle and the eventfd handle, and posts the result to the target queue.
 /// If the command data buffer is NULL, the temporary file is deleted; otherwise,
 /// the temporary file is moved to the path specified by the command data buffer.
+/// @param driver The AIO driver state processing the AIO request.
 /// @param cmd The data associated with the close-and-rename operation.
 /// @return Either ERROR_SUCCESS or the result of calling GetLastError().
-internal_function DWORD aio_driver_close_and_rename(aio_request_t &cmd)
+internal_function DWORD aio_driver_close_and_rename(aio_driver_t *driver, aio_request_t &cmd)
 {
     DWORD error   = 0;    // saved return value from GetLastError().
     DWORD ncharsp = 0;    // number of characters in source path; GetFinalPathNameByHandle().
@@ -205,8 +343,9 @@ internal_function DWORD aio_driver_close_and_rename(aio_request_t &cmd)
     // is the temporary file being deleted, or is it being moved?
     if (target == NULL)
     {   // handle the simple case of deleting the temporary file.
+        cmd.CloseFlags = AIO_CLOSE_EXTERNAL;
         CloseHandle(cmd.Fildes); DeleteFile(source); free(source);
-        return aio_driver_post_result(cmd, ERROR_SUCCESS, 0);
+        return aio_driver_note_result(driver, cmd, ERROR_SUCCESS, 0);
     }
 
     // flush all pending writes to the file.
@@ -223,24 +362,26 @@ internal_function DWORD aio_driver_close_and_rename(aio_request_t &cmd)
     // note that goto error_cleanup can't be used after this point,
     // since we have already closed the file handle.
     CloseHandle(cmd.Fildes);
+    cmd.CloseFlags = AIO_CLOSE_EXTERNAL;
     if (!MoveFileEx(source, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     {   // unable to move the file to the target location.
         error = GetLastError();
         DeleteFile(source); free(source); free(target);
-        return aio_driver_post_result(cmd, error, 0);
+        return aio_driver_note_result(driver, cmd, error, 0);
     }
 
     // finally, we're done. complete the operation successfully.
     free(source); free(target);
-    return aio_driver_post_result(cmd, ERROR_SUCCESS, 0);
+    return aio_driver_note_result(driver, cmd, ERROR_SUCCESS, 0);
 
 error_cleanup:
     error = GetLastError();
     CloseHandle(cmd.Fildes);
+    cmd.CloseFlags = AIO_CLOSE_EXTERNAL;
     if (source != NULL) DeleteFile(source);
     if (source != NULL) free(source);
     if (target != NULL) free(target);
-    return aio_driver_post_result(cmd, error, 0);
+    return aio_driver_note_result(driver, cmd, error, 0);
 }
 
 /// @summary Builds a read operation and submits it to the kernel.
@@ -269,11 +410,11 @@ internal_function int aio_driver_submit_read(aio_driver_t *driver, aio_request_t
         }
         else if (error == ERROR_HANDLE_EOF)
         {   // attempted to read past end-of-file. not an error; synchronous.
-            return aio_driver_post_result(cmd, ERROR_SUCCESS, 0);
+            return aio_driver_note_result(driver, cmd, ERROR_SUCCESS, 0);
         }
         else
         {   // an actual error occurred; synchronous completion.
-            return aio_driver_post_result(cmd, error, 0);
+            return aio_driver_note_result(driver, cmd, error, 0);
         }
         // append to the active list; GetQueuedCompletionStatusEx will notify.
         size_t index = driver->ActiveCount++;
@@ -285,7 +426,7 @@ internal_function int aio_driver_submit_read(aio_driver_t *driver, aio_request_t
     {   // the read operation has completed synchronously. complete immediately.
         // normally, GetQueuedCompletionStatusEx would notify, but we used the
         // SetFileCompletionNotificationModes to override that behavior.
-        return aio_driver_post_result(cmd, ERROR_SUCCESS, xfer);
+        return aio_driver_note_result(driver, cmd, ERROR_SUCCESS, xfer);
     }
 }
 
@@ -315,7 +456,7 @@ internal_function DWORD aio_driver_submit_write(aio_driver_t *driver, aio_reques
         }
         else
         {   // an actual error occurred; synchronous completion.
-            return aio_driver_post_result(cmd, error, 0);
+            return aio_driver_note_result(driver, cmd, error, 0);
         }
         // append to the active list; GetQueuedCompletionStatusEx will notify.
         size_t index = driver->ActiveCount++;
@@ -327,7 +468,7 @@ internal_function DWORD aio_driver_submit_write(aio_driver_t *driver, aio_reques
     {   // the write operation has completed synchronously. complete immediately.
         // normally, GetQueuedCompletionStatusEx would notify, but we used the
         // SetFileCompletionNotificationModes to override that behavior.
-        return aio_driver_post_result(cmd, ERROR_SUCCESS, xfer);
+        return aio_driver_note_result(driver, cmd, ERROR_SUCCESS, xfer);
     }
 }
 
@@ -369,8 +510,8 @@ internal_function size_t aio_driver_poll_ev(aio_driver_t *driver, DWORD timeout,
                     DWORD    err = HRESULT_FROM_NT(evt.Internal);
                     uint32_t amt = evt.dwNumberOfBytesTransferred;
                     // post the result to the target queue for the command.
-                    aio_request_t &cmd = driver->AIOCList[index];
-                    aio_driver_post_result(cmd, err, amt);
+                    aio_request_t &cmd  = driver->AIOCList[index];
+                    aio_driver_note_result(driver, cmd, err, amt);
                     // return the OVERLAPPED instance to the free list.
                     driver->IOCBFree[N-ncmd]= iocb;
                     // swap the last active command into slot 'index'.
@@ -410,6 +551,7 @@ internal_function int aio_driver_main(aio_driver_t *driver, DWORD timeout)
             aio_request_t req;
             if (spsc_fifo_b_consume(&driver->RequestQueue, req))
             {   // a request was retrieved.
+                aio_driver_note_request(driver, req);
                 size_t type  = req.CommandType;
                 size_t index = reqcount[type]++;
                 requests[type][index] = req;
@@ -436,20 +578,24 @@ internal_function int aio_driver_main(aio_driver_t *driver, DWORD timeout)
         size_t const   flush_count = reqcount[AIO_COMMAND_FLUSH];
         for (size_t i = 0; i < flush_count; ++i)
         {   // TODO(rlk): error handling here.
-            aio_driver_flush_file(flush_list[i]);
+            aio_driver_flush_file(driver, flush_list[i]);
         }
         aio_request_t *close_list  = requests[AIO_COMMAND_CLOSE];
         size_t const   close_count = reqcount[AIO_COMMAND_CLOSE];
         for (size_t i = 0; i < close_count; ++i)
         {
-            aio_driver_close_file(close_list[i]);
+            aio_driver_close_file(driver, close_list[i]);
         }
         aio_request_t *rename_list  = requests[AIO_COMMAND_CLOSE_TEMP];
         size_t const   rename_count = reqcount[AIO_COMMAND_CLOSE_TEMP];
         for (size_t i = 0; i < rename_count; ++i)
         {
-            aio_driver_close_and_rename(rename_list[i]);
+            aio_driver_close_and_rename(driver, rename_list[i]);
         }
+
+        // finally, dispatch completed requests to their target queues.
+        // results are dispatched in the order the request was received.
+        aio_driver_dispatch_results(driver);
     }
     return (shutdown) ? 1 : 0;
 }
@@ -483,6 +629,16 @@ public_function DWORD aio_driver_open(aio_driver_t *driver)
     {
         driver->IOCBFree[i] = &driver->IOCBPool[i];
     }
+    // set up the completion list.
+    driver->FileCount    = 0;
+    driver->FileCapacity = WINDOWS_AIO_MAX_ACTIVE;
+    driver->FileIds      = (uintptr_t                 *) malloc(WINDOWS_AIO_MAX_ACTIVE * sizeof(uintptr_t));
+    driver->FileRequests = (lplc_fifo_u_t<aio_cnode_t>*) malloc(WINDOWS_AIO_MAX_ACTIVE * sizeof(lplc_fifo_u_t<aio_cnode_t>));
+    if (driver->FileIds == NULL || driver->FileRequests == NULL)
+    {   // unable to allocate the requested memory.
+        CloseHandle(iocp);
+        return ERROR_OUTOFMEMORY;
+    }
     // populate fields of the driver structure.
     driver->AIOContext   = iocp;
     driver->ActiveCount  = 0;
@@ -494,10 +650,19 @@ public_function DWORD aio_driver_open(aio_driver_t *driver)
 /// @param driver The AIO driver state to clean up.
 public_function void aio_driver_close(aio_driver_t *driver)
 {
+    for (size_t i = 0,  n = driver->FileCount; i < n; ++i)
+    {
+        lplc_fifo_u_delete(&driver->FileRequests[i]);
+    }
+    free(driver->FileRequests); free(driver->FileIds);
     spsc_fifo_b_delete(&driver->RequestQueue);
     CloseHandle(driver->AIOContext);
     driver->AIOContext  = NULL;
     driver->ActiveCount = 0;
+    driver->FileCount   = 0;
+    driver->FileCapacity= 0;
+    driver->FileIds     = NULL;
+    driver->FileRequests= NULL;
 }
 
 /// @summary Executes a single AIO driver update in polling mode. The kernel
