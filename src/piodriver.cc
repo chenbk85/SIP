@@ -1016,6 +1016,26 @@ public_function DWORD pio_driver_open(pio_driver_t *driver, aio_driver_t *aio)
 /// @param driver The prioritized I/O driver state to clean up.
 public_function void pio_driver_close(pio_driver_t *driver)
 {
+    mpsc_fifo_u_delete(&driver->STIControlQueue);
+    mpsc_fifo_u_delete(&driver->STIPendingQueue);
+    pio_sti_priority_queue_delete(driver->STIActiveQueue);
+    free(driver->StreamInPriority);
+    free(driver->StreamInDelivery);
+    free(driver->StreamInDecoder);
+    free(driver->StreamInState);
+    free(driver->StreamInStatus);
+    free(driver->StreamInId);
+    driver->StreamIndex      = 0;
+    driver->StreamInCount    = 0;
+    driver->StreamInCapacity = 0;
+    driver->StreamInId       = NULL;
+    driver->StreamInStatus   = NULL;
+    driver->StreamInState    = NULL;
+    driver->StreamInDecoder  = NULL;
+    driver->StreamInDelivery = NULL;
+    driver->StreamInPriority = NULL;
+    aio_delete_result_queue(&driver->SIDResultQueue, &driver->SIDResultAlloc);
+    pio_aio_priority_queue_delete(driver->AIODriverQueue);
     driver->AIO = NULL;
 }
 
