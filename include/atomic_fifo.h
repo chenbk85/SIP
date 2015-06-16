@@ -346,13 +346,13 @@ inline void lplc_fifo_u_init(lplc_fifo_u_t<T> *fifo)
 template <typename T>
 inline void lplc_fifo_u_delete(lplc_fifo_u_t<T> *fifo)
 {   typedef typename lplc_fifo_u_t<T>::lplc_node_t lplc_node_t;
-    {   // delete all nodes sitting in the queue.
-        lplc_node_t *iter = fifo->Head;
+    {   // move all nodes sitting in the queue to the free list.
+        lplc_node_t *iter = fifo->Head->Next;
         while (iter != NULL)
         {
-            lplc_node_t *node = iter;
+            fifo->FreeTail->Next = iter;
+            fifo->FreeTail = iter;
             iter = iter->Next;
-            delete node;
         }
     }
     {   // delete all nodes from the free list.
@@ -368,6 +368,15 @@ inline void lplc_fifo_u_delete(lplc_fifo_u_t<T> *fifo)
     fifo->FreeTail = NULL;
     fifo->Tail     = NULL;
     fifo->FreeHead = NULL;
+}
+
+/// @summary Determine whether the queue is empty.
+/// @param fifo The queue to query.
+/// @return true if the queue is empty.
+template <typename T>
+inline bool lplc_fifo_u_empty(lplc_fifo_u_t<T> *fifo)
+{
+    return (fifo->Head->Next != NULL) ? false : true;
 }
 
 /// @summary Attempt to retrieve the item at the front of the queue without consuming it.
