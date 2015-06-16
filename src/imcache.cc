@@ -1534,7 +1534,7 @@ public_function void image_cache_create(image_cache_t *cache, size_t expected_im
 /// @summary Frees resources associated with an image cache instance.
 /// @param cache The image cache to delete.
 public_function void image_cache_delete(image_cache_t *cache)
-{
+{   // TODO(rlk): This still leaks strdup'd paths, etc. Finish cleanup.
     fifo_allocator_table_delete(&cache->ResultAlloc);
     fifo_allocator_table_delete(&cache->ErrorAlloc);
 
