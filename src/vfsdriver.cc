@@ -1690,10 +1690,10 @@ internal_function DWORD vfs_resolve_and_open_file(vfs_driver_t *driver, char con
                 // one of them might support the operation.
                 continue;
             }
-            else if (openrc == ERROR_NOT_FOUND)
+            else if (openrc == ERROR_NOT_FOUND || openrc == ERROR_FILE_NOT_FOUND)
             {   // continue checking downstream mount points.
                 // one of them might be able to open the file.
-                result  = ERROR_NOT_FOUND;
+                result  = ERROR_FILE_NOT_FOUND;
                 continue;
             }
             else
@@ -2043,7 +2043,7 @@ public_function stream_decoder_t* vfs_load_file(vfs_driver_t *driver, char const
     int32_t     usage       = VFS_USAGE_STREAM_IN_LOAD;
     uint32_t    file_hints  =(user_hints == VFS_FILE_HINT_NONE) ? VFS_FILE_HINT_UNBUFFERED | VFS_FILE_HINT_ASYNCHRONOUS : user_hints;
     DWORD       open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, &file_info, &relpath);
-    if (FAILED (open_result)) return NULL;
+    if (open_result != ERROR_SUCCESS) return NULL;
     DWORD       asio_result = aio_driver_prepare(driver->AIO, file_info.Fildes);
     if (FAILED (asio_result))
     {   // could not associate the file handle with the I/O completion port.
