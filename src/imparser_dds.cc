@@ -33,62 +33,57 @@
 /// @summary Define identifiers for the recognized parser states.
 enum dds_parser_state_e : int
 {
-    DDS_PARSE_STATE_FIND_MAGIC           = 0, /// The parser is looking for the magic bytes.
-    DDS_PARSE_STATE_BUFFER_HEADER        = 1, /// The parser is receiving data for the core DDS file header.
-    DDS_PARSE_STATE_BUFFER_HEADER_DX10   = 2, /// The parser is receiving data for the DX10 extended header.
-    DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT = 3, /// The parser is beginning receipt of the next cube face or array element.
-    DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL   = 4, /// The parser is beginning receipt of the next mipmap level.
-    DDS_PARSE_STATE_ENCODE_LEVEL_DATA    = 5, /// The parser is receiving and encoding mipmap level data. 
-    DDS_PARSE_STATE_COMPLETE             = 6, /// The parser has processed the entire file contents.
-    DDS_PARSE_STATE_ERROR                = 7  /// The parser has encountered a fatal error.
+    DDS_PARSE_STATE_SEEK_OFFSET          = 0,   /// The parser is looking for a known byte offset.
+    DDS_PARSE_STATE_FIND_MAGIC           = 1,   /// The parser is looking for the magic bytes.
+    DDS_PARSE_STATE_BUFFER_HEADER        = 2,   /// The parser is receiving data for the core DDS file header.
+    DDS_PARSE_STATE_BUFFER_HEADER_DX10   = 3,   /// The parser is receiving data for the DX10 extended header.
+    DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT = 4,   /// The parser is beginning receipt of the next cube face or array element.
+    DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL   = 5,   /// The parser is beginning receipt of the next mipmap level.
+    DDS_PARSE_STATE_ENCODE_LEVEL_DATA    = 6,   /// The parser is receiving and encoding mipmap level data. 
+    DDS_PARSE_STATE_COMPLETE             = 7,   /// The parser has processed the entire file contents.
+    DDS_PARSE_STATE_ERROR                = 8    /// The parser has encountered a fatal error.
 };
 
 /// @summary Define identifiers for the recognized parser errors.
 enum dds_parser_error_e : int
 {
-    DDS_PARSE_ERROR_SUCCESS              = 0, /// No error has occurred.
-    DDS_PARSE_ERROR_NOMEMORY             = 1, /// Required memory could not be allocated.
-    DDS_PARSE_ERROR_DECODER              = 2, /// The underlying stream decoder returned an error.
+    DDS_PARSE_ERROR_SUCCESS              = 0,   /// No error has occurred.
+    DDS_PARSE_ERROR_NOMEMORY             = 1,   /// Required memory could not be allocated.
+    DDS_PARSE_ERROR_DECODER              = 2,   /// The underlying stream decoder returned an error.
 };
 
 /// @summary Define the possible return codes from the top-level streaming parser update function.
 enum dds_parser_result_e : int
 {
-    DDS_PARSE_RESULT_CONTINUE            = 0, /// The parser is yielding, waiting for more data.
-    DDS_PARSE_RESULT_COMPLETE            = 1, /// Stop parsing. All data was parsed successfully.
-    DDS_PARSE_RESULT_ERROR               = 2  /// Stop parsing. An error was encountered.
+    DDS_PARSE_RESULT_CONTINUE            = 0,   /// The parser is yielding, waiting for more data.
+    DDS_PARSE_RESULT_COMPLETE            = 1,   /// Stop parsing. All data was parsed successfully.
+    DDS_PARSE_RESULT_ERROR               = 2    /// Stop parsing. An error was encountered.
 };
 
 /// @summary Define the state data associated with a streaming DDS file parser.
 struct dds_parser_state_t
 {
-    #define BUF_DDSH    DDS_HEADER_BUFFER_SIZE
-    #define BUF_DX10    DDS_HEADER10_BUFFER_SIZE
-    int                 CurrentState;         /// One of dds_parser_state_e.
-    int                 ParserError;          /// One of dds_parser_error_e.
-    uint32_t            ImageFormat;          /// One of dxgi_format_e.
-    uint32_t            ImageEncoding;        /// One of image_encoding_e. Always IMAGE_ENCODING_RAW.
-    uintptr_t           Identifier;           /// The application-defined image identifier.
-    size_t              ImageDataOffset;      /// The byte offset of the image data from the start of the file.
-    size_t              ElementCount;         /// The number of cubemap faces or array elements.
-    size_t              ElementIndex;         /// The zero-based index of the current face or array element.
-    size_t              LevelCount;           /// The number of levels in a single mipmap chain.
-    size_t              LevelIndex;           /// The zero-based index of the level being parsed.
-    size_t              BitsPerPixel;         /// The number of bits per-pixel.
-    size_t              BytesPerBlock;        /// The number of bytes per-block, or 0 if not block-compressed.
-    size_t              BaseDimension[3];     /// The base image dimensions, width, height and depth.
-    dds_header_t       *DDSHeader;            /// Pointer to DDSHBuffer, if it's a valid DDS header.
-    dds_header_dxt10_t *DX10Header;           /// Pointer to DX10Buffer, if it's a valid header.
-    dds_level_desc_t   *LevelInfo;            /// Mipmap level descriptors, dds_level_count() total. Owned by the image blob.
-    size_t             *LevelOffsets;         /// Mipmap level byte offsets, dds_array_count() * dds_level_count() total. Owned by the image blob.
-    void               *MappedAddress;        /// The base address of the mapped image blob.
-    uint8_t            *WriteCursor;          /// Pointer to the current image data location.
-    uint8_t            *EndOfLevel;           /// Pointer to the end of the current mip-level.
-    size_t              DDSHWritePos;         /// The current write position in DDSHBuffer.
-    size_t              DX10WritePos;         /// The current write position in DX10Buffer.
-    uint8_t             DDSHBuffer[BUF_DDSH]; /// Internal buffer for the base image header.
-    uint8_t             DX10Buffer[BUF_DX10]; /// Internal buffer for the extended DX10 header.
-    uint32_t            MagicBuffer;          /// Internal buffer for the magic FourCC.
+    #define BUF_DDSH      DDS_HEADER_BUFFER_SIZE
+    #define BUF_DX10      DDS_HEADER10_BUFFER_SIZE
+    int                   CurrentState;         /// One of dds_parser_state_e.
+    int                   ParserError;          /// One of dds_parser_error_e.
+    image_parser_config_t Config;               /// The input parser configuration.
+    image_definition_t   *Metadata;             /// Pointer to the image metadata block.
+    size_t                ElementFinal;         /// The zero-based index of the final face or array element to read.
+    size_t                ElementIndex;         /// The zero-based index of the face or array element currently being read.
+    size_t                LevelCount;           /// The number of levels in a single mipmap chain.
+    size_t                LevelIndex;           /// The zero-based index of the level being parsed.
+    dds_header_t         *DDSHeader;            /// Pointer to DDSHBuffer, if it's a valid DDS header.
+    dds_header_dxt10_t   *DX10Header;           /// Pointer to DX10Buffer, if it's a valid header.
+    dds_level_desc_t     *LevelInfo;            /// Mipmap level descriptors, dds_level_count() total. Owned by the image blob.
+    stream_decode_pos_t  *BlockOffsets;         /// Mipmap level byte offsets, dds_array_count() * dds_level_count() total. Owned by the image blob.
+    size_t                LevelWrite;           /// The current write position in the current level data.
+    size_t                LevelSize;            /// The size of the level being written to image data.
+    size_t                DDSHWritePos;         /// The current write position in DDSHBuffer.
+    size_t                DX10WritePos;         /// The current write position in DX10Buffer.
+    uint8_t               DDSHBuffer[BUF_DDSH]; /// Internal buffer for the base image header.
+    uint8_t               DX10Buffer[BUF_DX10]; /// Internal buffer for the extended DX10 header.
+    uint32_t              MagicBuffer;          /// Internal buffer for the magic FourCC.
     #undef  BUF_DX10
     #undef  BUF_DDSH
 };
@@ -102,108 +97,149 @@ struct dds_parser_state_t
 ///////////////////////*/
 /// @summary Calculates all of the static data once the DDS header(s) have been received and validated.
 /// @param ddsp The parser state to update.
+/// @param encoder The encoder used to write data to image memory and specify image attributes.
 /// @return The new parser state.
-internal_function int dds_parser_setup_image_info(dds_parser_state_t *ddsp)
+internal_function int dds_parser_setup_image_info(dds_parser_state_t *ddsp, image_encoder_t *encoder)
 {
-    dds_header_t       *dds      = ddsp->DDSHeader;
-    dds_header_dxt10_t *dx10     = ddsp->DX10Header;
-    uint32_t            format   = dxgi_format(dds, dx10);
-    size_t              basew    =(dds->Flags & DDSD_WIDTH ) ? dds->Width  : 0;
-    size_t              baseh    =(dds->Flags & DDSD_HEIGHT) ? dds->Height : 0;
-    size_t              based    = dxgi_volume(dds, dx10)    ? dds->Depth  : 1;
-    size_t              bitspp   = dxgi_bits_per_pixel(format);
-    size_t              blocksz  = dxgi_bytes_per_block(format);
-    size_t              nitems   = dxgi_array_count(dds, dx10);
-    size_t              nlevels  = dxgi_level_count(dds, dx10);
-    bool                blockcf  =(blocksz > 0);
-    dds_level_desc_t   *levels   = NULL;
-    size_t             *offsets  = NULL;
+    image_definition_t   *meta  = ddsp->Metadata;
+    if (ddsp->Config.ParseFlags & IMAGE_PARSER_FLAGS_READ_METADATA)
+    {   // completely initialize the metadata block with information we've read.
+        dds_header_t        *dds      = ddsp->DDSHeader;
+        dds_header_dxt10_t  *dx10     = ddsp->DX10Header;
+        uint32_t             format   = dxgi_format(dds, dx10);
+        size_t               basew    =(dds->Flags & DDSD_WIDTH ) ? dds->Width  : 0;
+        size_t               baseh    =(dds->Flags & DDSD_HEIGHT) ? dds->Height : 0;
+        size_t               based    = dxgi_volume(dds, dx10)    ? dds->Depth  : 1;
+        size_t               bitspp   = dxgi_bits_per_pixel(format);
+        size_t               blocksz  = dxgi_bytes_per_block(format);
+        size_t               nitems   = dxgi_array_count(dds, dx10);
+        size_t               nlevels  = dxgi_level_count(dds, dx10);
+        bool                 blockcf  =(blocksz > 0);
+        dds_level_desc_t    *levels   = NULL;
+        stream_decode_pos_t *offsets  = NULL;
 
-    // allocate storage for the mipmap level descriptors and byte offsets.
-    if ((levels = (dds_level_desc_t*) malloc(nlevels * sizeof(dds_level_desc_t))) == NULL)
-    {   // unable to allocate the necessary storage for mip-level descriptors.
-        ddsp->ParserError = DDS_PARSE_ERROR_NOMEMORY;
-        return DDS_PARSE_STATE_ERROR;
-    }
-    if ((offsets = (size_t*) malloc(nitems * nlevels * sizeof(size_t))) == NULL)
-    {   // unable to allocate the necessary storage for mip-level byte offsets.
-        free(levels); ddsp->ParserError = DDS_PARSE_ERROR_NOMEMORY;
-        return DDS_PARSE_STATE_ERROR;
-    }
-
-    // TODO(rlk): Lock data in the image blob...
-    ddsp->MappedAddress    = NULL; // TODO(rlk): set to the mapped address.
-    ddsp->WriteCursor      = NULL; // TODO(rlk): set to the mapped address.
-    ddsp->EndOfLevel       = NULL; // TODO(rlk): set to the mapped address.
-
-    // write all of the data out to the parser state.
-    ddsp->ImageFormat      = format;
-    ddsp->ImageEncoding    = IMAGE_ENCODING_RAW;
-    ddsp->ImageDataOffset  = 0;
-    ddsp->ElementCount     = nitems;
-    ddsp->ElementIndex     = 0;
-    ddsp->LevelCount       = nlevels;
-    ddsp->LevelIndex       = 0;
-    ddsp->BitsPerPixel     = bitspp;
-    ddsp->BytesPerBlock    = blocksz;
-    ddsp->BaseDimension[0] = basew;
-    ddsp->BaseDimension[1] = baseh;
-    ddsp->BaseDimension[2] = based;
-    ddsp->LevelInfo        = levels;
-    ddsp->LevelOffsets     = offsets;
-
-    // calculate the byte offset of the image data from the start of the file.
-    // this value can be added to the level offsets to calculate file offsets.
-    ddsp->ImageDataOffset += sizeof(uint32_t);     // magic bytes
-    ddsp->ImageDataOffset += sizeof(dds_header_t); // base header (always present)
-    if (dx10 != NULL) ddsp->ImageDataOffset += sizeof(dds_header_dxt10_t);
-
-    // generate descriptors for each level in the mipmap chain.
-    // cube faces and array elements all have the dimensions.
-    size_t stride = 0;
-    for (size_t i = 0; i < nlevels; ++i)
-    {
-        dds_level_desc_t &dst = levels[i];
-        size_t levelw         = image_level_dimension(basew, i);
-        size_t levelh         = image_level_dimension(baseh, i);
-        size_t leveld         = image_level_dimension(based, i);
-        size_t levelp         = dxgi_pitch(format, levelw);
-        size_t blockh         = image_max2<size_t>(1, (levelh + 3) / 4);
-        dst.Index             = i;
-        dst.Width             = dxgi_image_dimension(format, levelw);
-        dst.Height            = dxgi_image_dimension(format, levelh);
-        dst.Slices            = leveld;
-        dst.BytesPerElement   = blockcf ? blocksz : (bitspp / 8); // DXGI_FORMAT_R1_UNORM...?
-        dst.BytesPerRow       = levelp;
-        dst.BytesPerSlice     = blockcf ? levelp  *  blockh : levelp * levelh;
-        dst.DataSize          = dst.BytesPerSlice *  leveld;
-        dst.Format            = format;
-        stride               += dst.DataSize;
-    }
-
-    // calculate the byte offset for each level from the start of the image data blob.
-    size_t offset = 0;
-    for (size_t i = 0; i < nitems; ++i)
-    {   // loop for each cube face or array element...
-        for (size_t j = 0; j < nlevels; ++j)
-        {   // loop for each level in the mipmap chain...
-            offsets[(i * nlevels) + j] = offset;
-            offset    += stride;
+        // allocate storage for the mipmap level descriptors and byte offsets.
+        if ((levels = (dds_level_desc_t*) malloc(nlevels * sizeof(dds_level_desc_t))) == NULL)
+        {   // unable to allocate the necessary storage for mip-level descriptors.
+            ddsp->ParserError = DDS_PARSE_ERROR_NOMEMORY;
+            return DDS_PARSE_STATE_ERROR;
         }
+        if ((offsets = (stream_decode_pos_t*) malloc(nitems * nlevels * sizeof(stream_decode_pos_t))) == NULL)
+        {   // unable to allocate the necessary storage for mip-level byte offsets.
+            free(levels); ddsp->ParserError = DDS_PARSE_ERROR_NOMEMORY;
+            return DDS_PARSE_STATE_ERROR;
+        }
+
+        // initialize basic metadata attributes:
+        meta->ImageId      = ddsp->Config.ImageId;
+        meta->ImageFormat  = format;
+        meta->Compression  = IMAGE_COMPRESSION_NONE;
+        meta->Width        = basew;
+        meta->Height       = baseh;
+        meta->SliceCount   = based;
+        meta->ElementIndex = 0;
+        meta->ElementCount = nitems;
+        meta->LevelCount   = nlevels;
+        meta->BytesPerPixel= bitspp;
+        meta->BytesPerBlock= blocksz;
+        meta->DDSHeader    =*dds;
+        meta->DX10Header   =*dx10;
+        meta->LevelInfo    = levels;
+        meta->BlockOffsets = offsets;
+
+        // initialize mipmap chain attributes:
+        for (size_t i = 0; i < nlevels; ++i)
+        {
+            dds_level_desc_t &dst = levels[i];
+            size_t levelw         = image_level_dimension(basew, i);
+            size_t levelh         = image_level_dimension(baseh, i);
+            size_t leveld         = image_level_dimension(based, i);
+            size_t levelp         = dxgi_pitch(format, levelw);
+            size_t blockh         = image_max2<size_t>(1, (levelh + 3) / 4);
+            dst.Index             = i;
+            dst.Width             = dxgi_image_dimension(format, levelw);
+            dst.Height            = dxgi_image_dimension(format, levelh);
+            dst.Slices            = leveld;
+            dst.BytesPerElement   = blockcf ? blocksz : (bitspp / 8); // DXGI_FORMAT_R1_UNORM...?
+            dst.BytesPerRow       = levelp;
+            dst.BytesPerSlice     = blockcf ? levelp  *  blockh : levelp * levelh;
+            dst.DataSize          = dst.BytesPerSlice *  leveld;
+            dst.Format            = format;
+        }
+
+        // zero out all of the offset data. it will be set as the container is parsed.
+        memset(offsets, 0, nitems * nlevels * sizeof(stream_decode_pos_t));
+
+        // notify the encoder of the image attributes:
+        encoder->define_image(meta);
     }
-    return DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT;
+
+    // initialize internal state based on parser flags and image metadata.
+    if (ddsp->Config.FinalFrame > meta->ElementCount)
+    {   // read all elements starting from the specified frame to the end.
+        ddsp->Config.FinalFrame = meta->ElementCount;
+    }
+    ddsp->ElementIndex = ddsp->Config.FirstFrame;
+    ddsp->ElementFinal = ddsp->Config.FinalFrame;
+    ddsp->LevelIndex   = 0;
+    ddsp->LevelCount   = meta->LevelCount;
+    ddsp->LevelInfo    = meta->LevelInfo;
+    ddsp->BlockOffsets = meta->BlockOffsets;
+
+    // transition to the appropriate state based on parser configuration.
+    if ((ddsp->Config.ParseFlags & IMAGE_PARSER_FLAGS_READ_PIXELS) == 0)
+    {   // not reading any pixel data, so we're done.
+        return DDS_PARSE_STATE_COMPLETE;
+    }
+    else
+    {   // proceed with reading pixel data.
+        return DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT;
+    }
+}
+
+/// @summary Implements the parser logic for the DDS_PARSE_STATE_SEEK_OFFSET.
+/// @param decoder The stream decoder providing the data to consume.
+/// @param ddsp The DDS parser state to update.
+/// @param encoder The image encoder to which pixel data should be written.
+/// @return The updated parser state identifier.
+internal_function int dds_seek_offset(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
+{   UNREFERENCED_PARAMETER(encoder);
+    stream_decode_pos_t &target  = ddsp->Config.StartOffset;
+    stream_decode_pos_t  current;  decoder->pos(current);
+    if (current.FileOffset      >= target.FileOffset && 
+        current.FileOffset      <= target.FileOffset)
+    {   // this encoded data chunk contains the start of the data we're looking for.
+        size_t available         = decoder->amount();
+        size_t consume           =(target.DecodeOffset >= available) ? available : target.DecodeOffset;
+        decoder->ReadCursor     += consume; // consume from available decoded input
+        target.DecodeOffset     -= consume; // decrement bytes remaining to consume
+        if (decoder->ReadCursor != decoder->FinalByte)
+        {   // ReadCursor is positioned on the first byte to read.
+            if (ddsp->Config.ParseFlags & IMAGE_PARSER_FLAGS_READ_METADATA)
+            {   // proceed with reading the image metadata.
+                return DDS_PARSE_STATE_FIND_MAGIC;
+            }
+            else
+            {   // skip metadata, reading pixels only.
+                return dds_parser_setup_image_info(ddsp, encoder);
+            }
+        }
+        // else, refill the decoded data buffer and remain in the same state.
+    }
+    return DDS_PARSE_STATE_SEEK_OFFSET;
 }
 
 /// @summary Implements the parser logic for the DDS_PARSE_STATE_FIND_MAGIC.
 /// @param decoder The stream decoder providing the data to consume.
 /// @param ddsp The DDS parser state to update.
+/// @param encoder The image encoder to which pixel data should be written.
 /// @return The updated parser state identifier.
-internal_function int dds_find_magic(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
-{
+internal_function int dds_find_magic(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
+{   UNREFERENCED_PARAMETER(encoder);
     while (decoder->ReadCursor != decoder->FinalByte)
     {
-        ddsp->MagicBuffer <<= 8;                     // shift eight bits off the left
-        ddsp->MagicBuffer  |=*decoder->ReadCursor++; // add eight bits at the right
+        ddsp->MagicBuffer >>= 8;                             // shift eight bits off the right
+        ddsp->MagicBuffer  |=(*decoder->ReadCursor++) << 24; // add eight bits at the left
         if (ddsp->MagicBuffer == DDS_MAGIC_LE)
             return DDS_PARSE_STATE_BUFFER_HEADER;
     }
@@ -213,9 +249,10 @@ internal_function int dds_find_magic(stream_decoder_t *decoder, dds_parser_state
 /// @summary Implements the parser logic for the DDS_PARSE_STATE_BUFFER_HEADER.
 /// @param decoder The stream decoder providing the data to consume.
 /// @param ddsp The DDS parser state to update.
+/// @param encoder The image encoder to which pixel data should be written.
 /// @return The updated parser state identifier.
-internal_function int dds_buffer_header(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
-{
+internal_function int dds_buffer_header(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
+{   UNREFERENCED_PARAMETER(encoder);
     size_t bytes_available   = decoder->amount();
     if (ddsp->DDSHWritePos   + bytes_available >= DDS_HEADER_BUFFER_SIZE)
     {   // this read will complete the header data.
@@ -224,7 +261,7 @@ internal_function int dds_buffer_header(stream_decoder_t *decoder, dds_parser_st
         ddsp->DDSHWritePos  += bytes_to_copy;
         decoder->ReadCursor += bytes_to_copy;
         // save a pointer to the DDS base header for easy reference.
-        ddsp->DDSHeader = (dds_header_t   *) ddsp->DDSHBuffer;
+        ddsp->DDSHeader = (dds_header_t   *)ddsp->DDSHBuffer;
         // check the fourcc to determine whether a DX10 header is expected.
         uint32_t flags  = ddsp->DDSHeader->Format.Flags;
         uint32_t fourcc = ddsp->DDSHeader->Format.FourCC;
@@ -235,7 +272,7 @@ internal_function int dds_buffer_header(stream_decoder_t *decoder, dds_parser_st
         else
         {   // no DX10 header present, so determine image properties and proceed.
             ddsp->DX10Header = NULL;
-            return dds_parser_setup_image_info(ddsp);
+            return dds_parser_setup_image_info(ddsp, encoder);
         }
     }
     else
@@ -250,9 +287,10 @@ internal_function int dds_buffer_header(stream_decoder_t *decoder, dds_parser_st
 /// @summary Implements the parser logic for the DDS_PARSE_STATE_BUFFER_HEADER.
 /// @param decoder The stream decoder providing the data to consume.
 /// @param ddsp The DDS parser state to update.
+/// @param encoder The image encoder to which pixel data should be written.
 /// @return The updated parser state identifier.
-internal_function int dds_buffer_header_dx10(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
-{
+internal_function int dds_buffer_header_dx10(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
+{   UNREFERENCED_PARAMETER(encoder);
     size_t bytes_available   = decoder->amount();
     if (ddsp->DX10WritePos   + bytes_available >= DDS_HEADER10_BUFFER_SIZE)
     {   // this read will complete the header data.
@@ -263,7 +301,7 @@ internal_function int dds_buffer_header_dx10(stream_decoder_t *decoder, dds_pars
         // save a pointer to the DX10 header for easy reference.
         ddsp->DX10Header     = (dds_header_dxt10_t*) ddsp->DX10Buffer;
         // determine image properties and proceed with receiving data.
-        return dds_parser_setup_image_info(ddsp);
+        return dds_parser_setup_image_info(ddsp, encoder);
     }
     else
     {   // this is a partial read; consume all available bytes.
@@ -277,16 +315,18 @@ internal_function int dds_buffer_header_dx10(stream_decoder_t *decoder, dds_pars
 /// @summary Implements the parser logic for the DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT.
 /// @param decoder The stream decoder providing the data to consume.
 /// @param ddsp The DDS parser state to update.
+/// @param encoder The image encoder to which pixel data should be written.
 /// @return The updated parser state identifier.
-internal_function int dds_receive_next_element(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
+internal_function int dds_receive_next_element(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
 {   UNREFERENCED_PARAMETER(decoder);
-    if (ddsp->ElementIndex == ddsp->ElementCount)
+    if (ddsp->ElementIndex == ddsp->ElementFinal)
     {   // all elements (and all mip-levels) have been read. done parsing.
         return DDS_PARSE_STATE_COMPLETE;
     }
     else
     {   // set up to receive the first mip-level of cube face or array element ddsp->ElementIndex.
         ddsp->LevelIndex = 0;
+        encoder->reset_element(ddsp->ElementIndex);
         return DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL;
     }
 }
@@ -294,19 +334,20 @@ internal_function int dds_receive_next_element(stream_decoder_t *decoder, dds_pa
 /// @summary Implements the parser logic for the DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL.
 /// @param decoder The stream decoder providing the data to consume.
 /// @param ddsp The DDS parser state to update.
+/// @param encoder The image encoder to which pixel data should be written.
 /// @return The updated parser state identifier.
-internal_function int dds_receive_next_level(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
-{   UNREFERENCED_PARAMETER(decoder);
+internal_function int dds_receive_next_level(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
+{
     if (ddsp->LevelIndex == ddsp->LevelCount)
     {   // finished receiving all mip-levels of the current cube face or array element.
-        ddsp->ElementIndex++;
+        encoder->mark_element(ddsp->ElementIndex++);
         return DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT;
     }
     else
     {   // setup to write the next mip-level of the current cube face or array element.
-        // ddsp->WriteCursor is incremented during the copy, so no need to recompute it.
-        size_t level_idx = ddsp->LevelIndex;
-        ddsp->EndOfLevel = ddsp->WriteCursor  + ddsp->LevelInfo[level_idx].DataSize;
+        decoder->pos(ddsp->BlockOffsets[(ddsp->ElementIndex * ddsp->LevelCount) + ddsp->LevelIndex]);
+        ddsp->LevelSize  = ddsp->LevelInfo[ddsp->LevelIndex].DataSize;
+        ddsp->LevelWrite = 0;
         return DDS_PARSE_STATE_ENCODE_LEVEL_DATA;
     }
 }
@@ -314,26 +355,26 @@ internal_function int dds_receive_next_level(stream_decoder_t *decoder, dds_pars
 /// @summary Implements the parser logic for the DDS_PARSE_STATE_ENCODE_LEVEL_DATA.
 /// @param decoder The stream decoder providing the data to consume.
 /// @param ddsp The DDS parser state to update.
+/// @param encoder The image encoder to which pixel data should be written.
 /// @return The updated parser state identifier.
-internal_function int dds_encode_level(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
+internal_function int dds_encode_level(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
 {
     size_t bytes_available   = decoder->amount();
-    if (ddsp->WriteCursor    + bytes_available >= ddsp->EndOfLevel)
+    if (ddsp->LevelWrite     + bytes_available >= ddsp->LevelSize)
     {   // consume enough data to finish out the current mip-level.
-        // NOTE(rlk): if not IMAGE_ENCODING_RAW, memcpy is something more complex.
-        size_t bytes_to_copy = ddsp->EndOfLevel - ddsp->WriteCursor;
-        memcpy(ddsp->WriteCursor, decoder->ReadCursor, bytes_to_copy);
+        size_t bytes_to_copy = ddsp->LevelSize  - ddsp->LevelWrite;
+        encoder->encode(ddsp->ElementIndex, decoder->ReadCursor, bytes_to_copy);
+        encoder->mark_level(ddsp->ElementIndex);
         decoder->ReadCursor += bytes_to_copy;
-        ddsp->WriteCursor   += bytes_to_copy;
+        ddsp->LevelWrite    += bytes_to_copy;
         ddsp->LevelIndex++;
         return DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL;
     }
     else
     {   // consume all available data; yield until more is available.
-        // NOTE(rlk): if not IMAGE_ENCODING_RAW, memcpy is something more complex.
-        memcpy(ddsp->WriteCursor, decoder->ReadCursor, bytes_available);
+        encoder->encode(ddsp->ElementIndex, decoder->ReadCursor, bytes_available);
         decoder->ReadCursor += bytes_available;
-        ddsp->WriteCursor   += bytes_available;
+        ddsp->LevelWrite    += bytes_available;
         return DDS_PARSE_STATE_ENCODE_LEVEL_DATA;
     }
 }
@@ -341,8 +382,9 @@ internal_function int dds_encode_level(stream_decoder_t *decoder, dds_parser_sta
 /// @summary Implements the primary update tick for a streaming DDS parser.
 /// @param decoder The stream decoder providing the data to consume.
 /// @param ddsp The DDS parser state to update.
+/// @param encoder The image encoder to which pixel data should be written.
 /// @return One of dds_parser_result_e.
-internal_function int dds_parser_update(stream_decoder_t *decoder, dds_parser_state_t *ddsp)
+internal_function int dds_parser_update(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
 {
     while (!decoder->atend())
     {   // refill the decoder buffer with any available data.
@@ -362,47 +404,59 @@ internal_function int dds_parser_update(stream_decoder_t *decoder, dds_parser_st
             int new_state;
             switch (ddsp->CurrentState)
             {
+            case DDS_PARSE_STATE_SEEK_OFFSET:
+                new_state = dds_seek_offset(decoder, ddsp, encoder);
+                break;
             case DDS_PARSE_STATE_FIND_MAGIC:
-                new_state = dds_find_magic(decoder, ddsp);
+                new_state = dds_find_magic(decoder, ddsp, encoder);
                 break;
             case DDS_PARSE_STATE_BUFFER_HEADER:
-                new_state = dds_buffer_header(decoder, ddsp);
+                new_state = dds_buffer_header(decoder, ddsp, encoder);
                 break;
             case DDS_PARSE_STATE_BUFFER_HEADER_DX10:
-                new_state = dds_buffer_header_dx10(decoder, ddsp);
+                new_state = dds_buffer_header_dx10(decoder, ddsp, encoder);
                 break;
             case DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT:
-                new_state = dds_receive_next_element(decoder, ddsp);
+                new_state = dds_receive_next_element(decoder, ddsp, encoder);
                 break;
             case DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL:
-                new_state = dds_receive_next_level(decoder, ddsp);
+                new_state = dds_receive_next_level(decoder, ddsp, encoder);
                 break;
             case DDS_PARSE_STATE_ENCODE_LEVEL_DATA:
-                new_state = dds_encode_level(decoder, ddsp);
+                new_state = dds_encode_level(decoder, ddsp, encoder);
                 break;
             case DDS_PARSE_STATE_COMPLETE:
                 return DDS_PARSE_RESULT_COMPLETE;
             case DDS_PARSE_STATE_ERROR:
                 return DDS_PARSE_RESULT_ERROR;
+            default:
+                new_state = ddsp->CurrentState;
+                break;
             }
+            ddsp->CurrentState = new_state;
         }
     }
+    // reached end-of-stream; process any final state updates.
+    // these states do not require any input data to execute.
+    for ( ; ; )
+    {
+        switch (ddsp->CurrentState)
+        {
+        case DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT:
+            ddsp->CurrentState = dds_receive_next_element(decoder, ddsp, encoder);
+            break;
+        case DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL:
+            ddsp->CurrentState = dds_receive_next_level(decoder, ddsp, encoder);
+            break;
+        case DDS_PARSE_STATE_COMPLETE:
+            return DDS_PARSE_RESULT_COMPLETE;
+        default:
+            return DDS_PARSE_RESULT_ERROR;
+        }
+    }
+    // and then return the final status.
     return (ddsp->ParserError == DDS_PARSE_ERROR_SUCCESS) ? DDS_PARSE_RESULT_COMPLETE : DDS_PARSE_RESULT_ERROR;
 }
-// dds_parser_t (not dds_parser_state_t) maintains MPSC unbounded FIFO accepting stream_control_t.
-// also receives pointer to MPSC notify queue where uintptr_t app IDs and results are placed when load completed.
-// dds_parser_t has a main tick function that is called from some image upload thread or whatever.
-//
-// One image blob maintained per-format+encoding. Each blob starts out not having any address space reserved.
-// Address space is reserved only when the first image is added; then committed as-needed.
-// The default encoding is IMAGE_ENCODING_RAW, which means data is stored as-is (mempcy).
-// Could also have IMAGE_ENCODING_JPEG_RLE, etc. to directly store compressed data for upload.
-// The DDS parser always uses IMAGE_ENCODING_RAW, but DICOM parser would use other encodings.
-// Image blob module exposes functions to perform the encoding for a block of data and flush.
-// Format+Encoding pair uniquely identifies blob.
-//
-// All DDS enums and structures need to be put in a header file as they are referenced throughout 
-// the imaging pipeline (the image blob implementation needs them, etc.)
 
 /*////////////////////////
 //   Public Functions   //
@@ -554,48 +608,24 @@ public_function size_t dds_describe(void const *data, size_t data_size, dds_head
 
 /// @summary Initializes or resets the state of a streaming DDS parser.
 /// @param ddsp The streaming DDS parser state to initialize.
-/// @param image_id The application-defined identifier of the image.
-public_function void dds_parser_state_init(dds_parser_state_t *ddsp, uintptr_t image_id)
+/// @param config Parser configuration data indicating what portions of the file to parse.
+public_function void dds_parser_state_init(dds_parser_state_t *ddsp, image_parser_config_t const &config)
 {
-    ddsp->CurrentState     = DDS_PARSE_STATE_BUFFER_HEADER;
-    ddsp->ParserError      = DDS_PARSE_ERROR_SUCCESS;
-    ddsp->ImageFormat      = DXGI_FORMAT_UNKNOWN;
-    ddsp->ImageEncoding    = IMAGE_ENCODING_RAW;
-    ddsp->Identifier       = image_id;
-    ddsp->ImageDataOffset  = 0;
-    ddsp->ElementCount     = 0;
-    ddsp->ElementIndex     = 0;
-    ddsp->LevelCount       = 0;
-    ddsp->LevelIndex       = 0;
-    ddsp->BitsPerPixel     = 0;
-    ddsp->BytesPerBlock    = 0;
-    ddsp->BaseDimension[0] = 0; // width
-    ddsp->BaseDimension[1] = 0; // height
-    ddsp->BaseDimension[2] = 1; // depth
-    ddsp->DDSHeader        = NULL;
-    ddsp->DX10Header       = NULL;
-    ddsp->LevelInfo        = NULL;
-    ddsp->LevelOffsets     = NULL;
-    ddsp->MappedAddress    = NULL;
-    ddsp->WriteCursor      = NULL;
-    ddsp->EndOfLevel       = NULL;
-    ddsp->DDSHWritePos     = 0;
-    ddsp->DX10WritePos     = 0;
-    ddsp->MagicBuffer      = 0;
-}
-
-/// @summary 
-public_function void dds_parser_state_free(dds_parser_state_t *ddsp)
-{
-    if (ddsp->LevelOffsets != NULL)
-    {
-        free(ddsp->LevelOffsets);
-        ddsp->LevelOffsets =  NULL;
-    }
-    if (ddsp->LevelInfo != NULL)
-    {
-        free(ddsp->LevelInfo);
-        ddsp->LevelInfo  = NULL;
-    }
-    // TODO(rlk): what about the mapped buffer?
+    ddsp->CurrentState  = DDS_PARSE_STATE_SEEK_OFFSET;
+    ddsp->ParserError   = DDS_PARSE_ERROR_SUCCESS;
+    ddsp->Config        = config;
+    ddsp->Metadata      = config.Metadata;
+    ddsp->ElementFinal  = 0;
+    ddsp->ElementIndex  = 0;
+    ddsp->LevelCount    = 0;
+    ddsp->LevelIndex    = 0;
+    ddsp->DDSHeader     = NULL;
+    ddsp->DX10Header    = NULL;
+    ddsp->LevelInfo     = config.Metadata->LevelInfo;
+    ddsp->BlockOffsets  = config.Metadata->BlockOffsets;
+    ddsp->LevelWrite    = 0;
+    ddsp->LevelSize     = 0;
+    ddsp->DDSHWritePos  = 0;
+    ddsp->DX10WritePos  = 0;
+    ddsp->MagicBuffer   = 0;
 }
