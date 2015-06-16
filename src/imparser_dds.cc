@@ -454,8 +454,6 @@ internal_function int dds_parser_update(stream_decoder_t *decoder, dds_parser_st
             return DDS_PARSE_RESULT_ERROR;
         }
     }
-    // and then return the final status.
-    return (ddsp->ParserError == DDS_PARSE_ERROR_SUCCESS) ? DDS_PARSE_RESULT_COMPLETE : DDS_PARSE_RESULT_ERROR;
 }
 
 /*////////////////////////
