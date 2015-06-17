@@ -71,18 +71,6 @@ struct image_result_queues_t
     image_result_queue_t  *ResultQueue;     /// The MPSC unbounded FIFO that will receive the image load result.
 };
 
-/// @summary Define the data associated with a dynamic list of parser state.
-/// This type is specialized for each supported file format.
-template <typename T>
-struct image_parser_list_t
-{
-    size_t                 Count;           /// The number of active items in the list.
-    size_t                 Capacity;        /// The number of parser state objects allocated.
-    stream_decoder_t     **SourceStream;    /// An array of pointers to the source stream decoders.
-    image_result_queues_t *ResultQueue;     /// An array of result queue objects.
-    T                     *ParseState;      /// An array of parser state objects.
-};
-
 typedef image_parser_list_t<dds_parser_state_t> dds_parser_list_t;
 
 /// @summary Define the data associated with the image loader. This is the 
@@ -106,50 +94,6 @@ struct image_loader_t
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
-/// @summary Initialize an image parser list with a given initial capacity.
-/// @param ipsl The image parser list to initialize.
-/// @param capacity The initial capacity of the list.
-template <typename T>
-void image_parser_list_create(image_parser_list_t<T> *ipsl, size_t capacity)
-{
-    ipsl->Count       = 0;
-    ipsl->Capacity    = 0;
-    ipsl->ParseState  = NULL;
-    ipsl->ResultQueue = NULL;
-    if (capacity > 0)
-    {   // pre-allocate storage for the specified number of items.
-        image_result_queues_t *rq = (image_result_queues_t*)malloc(capacity * sizeof(image_result_queues_t));
-        stream_decoder_t     **sd = (stream_decoder_t    **)malloc(capacity * sizeof(stream_decoder_t*));
-        T                     *ps = (T                    *)malloc(capacity * sizeof(T));
-        if (rq != NULL)   ipsl->ResultQueue  = rq;
-        if (sd != NULL)   ipsl->SourceStream = sd;
-        if (ps != NULL)   ipsl->ParseState   = ps;
-        if (rq != NULL && sd != NULL && ps  != NULL) ipsl->Capacity = capacity;
-    }
-}
-
-/// @summary Ensure that an image parser list has at least the specified capacity.
-/// If not, grow the storage capacity by reallocating the underlying arrays.
-/// @param ipsl The image parser list to check and possibly grow.
-/// @param capacity The minimum capacity of the list.
-template <typename T>
-void image_parser_list_ensure(image_parser_list_t<T> *ipsl, size_t capacity)
-{
-    if (ipsl->Capacity >= capacity)
-    {   // no need to do anything, capacity already available.
-        return;
-    }
-    // determine new capacity and reallocate lists.
-    size_t newc               = calculate_capacity(ipsl->Capacity, capacity, 128, 16);
-    image_result_queues_t *rq =(image_result_queues_t*)  realloc(ipsl->ResultQueue , newc * sizeof(image_result_queues_t));
-    stream_decoder_t     **sd =(stream_decoder_t    **)  realloc(ipsl->SourceStream, newc * sizeof(stream_decoder_t*));
-    T                     *ps =(T                    *)  realloc(ipsl->ParseState  , newc * sizeof(T));
-    if (rq != NULL)   ipsl->ResultQueue  = rq;
-    if (sd != NULL)   ipsl->SourceStream = sd;
-    if (ps != NULL)   ipsl->ParseState   = ps;
-    if (rq != NULL && sd != NULL && ps  != NULL) ipsl->Capacity = newc;
-}
-
 /// @summary Enqueue a DDS stream to be loaded into an image blob.
 /// @param ddsp The dynamic list of DDS file parsers.
 /// @param request The image load request.
