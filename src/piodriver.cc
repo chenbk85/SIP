@@ -136,6 +136,8 @@ typedef fifo_allocator_t<pio_sti_request_t> pio_sti_pending_alloc_t;
 typedef mpsc_fifo_u_t   <pio_sti_request_t> pio_sti_pending_queue_t;
 typedef fifo_allocator_t<pio_sti_control_t> pio_sti_control_alloc_t;
 typedef mpsc_fifo_u_t   <pio_sti_control_t> pio_sti_control_queue_t;
+typedef fifo_allocator_t<aio_request_t>     pio_aio_request_alloc_t;
+typedef mpsc_fifo_u_t   <aio_request_t>     pio_aio_request_queue_t;
 
 /// @summary Maintains all of the state for the prioritized I/O driver.
 struct pio_driver_t
@@ -165,6 +167,7 @@ struct pio_driver_t
 
     pio_sti_pending_queue_t  STIPendingQueue;  /// The MPSC unbounded FIFO of pending stream-in open requests.
     pio_sti_control_queue_t  STIControlQueue;  /// The MPSC unbounded FIFO of pending stream-in control requests.
+    pio_aio_request_queue_t  ExplicitIoQueue;  /// The MPSC unbounded FIFO of pending external I/O requests.
 };
 
 /*///////////////
@@ -714,6 +717,15 @@ internal_function void pio_driver_main(pio_driver_t *driver)
         pio_sti_delivery_next(sd, tick_time, tick_time_a, sc);
     }
 
+    // push all pending explicit I/O requests to the I/O operations queue.
+    // these requests will be prioritized with the other requests.
+    aio_request_t explicit_aio;
+    while (mpsc_fifo_u_consume(&driver->ExplicitIoQueue, explicit_aio))
+    {   // attempt to allocate a request in the I/O operations queue.
+        aio_request_t *aio = pio_aio_priority_queue_put(driver->AIODriverQueue, explicit_aio.Priority);
+       *aio = explicit_aio;
+    }
+
     // push all pending stream-in closes directly to the AIO driver.
     for (size_t i = 0, n = driver->StreamInCount; i < n; ++i)
     {   
@@ -768,18 +780,6 @@ internal_function void pio_driver_main(pio_driver_t *driver)
         }
         else ++i; // check the next stream.
     }
-
-    // push all pending explicit I/O requests to the I/O operations queue.
-    // these requests will be prioritized with the other requests.
-    /*while (mpsc_fifo_u_consume(&pio->ExplicitAioQueue, explicit_aio))
-    {   // attempt to allocate a request in the I/O operations queue.
-        aio_request = pio_aio_driver_queue_put(pio->IoRequests, explicit_aio.Priority);
-        if (aio_request != NULL)
-        {   // copy the data for the request that was just dequeued.
-            *aio_request = explicit_aio;
-        }
-        else goto push_io_ops_to_aio_driver;
-    }*/
 
     // dequeue all pending stream-in opens and insert them into the list of active stream-ins.
     pio_sti_request_t  openrq;
@@ -1009,6 +1009,8 @@ public_function DWORD pio_driver_open(pio_driver_t *driver, aio_driver_t *aio)
     mpsc_fifo_u_init(&driver->STIPendingQueue);
     // initialize the queue for pushing stream-in control requests to the driver.
     mpsc_fifo_u_init(&driver->STIControlQueue);
+    // initialize the queue for pushing external I/O requests to the driver.
+    mpsc_fifo_u_init(&driver->ExplicitIoQueue);
     return ERROR_SUCCESS;
 }
 
@@ -1016,6 +1018,7 @@ public_function DWORD pio_driver_open(pio_driver_t *driver, aio_driver_t *aio)
 /// @param driver The prioritized I/O driver state to clean up.
 public_function void pio_driver_close(pio_driver_t *driver)
 {
+    mpsc_fifo_u_delete(&driver->ExplicitIoQueue);
     mpsc_fifo_u_delete(&driver->STIControlQueue);
     mpsc_fifo_u_delete(&driver->STIPendingQueue);
     pio_sti_priority_queue_delete(driver->STIActiveQueue);
@@ -1118,8 +1121,19 @@ public_function void pio_driver_seek_stream(pio_driver_t *driver, uintptr_t id, 
     mpsc_fifo_u_produce(&driver->STIControlQueue, n);
 }
 
+/// @summary Posts an explicit I/O request to the AIO driver. The I/O request is prioritized along with all of the other requests.
+/// @param driver The prioritized I/O driver state.
+/// @param request The I/O request. Set the Priority field as appropriate.
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+public_function void pio_driver_explicit_io(pio_driver_t *driver, aio_request_t const &request, pio_aio_request_alloc_t *thread_alloc)
+{
+    fifo_node_t<aio_request_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item = request;
+    mpsc_fifo_u_produce(&driver->ExplicitIoQueue, n);
+}
+
 /// @summary Executes a single AIO driver update in polling mode. The kernel AIO system will be polled for completed events without blocking. This dispatches completed command results to their associated target queues and launches as many not started commands as possible.
-/// @param driver The AIO driver state to poll.
+/// @param driver The prioritized I/O driver state to poll.
 public_function void pio_driver_poll(pio_driver_t *driver)
 {
     pio_driver_main(driver);

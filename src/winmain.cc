@@ -56,8 +56,8 @@
 #include "imencode.cc"
 #include "imparser.cc"
 #include "imparser_dds.cc"
-#include "imcache.cc"
 //#include "imloader.cc"
+#include "imcache.cc"
 
 #include "prcmdlist.cc"
 #include "presentation.cc"

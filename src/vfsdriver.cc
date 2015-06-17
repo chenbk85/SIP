@@ -121,6 +121,7 @@ enum vfs_known_path_e : int
 enum vfs_decocder_hint_e : int32_t
 {
     VFS_DECODER_HINT_USE_DEFAULT  = 0, /// Let the mount point decide the decoder to use.
+    VFS_DECODER_HINT_NONE         = 1, /// Don't create any stream decoder.
     // ...
 };
 
@@ -1219,7 +1220,10 @@ internal_function uint32_t tar_hash_path(char const *path)
     else return 0;
 }
 
-/// @summary 
+/// @summary Ensure that a TAR entry list meets or exceeds the specified capacity. Grow the list if necessary.
+/// @param tar The TAR mountpoint state.
+/// @param caapcity The minimum capacity of the TAR file entry list.
+/// @return true if the TAR mountpoint state has the specified capacity.
 internal_function bool vfs_ensure_tar_entry_list(vfs_mount_tarball_t *tar, size_t capacity)
 {
     if (capacity <= tar->EntryCapacity)
@@ -1239,6 +1243,10 @@ internal_function bool vfs_ensure_tar_entry_list(vfs_mount_tarball_t *tar, size_
     else return false;
 }
 
+/// @summary Parse a TAR file and construct the list of file and directory entries.
+/// @param tar The TAR file mountpoint state to populate with entity data.
+/// @param tarfd The file descriptor to access for reading the TAR file data.
+/// @return ERROR_SUCCESS or a system error code.
 internal_function DWORD vfs_load_tarball(vfs_mount_tarball_t *tar, HANDLE tarfd)
 {
     DWORD result  = ERROR_SUCCESS;
@@ -1741,23 +1749,6 @@ internal_function DWORD vfs_resolve_and_save_file(vfs_driver_t *driver, char con
     return result;
 }
 
-/// @summary Closes the underlying file handle and releases the VFS driver's 
-/// reference to the underlying stream decoder. For internal use only.
-/// @param file_info Internal information relating to the file to close.
-internal_function void vfs_close_file(vfs_file_t *file_info)
-{
-    if (file_info->Fildes != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle(file_info->Fildes);
-    }
-    if (file_info->Decoder != NULL)
-    {
-        file_info->Decoder->release();
-    }
-    file_info->Fildes  = INVALID_HANDLE_VALUE;
-    file_info->Decoder = NULL;
-}
-
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
@@ -1913,6 +1904,294 @@ public_function void vfs_unmount_all(vfs_driver_t *driver, char const *mount_pat
     ReleaseSRWLockExclusive(&driver->MountsLock);
 }
 
+/// @summary Closes the underlying file handle and releases the VFS driver's 
+/// reference to the underlying stream decoder. For internal use only.
+/// @param file_info Internal information relating to the file to close.
+public_function void vfs_close_file(vfs_file_t *file_info)
+{
+    if (file_info->Fildes != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(file_info->Fildes);
+    }
+    if (file_info->Decoder != NULL)
+    {
+        file_info->Decoder->release();
+    }
+    file_info->Fildes  = INVALID_HANDLE_VALUE;
+    file_info->Decoder = NULL;
+}
+
+/// @summary Open a file for manual I/O. Close the file using vfs_close_file().
+/// @param driver The virtual file system driver used to resolve the file path.
+/// @param path A NULL-terminated UTF-8 string specifying the virtual file path.
+/// @param file_hints A combination of vfs_file_hint_e specifying how to open the file. The file is opened for reading and writing.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the type of stream decoder to create, or VFS_DECODER_HINT_NONE to not create a decoder.
+/// @return ERROR_SUCCESS or a system error code.
+public_function DWORD vfs_open_file(vfs_driver_t *driver, char const *path, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
+{
+    char const  *relpath     = NULL;
+    int32_t      usage       = VFS_USAGE_MANUAL_IO;
+    DWORD        open_result = vfs_resolve_and_open_file(driver, path, usage, file_hints, decoder_hint, file, &relpath);
+    if (!SUCCESS(open_result)) return open_result;
+    if (file_hints & VFS_FILE_HINT_ASYNCHRONOUS)
+    {   // associate the file handle with the I/O completion port managed by the AIO driver.
+        DWORD    asio_result = aio_driver_prepare(driver->AIO, file->Fildes);
+        if (!SUCCESS(asio_result))
+        {   // could not associate the file handle with the I/O completion port.
+            vfs_close_file(file);
+            return asio_result;
+        }
+    }
+    if (file->Decoder != NULL)
+    {   // addref the decoder for the caller.
+        file->Decoder->addref();
+    }
+    return ERROR_SUCCESS;
+}
+
+/// @summary Synchronously reads data from a file.
+/// @param driver The virtual file system driver used to open the file.
+/// @param file The file state returned from vfs_open_file().
+/// @param offset The absolute byte offset at which to start reading data.
+/// @param buffer The buffer into which data will be written.
+/// @param size The maximum number of bytes to read.
+/// @param bytes_read On return, this value is set to the number of bytes actually read. This may be less than the number of bytes requested, or 0 at end-of-file.
+/// @return ERROR_SUCCESS or a system error code.
+public_function DWORD vfs_read_file_sync(vfs_driver_t *driver, vfs_file_t *file, int64_t offset, void *buffer, size_t size, size_t &bytes_read)
+{   UNREFERENCED_PARAMETER(driver);
+    LARGE_INTEGER oldpos;
+    LARGE_INTEGER newpos;
+    oldpos.QuadPart  = 0;
+    newpos.QuadPart  = offset;
+    if (!SetFilePointerEx(file->Fildes, newpos, &oldpos, FILE_BEGIN))
+    {   // unable to seek to the specified offset.
+        bytes_read = 0;
+        return GetLastError();
+    }
+    // safely read the requested number of bytes. for very large reads,
+    // size > UINT32_MAX, the result is undefined, so possibly split the
+    // read up into several sub-reads (though this case is unlikely...)
+    uint8_t*bufferp =(uint8_t*) buffer;
+    DWORD   error   = ERROR_SUCCESS;
+    bytes_read      = 0;
+    while  (bytes_read < size)
+    {
+        DWORD nread = 0;
+        DWORD rsize = 1024U * 1024U; // read 1MB
+        if (size_t(rsize)   > (size - bytes_read))
+        {   // read only the amount remaining.
+            rsize =   (DWORD) (size - bytes_read);
+        }
+        if (ReadFile(file->Fildes, &bufferp[bytes_read], rsize, &nread, NULL))
+        {   // the synchronous read completed successfully.
+            bytes_read += nread;
+        }
+        else
+        {   // an error occurred; save the error code.
+            error = GetLastError(); break;
+        }
+    }
+    return error;
+}
+
+/// @summary Reads data from a file asynchronously by submitting commands to the AIO driver. The input pointer file is stored in the Identifier field of each AIO result descriptor.
+/// @param driver The virtual file system driver used to open the file.
+/// @param file The file state returned from vfs_open_file().
+/// @param offset The absolute byte offset at which to start reading data.
+/// @param buffer The buffer into which data will be written.
+/// @param size The maximum number of bytes to read.
+/// @param close_flags One of aio_close_flags_e specifying the auto-close behavior.
+/// @param priority The priority value to assign to the read request(s).
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+/// @param result_queue The SPSC unbounded FIFO where the completed read result will be placed.
+/// @param result_alloc The FIFO node allocator used to write data to the result queue.
+/// @return ERROR_SUCCESS or a system error code.
+public_function DWORD vfs_read_file_async(vfs_driver_t *driver, vfs_file_t *file, int64_t offset, void *buffer, size_t size, uint32_t close_flags, uint32_t priority, pio_aio_request_alloc_t *thread_alloc, aio_result_queue_t *result_queue=NULL, aio_result_alloc_t *result_alloc=NULL)
+{
+    if (result_queue == NULL || result_alloc == NULL)
+    {   // if no result queue was specified, use the queue on file->Decoder.
+        if (file->Decoder == NULL)
+        {   // 
+            return ERROR_INVALID_PARAMETER;
+        }
+        // the AIO driver holds a reference to the stream decoder queues.
+        result_queue =&file->Decoder->AIOResultQueue;
+        result_alloc =&file->Decoder->AIOResultAlloc;
+        file->Decoder->addref();
+    }
+    if (file->OpenFlags & FILE_FLAG_NO_BUFFERING)
+    {   // files opened for unbuffered I/O are subject to alignment restrictions.
+        uintptr_t addr  = (uintptr_t) buffer;
+        if ((offset & (file->SectorSize-1)) != 0)
+        {   // the read offset is not properly aligned.
+            return ERROR_INVALID_PARAMETER;
+        }
+        if ((size   & (file->SectorSize-1)) != 0)
+        {   // the number of bytes to read is not a multiple of the sector size.
+            return ERROR_INVALID_PARAMETER;
+        }
+        if ((addr   & (file->SectorSize-1)) != 0)
+        {   // the buffer is not aligned to a sector boundary.
+            return ERROR_INVALID_PARAMETER;
+        }
+    }
+
+    uint8_t  *bufferp =(uint8_t*) buffer;
+    size_t bytes_read = 0;
+    while (bytes_read < size)
+    {
+        DWORD rsize = 1024U * 1024U; // read 1MB
+        if (size_t(rsize)   > (size - bytes_read))
+        {   // read only the amount remaining.
+            rsize =   (DWORD) (size - bytes_read);
+        }
+        // figure out the flags to pass through to the decoder.
+        uint32_t flags   = STREAM_DECODE_STATUS_NONE;
+        if (offset == 0)   flags = STREAM_DECODE_STATUS_RESTART;
+        if (offset + rsize >= file->FileSize) flags |= STREAM_DECODE_STATUS_ENDOFSTREAM;
+        // generate the I/O request for the AIO driver.
+        aio_request_t req;
+        req.CommandType  = AIO_COMMAND_READ;
+        req.CloseFlags   = close_flags;
+        req.Fildes       = file->Fildes;
+        req.DataAmount   = rsize;
+        req.DataActual   = rsize;
+        req.BaseOffset   = 0;
+        req.FileOffset   = offset;
+        req.DataBuffer   =&bufferp[bytes_read];
+        req.Identifier   = (uintptr_t) file;
+        req.ResultAlloc  = result_alloc;
+        req.ResultQueue  = result_queue;
+        req.StatusFlags  = flags;
+        req.Priority     = priority;
+        // push the request to the AIO driver through the PIO driver queue.
+        pio_driver_explicit_io(driver->PIO, req, thread_alloc);
+        // update state for the next request, if any.
+        bytes_read += rsize;
+        offset     += rsize;
+    }
+    return ERROR_SUCCESS;
+}
+
+/// @summary Synchronously writes data to a file.
+/// @param driver The virtual file system driver used to open the file.
+/// @param file The file state returned from vfs_open_file().
+/// @param offset The absolute byte offset at which to start writing data.
+/// @param buffer The data to be written to the file.
+/// @param size The number of bytes to write to the file.
+/// @param bytes_written On return, this value is set to the number of bytes actually written to the file.
+/// @return ERROR_SUCCESS or a system error code.
+public_function DWORD vfs_write_file_sync(vfs_driver_t *driver, vfs_file_t *file, int64_t offset, void const *buffer, size_t size, size_t &bytes_written)
+{   UNREFERENCED_PARAMETER(driver);
+    LARGE_INTEGER oldpos;
+    LARGE_INTEGER newpos;
+    oldpos.QuadPart  = 0;
+    newpos.QuadPart  = offset;
+    if (!SetFilePointerEx(file->Fildes, newpos, &oldpos, FILE_BEGIN))
+    {   // unable to seek to the specified offset.
+        bytes_written= 0;
+        return GetLastError();
+    }
+    // safely write the requested number of bytes. for very large writes,
+    // size > UINT32_MAX, the result is undefined, so possibly split the
+    // write up into several sub-writes (though this case is unlikely...)
+    uint8_t const *bufferp = (uint8_t const*) buffer;
+    DWORD   error  = ERROR_SUCCESS;
+    bytes_written  = 0;
+    while  (bytes_written < size)
+    {
+        DWORD nwritten = 0;
+        DWORD wsize    = 1024U * 1024U; // write 1MB
+        if (size_t(wsize)   > (size - bytes_written))
+        {   // write only the amount remaining.
+            wsize =   (DWORD) (size - bytes_written);
+        }
+        if (WriteFile(file->Fildes, &bufferp[bytes_written], wsize, &nwritten, NULL))
+        {   // the synchronous write completed successfully.
+            bytes_written += nwritten;
+        }
+        else
+        {   // an error occurred; save the error code.
+            error = GetLastError(); break;
+        }
+    }
+    return error;
+}
+
+/// @summary Writes data to a file asynchronously by submitting commands to the AIO driver. The input pointer file is stored in the Identifier field of each AIO result descriptor.
+/// @param driver The virtual file system driver used to open the file.
+/// @param file The file state returned from vfs_open_file().
+/// @param offset The absolute byte offset at which to start writing data.
+/// @param buffer The data to be written to the file.
+/// @param size The number of bytes to write to the file.
+/// @param status_flags Application-defined status flags to pass through with the request.
+/// @param priority The priority value to assign to the request(s).
+/// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
+/// @param result_queue The SPSC unbounded FIFO where the completed write result will be placed.
+/// @param result_alloc The FIFO node allocator used to write data to the result queue.
+/// @return ERROR_SUCCESS or a system error code.
+public_function DWORD vfs_write_file_async(vfs_driver_t *driver, vfs_file_t *file, int64_t offset, void const *buffer, size_t size, uint32_t status_flags, uint32_t priority, pio_aio_request_alloc_t *thread_alloc, aio_result_queue_t *result_queue=NULL, aio_result_alloc_t *result_alloc=NULL)
+{
+    if (file->OpenFlags & FILE_FLAG_NO_BUFFERING)
+    {   // files opened for unbuffered I/O are subject to alignment restrictions.
+        uintptr_t addr  = (uintptr_t) buffer;
+        if ((offset & (file->SectorSize-1)) != 0)
+        {   // the write offset is not properly aligned.
+            return ERROR_INVALID_PARAMETER;
+        }
+        if ((size   & (file->SectorSize-1)) != 0)
+        {   // the number of bytes to write is not a multiple of the sector size.
+            return ERROR_INVALID_PARAMETER;
+        }
+        if ((addr   & (file->SectorSize-1)) != 0)
+        {   // the buffer is not aligned to a sector boundary.
+            return ERROR_INVALID_PARAMETER;
+        }
+    }
+
+    uint8_t const *bufferp =(uint8_t const*) buffer;
+    size_t bytes_written   = 0;
+    while (bytes_written   < size)
+    {
+        DWORD wsize = 1024U * 1024U; // write 1MB
+        if (size_t(wsize)   > (size - bytes_written))
+        {   // write only the amount remaining.
+            wsize =   (DWORD) (size - bytes_written);
+        }
+        // generate the I/O request for the AIO driver.
+        aio_request_t req;
+        req.CommandType  = AIO_COMMAND_WRITE;
+        req.CloseFlags   = AIO_CLOSE_FLAGS_NONE;
+        req.Fildes       = file->Fildes;
+        req.DataAmount   = wsize;
+        req.DataActual   = wsize;
+        req.BaseOffset   = 0;
+        req.FileOffset   = offset;
+        req.DataBuffer   = (void*) &bufferp[bytes_written];
+        req.Identifier   = (uintptr_t) file;
+        req.ResultAlloc  = result_alloc;
+        req.ResultQueue  = result_queue;
+        req.StatusFlags  = status_flags;
+        req.Priority     = priority;
+        // push the request to the AIO driver through the PIO driver queue.
+        pio_driver_explicit_io(driver->PIO, req, thread_alloc);
+        // update state for the next request, if any.
+        bytes_written   += wsize;
+        offset          += wsize;
+    }
+    return ERROR_SUCCESS;
+}
+
+/// @summary Flush any buffered writes to the file and update file metadata.
+/// @param driver The virtual file system driver that opened the file.
+/// @param file The file file state populated by vfs_open_file.
+/// @return ERROR_SUCCESS or a system error code.
+public_function DWORD vfs_flush_file_sync(vfs_driver_t *driver, vfs_file_t *file)
+{   UNREFERENCED_PARAMETER(driver);
+    if (FlushFileBuffers(file->Fildes)) return ERROR_SUCCESS;
+    else return GetLastError();
+}
+
 /// @summary Saves a file to disk. If the file exists, it is overwritten. This operation is performed entirely synchronously and will block the calling thread until the file is written. The file is guaranteed to have been either written successfully, or not at all.
 /// @param driver The virtual file system driver to use for path resolution.
 /// @param path The virtual path of the file to write.
@@ -2030,7 +2309,7 @@ public_function stream_decoder_t* vfs_get_file(vfs_driver_t *driver, char const 
 /// @param path A NULL-terminated UTF-8 string specifying the virtual file path.
 /// @param id An application-defined identifier for the stream.
 /// @param priority The priority value for the load, with higher numeric values representing higher priority.
-/// @param user_hints A combination of vfs_file_hint_e specifying the preferred file behavior, or VFS_FILE_HINT_NONT (0) to let the implementation decide. These hints may not be honored.
+/// @param user_hints A combination of vfs_file_hint_e specifying the preferred file behavior, or VFS_FILE_HINT_NONE (0) to let the implementation decide. These hints may not be honored.
 /// @param decoder_hint One of vfs_decoder_hint_e specifying the preferred decoder type, or VFS_DECODER_HINT_USE_DEFAULT (0) to let the implementation decide.
 /// @param thread_alloc_open The FIFO node allocator used to enqueue stream open commands to the PIO driver.
 /// @param thread_alloc_control The FIFO node allocator used to enqueue stream control commands to the PIO driver. May be NULL if control is NULL.
