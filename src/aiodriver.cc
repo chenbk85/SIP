@@ -145,9 +145,12 @@ typedef fifo_allocator_t<void*>         aio_return_alloc_t;
 /// @return true if the underlying file handle was closed.
 internal_function bool aio_driver_post_result(aio_cnode_t const &cmd)
 {   // post the operation result to the result queue specified in the request.
-    fifo_node_t<aio_result_t> *node = fifo_allocator_get(cmd.Req.ResultAlloc);
-    node->Item = cmd.Res;  //  copy the result data to the FIFO node.
-    spsc_fifo_u_produce(cmd.Req.ResultQueue, node);
+    if (cmd.Req.ResultQueue != NULL)
+    {
+        fifo_node_t<aio_result_t> *node = fifo_allocator_get(cmd.Req.ResultAlloc);
+        node->Item = cmd.Res;  //  copy the result data to the FIFO node.
+        spsc_fifo_u_produce(cmd.Req.ResultQueue, node);
+    }
     // close the underlying file handle, if requested.
     if (cmd.Req.CloseFlags != AIO_CLOSE_FLAGS_NONE)
     {
