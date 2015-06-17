@@ -18,9 +18,6 @@
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
-/// @summary Forward-declare the image loader type (see imloader.cc).
-struct image_loader_t;
-
 /// @summary Define a standard set of flags that control parsing of image containers.
 enum image_parser_flags_e : uint32_t
 {
