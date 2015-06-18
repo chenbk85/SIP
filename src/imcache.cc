@@ -18,10 +18,6 @@
 /*/////////////////
 //   Constants   //
 /////////////////*/
-/// @summary A special value that may be assigned to image_declaration_t::FinalFrame
-/// to indicate that the specified image file defines all frames of the image.
-static size_t const IMAGE_ALL_FRAMES  = ~size_t(0);
-
 /// @summary Define the default size of a hash bucket in the image cache ID table.
 #ifndef IMAGE_CACHE_BUCKET_SIZE
 #define IMAGE_CACHE_BUCKET_SIZE          128U
@@ -75,24 +71,6 @@ struct image_declaration_t
 };
 typedef fifo_allocator_t<image_declaration_t>         image_declaration_alloc_t;
 typedef mpsc_fifo_u_t   <image_declaration_t>         image_declaration_queue_t;
-
-/// @summary Defines the data output by the cache when it needs to load a frames from a file.
-/// For images where the frame data is spread across multiple files (like a PNG sequence), 
-/// one load request is generated for each file.
-struct image_load_t
-{
-    uintptr_t            ImageId;                 /// The application-defined logical image identifier.
-    char const          *FilePath;                /// The NULL-terminated UTF-8 virtual file path.
-    size_t               FirstFrame;              /// The zero-based index of the first frame to load.
-    size_t               FinalFrame;              /// The zero-based index of the last frame to load, or IMAGE_ALL_FRAMES.
-    size_t               DecodeOffset;            /// The number of bytes of decoded data to read from the chunk to reach the start of the first frame.
-    int64_t              FileOffset;              /// The byte offset of the chunk of encoded data containing the start of the first frame to load, or 0.
-    int                  FileHints;               /// A combination of vfs_file_hint_t to use when opening the file.
-    int                  DecoderHint;             /// One of vfs_decoder_hint_e to use when opening the file.
-    uint8_t              Priority;                /// The file load priority.
-};
-typedef fifo_allocator_t<image_load_t>                image_load_alloc_t;
-typedef spsc_fifo_u_t   <image_load_t>                image_load_queue_t;
 
 /// @summary Defines the data returned when a cache control command has completed. Generally, 
 /// only lock commands will return anything useful; for other command types, the ResultQueue
@@ -930,16 +908,32 @@ internal_function uint32_t image_cache_load_frame(image_cache_t *cache, image_lo
             image_file_t const &f = file_info.FileList[file_index];
             if (frame_index >=  f.FirstFrame && frame_index <= f.FinalFrame)
             {   // found the matching source file record. emit the notification.
+                // convert any known image data to an image_definition_t format.
                 fifo_node_t<image_load_t> *n  = fifo_allocator_get(&cache->LoadAlloc);
-                n->Item.ImageId       = cmd.ImageId;
-                n->Item.FilePath      = f.FilePath;
-                n->Item.FirstFrame    = first_frame;
-                n->Item.FinalFrame    = final_frame;
-                n->Item.DecodeOffset  = frame_pos.DecodeOffset;
-                n->Item.FileOffset    = frame_pos.FileOffset;
-                n->Item.FileHints     = file_info.FileHints;
-                n->Item.DecoderHint   = file_info.DecoderHint;
-                n->Item.Priority      = cmd.Priority;
+                n->Item.Metadata.ImageId        = cmd.ImageId;
+                n->Item.Metadata.ImageFormat    = image_info.ImageFormat;
+                n->Item.Metadata.Compression    = image_info.Compression;
+                n->Item.Metadata.Width          = image_info.Width;
+                n->Item.Metadata.Height         = image_info.Height;
+                n->Item.Metadata.SliceCount     = image_info.SliceCount;
+                n->Item.Metadata.ElementIndex   = 0;
+                n->Item.Metadata.ElementCount   = image_info.ElementCount;
+                n->Item.Metadata.LevelCount     = image_info.LevelCount;
+                n->Item.Metadata.BytesPerPixel  = image_info.BytesPerPixel;
+                n->Item.Metadata.BytesPerBlock  = image_info.BytesPerBlock;
+                n->Item.Metadata.DDSHeader      = image_info.DDSHeader;
+                n->Item.Metadata.DX10Header     = image_info.DX10Header;
+                n->Item.Metadata.LevelInfo      = image_info.LevelInfo;
+                n->Item.Metadata.BlockOffsets   = image_info.BlockOffsets;
+                n->Item.ImageId                 = cmd.ImageId;
+                n->Item.FilePath                = f.FilePath;
+                n->Item.FirstFrame              = first_frame;
+                n->Item.FinalFrame              = final_frame;
+                n->Item.DecodeOffset            = frame_pos.DecodeOffset;
+                n->Item.FileOffset              = frame_pos.FileOffset;
+                n->Item.FileHints               = file_info.FileHints;
+                n->Item.DecoderHint             = file_info.DecoderHint;
+                n->Item.Priority                = cmd.Priority;
                 spsc_fifo_u_produce(&cache->LoadQueue, n);
                 file_error = ERROR_SUCCESS;
                 break;

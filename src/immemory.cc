@@ -19,6 +19,10 @@
 /*/////////////////
 //   Constants   //
 /////////////////*/
+/// @summary A special value that may be assigned to image_declaration_t::FinalFrame
+/// to indicate that the specified image file defines all frames of the image.
+#define IMAGE_ALL_FRAMES            (~size_t(0))
+
 /// @summary The mask used to access the per-element lock count.
 #define IMAGE_ELEMENT_LOCK_MASK     0x0000FFFFU
 
