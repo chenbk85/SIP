@@ -103,7 +103,7 @@ struct thread_io_t
         void               *buffer, 
         size_t              size, 
         uint32_t            priority,
-        uint32_t            close_flags, 
+        uint32_t            close_flags=AIO_CLOSE_FLAGS_NONE, 
         aio_result_queue_t *result_queue=NULL,
         aio_result_alloc_t *result_alloc=NULL
     );                                        /// Asynchronously read data from a file opened for manual I/O.
@@ -115,7 +115,8 @@ struct thread_io_t
         void const         *buffer, 
         size_t              size, 
         uint32_t            priority, 
-        uint32_t            status_flags, 
+        uint32_t            close_flags=AIO_CLOSE_FLAGS_NONE,
+        uint32_t            status_flags=0, 
         aio_result_queue_t *result_queue=NULL, 
         aio_result_alloc_t *result_alloc=NULL
     );                                        /// Asynchronously write data to a file opened for manual I/O.
@@ -335,13 +336,13 @@ DWORD thread_io_t::flush_sync(vfs_file_t *file)
 /// @param buffer The buffer into which data will be written.
 /// @param size The maximum number of bytes to read.
 /// @param priority The priority value to assign to the read request(s).
-/// @param close_flags One of aio_close_flags_e specifying the auto-close behavior.
+/// @param close_flags A combination of aio_close_flags_e specifying the auto-close behavior.
 /// @param result_queue The SPSC unbounded FIFO where the completed read result will be placed.
 /// @param result_alloc The FIFO node allocator used to write data to the result queue.
 /// @return ERROR_SUCCESS or a system error code.
 DWORD thread_io_t::read_async(vfs_file_t *file, int64_t offset, void *buffer, size_t size, uint32_t priority, uint32_t close_flags, aio_result_queue_t *result_queue, aio_result_alloc_t *result_alloc)
 {
-    return vfs_read_file_async(VFSDriver, file, offset, buffer, size, close_flags, priority, &PIOManualIoAlloc, result_queue, result_alloc);
+    return vfs_read_file_async(VFSDriver, file, offset, buffer, size, priority, close_flags, &PIOManualIoAlloc, result_queue, result_alloc);
 }
 
 /// @summary Writes data to a file asynchronously by submitting commands to the AIO driver. The input pointer file is stored in the Identifier field of each AIO result descriptor.
@@ -350,13 +351,14 @@ DWORD thread_io_t::read_async(vfs_file_t *file, int64_t offset, void *buffer, si
 /// @param buffer The data to be written to the file.
 /// @param size The number of bytes to write to the file.
 /// @param priority The priority value to assign to the request(s).
+/// @param close_flags A combination of aio_close_flags_e specifying the auto-close behavior.
 /// @param status_flags Application-defined status flags to pass through with the request.
 /// @param result_queue The SPSC unbounded FIFO where the completed write result will be placed.
 /// @param result_alloc The FIFO node allocator used to write data to the result queue.
 /// @return ERROR_SUCCESS or a system error code.
-DWORD thread_io_t::write_async(vfs_file_t *file, int64_t offset, void const *buffer, size_t size, uint32_t priority, uint32_t status_flags, aio_result_queue_t *result_queue, aio_result_alloc_t *result_alloc)
+DWORD thread_io_t::write_async(vfs_file_t *file, int64_t offset, void const *buffer, size_t size, uint32_t priority, uint32_t close_flags, uint32_t status_flags, aio_result_queue_t *result_queue, aio_result_alloc_t *result_alloc)
 {
-    return vfs_write_file_async(VFSDriver, file, offset, buffer, size, status_flags, priority, &PIOManualIoAlloc, result_queue, result_alloc);
+    return vfs_write_file_async(VFSDriver, file, offset, buffer, size, priority, close_flags, status_flags, &PIOManualIoAlloc, result_queue, result_alloc);
 }
 
 /// @summary Closes the underlying file handle and releases the VFS driver's 

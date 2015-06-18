@@ -2000,18 +2000,18 @@ public_function DWORD vfs_read_file_sync(vfs_driver_t *driver, vfs_file_t *file,
 /// @param offset The absolute byte offset at which to start reading data.
 /// @param buffer The buffer into which data will be written.
 /// @param size The maximum number of bytes to read.
-/// @param close_flags One of aio_close_flags_e specifying the auto-close behavior.
 /// @param priority The priority value to assign to the read request(s).
+/// @param close_flags A combination of aio_close_flags_e specifying the auto-close behavior.
 /// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
 /// @param result_queue The SPSC unbounded FIFO where the completed read result will be placed.
 /// @param result_alloc The FIFO node allocator used to write data to the result queue.
 /// @return ERROR_SUCCESS or a system error code.
-public_function DWORD vfs_read_file_async(vfs_driver_t *driver, vfs_file_t *file, int64_t offset, void *buffer, size_t size, uint32_t close_flags, uint32_t priority, pio_aio_request_alloc_t *thread_alloc, aio_result_queue_t *result_queue=NULL, aio_result_alloc_t *result_alloc=NULL)
+public_function DWORD vfs_read_file_async(vfs_driver_t *driver, vfs_file_t *file, int64_t offset, void *buffer, size_t size, uint32_t priority, uint32_t close_flags, pio_aio_request_alloc_t *thread_alloc, aio_result_queue_t *result_queue=NULL, aio_result_alloc_t *result_alloc=NULL)
 {
     if (result_queue == NULL || result_alloc == NULL)
     {   // if no result queue was specified, use the queue on file->Decoder.
         if (file->Decoder == NULL)
-        {   // 
+        {   // there's no place for the AIO driver to return the data.
             return ERROR_INVALID_PARAMETER;
         }
         // the AIO driver holds a reference to the stream decoder queues.
@@ -2034,6 +2034,10 @@ public_function DWORD vfs_read_file_async(vfs_driver_t *driver, vfs_file_t *file
         {   // the buffer is not aligned to a sector boundary.
             return ERROR_INVALID_PARAMETER;
         }
+        if (size < file->SectorSize)
+        {   // the buffer size must be at least one disk physical sector.
+            return ERROR_INVALID_PARAMETER;
+        }
     }
 
     uint8_t  *bufferp =(uint8_t*) buffer;
@@ -2054,7 +2058,7 @@ public_function DWORD vfs_read_file_async(vfs_driver_t *driver, vfs_file_t *file
         req.CommandType  = AIO_COMMAND_READ;
         req.CloseFlags   = close_flags;
         req.Fildes       = file->Fildes;
-        req.DataAmount   = rsize;
+        req.DataAmount   = (DWORD) align_up(size_t(rsize), file->SectorSize);
         req.DataActual   = rsize;
         req.BaseOffset   = 0;
         req.FileOffset   = offset;
@@ -2124,13 +2128,14 @@ public_function DWORD vfs_write_file_sync(vfs_driver_t *driver, vfs_file_t *file
 /// @param offset The absolute byte offset at which to start writing data.
 /// @param buffer The data to be written to the file.
 /// @param size The number of bytes to write to the file.
-/// @param status_flags Application-defined status flags to pass through with the request.
 /// @param priority The priority value to assign to the request(s).
+/// @param close_flags A combination of aio_close_flags_e specifying the auto-close behavior.
+/// @param status_flags Application-defined status flags to pass through with the request.
 /// @param thread_alloc The FIFO node allocator used for submitting commands from the calling thread.
 /// @param result_queue The SPSC unbounded FIFO where the completed write result will be placed.
 /// @param result_alloc The FIFO node allocator used to write data to the result queue.
 /// @return ERROR_SUCCESS or a system error code.
-public_function DWORD vfs_write_file_async(vfs_driver_t *driver, vfs_file_t *file, int64_t offset, void const *buffer, size_t size, uint32_t status_flags, uint32_t priority, pio_aio_request_alloc_t *thread_alloc, aio_result_queue_t *result_queue=NULL, aio_result_alloc_t *result_alloc=NULL)
+public_function DWORD vfs_write_file_async(vfs_driver_t *driver, vfs_file_t *file, int64_t offset, void const *buffer, size_t size, uint32_t priority, uint32_t close_flags, uint32_t status_flags, pio_aio_request_alloc_t *thread_alloc, aio_result_queue_t *result_queue=NULL, aio_result_alloc_t *result_alloc=NULL)
 {
     if (file->OpenFlags & FILE_FLAG_NO_BUFFERING)
     {   // files opened for unbuffered I/O are subject to alignment restrictions.
@@ -2147,6 +2152,10 @@ public_function DWORD vfs_write_file_async(vfs_driver_t *driver, vfs_file_t *fil
         {   // the buffer is not aligned to a sector boundary.
             return ERROR_INVALID_PARAMETER;
         }
+        if (size < file->SectorSize)
+        {   // the buffer size must be at least one disk physical sector.
+            return ERROR_INVALID_PARAMETER;
+        }
     }
 
     uint8_t const *bufferp =(uint8_t const*) buffer;
@@ -2161,9 +2170,9 @@ public_function DWORD vfs_write_file_async(vfs_driver_t *driver, vfs_file_t *fil
         // generate the I/O request for the AIO driver.
         aio_request_t req;
         req.CommandType  = AIO_COMMAND_WRITE;
-        req.CloseFlags   = AIO_CLOSE_FLAGS_NONE;
+        req.CloseFlags   = close_flags;
         req.Fildes       = file->Fildes;
-        req.DataAmount   = wsize;
+        req.DataAmount   = (DWORD) align_up(size_t(wsize), file->SectorSize);
         req.DataActual   = wsize;
         req.BaseOffset   = 0;
         req.FileOffset   = offset;
