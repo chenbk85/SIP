@@ -65,6 +65,66 @@ struct thread_io_t
         uintptr_t           mount_id
     );                                        /// Delete a specific mount point.
 
+    DWORD                   open_file
+    (
+        char const         *virtual_path, 
+        uint32_t            file_hints, 
+        int32_t             decoder_hint, 
+        vfs_file_t         *file
+    );                                        /// Synchronously open a file for manual I/O.
+
+    DWORD                   read_sync
+    (
+        vfs_file_t         *file, 
+        int64_t             offset,
+        void               *buffer,
+        size_t              size, 
+        size_t             &bytes_read
+    );                                        /// Synchronously read data from a file opened for manual I/O.
+
+    DWORD                   write_sync
+    (
+        vfs_file_t         *file, 
+        int64_t             offset, 
+        void const         *buffer,
+        size_t              size, 
+        size_t             &bytes_written
+    );                                        /// Synchronously write data to a file opened for manual I/O.
+
+    DWORD                   flush_sync
+    (
+        vfs_file_t         *file
+    );                                        /// Synchronously flush buffered writes and file metadata.
+
+    DWORD                   read_async
+    (
+        vfs_file_t         *file,
+        int64_t             offset, 
+        void               *buffer, 
+        size_t              size, 
+        uint32_t            priority,
+        uint32_t            close_flags, 
+        aio_result_queue_t *result_queue=NULL,
+        aio_result_alloc_t *result_alloc=NULL
+    );                                        /// Asynchronously read data from a file opened for manual I/O.
+
+    DWORD                   write_async
+    (
+        vfs_file_t         *file, 
+        int64_t             offset,
+        void const         *buffer, 
+        size_t              size, 
+        uint32_t            priority, 
+        uint32_t            status_flags, 
+        aio_result_queue_t *result_queue=NULL, 
+        aio_result_alloc_t *result_alloc=NULL
+    );                                        /// Asynchronously write data to a file opened for manual I/O.
+
+    void                    close_file
+    (
+        vfs_file_t         *file
+    );                                        /// Synchronously close a file opened for manual I/O.
+
     bool                    put_file
     (
         char const         *virtual_path, 
@@ -129,6 +189,7 @@ struct thread_io_t
 
     pio_sti_control_alloc_t PIOControlAlloc;  /// The stream-in control allocator for the thread.
     pio_sti_pending_alloc_t PIOStreamInAlloc; /// The stream-in request allocator for the thread.
+    pio_aio_request_alloc_t PIOManualIoAlloc; /// The manual I/O request allocator for the thread.
 
     vfs_driver_t           *VFSDriver;        /// The target VFS driver, managed externally.
     pio_driver_t           *PIODriver;        /// The target PIO driver, managed externally.
@@ -156,11 +217,13 @@ thread_io_t::thread_io_t(void)
 {
     fifo_allocator_init(&PIOControlAlloc);
     fifo_allocator_init(&PIOStreamInAlloc);
+    fifo_allocator_init(&PIOManualIoAlloc);
 }
 
 /// @summary Frees resources allocated by the thread I/O interface.
 thread_io_t::~thread_io_t(void)
 {
+    fifo_allocator_reinit(&PIOManualIoAlloc);
     fifo_allocator_reinit(&PIOStreamInAlloc);
     fifo_allocator_reinit(&PIOControlAlloc);
 }
@@ -221,6 +284,87 @@ void thread_io_t::unmount_all(char const *mount_path)
 void thread_io_t::unmount(uintptr_t mount_id)
 {
     vfs_unmount(VFSDriver, mount_id);
+}
+
+/// @summary Open a file for manual I/O. Close the file using vfs_close_file().
+/// @param virtual_path A NULL-terminated UTF-8 string specifying the virtual file path.
+/// @param file_hints A combination of vfs_file_hint_e specifying how to open the file. The file is opened for reading and writing.
+/// @param decoder_hint One of vfs_decoder_hint_e specifying the type of stream decoder to create, or VFS_DECODER_HINT_NONE to not create a decoder.
+/// @param file On return, this structure is populated with file information.
+/// @return ERROR_SUCCESS or a system error code.
+DWORD thread_io_t::open_file(char const *virtual_path, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
+{
+    return vfs_open_file(VFSDriver, virtual_path, file_hints, decoder_hint, file);
+}
+
+/// @summary Synchronously reads data from a file.
+/// @param file The file to read from.
+/// @param offset The absolute byte offset at which to start reading data.
+/// @param buffer The buffer into which data will be written.
+/// @param size The maximum number of bytes to read.
+/// @param bytes_read On return, this value is set to the number of bytes actually read. This may be less than the number of bytes requested, or 0 at end-of-file.
+/// @return ERROR_SUCCESS or a system error code.
+DWORD thread_io_t::read_sync(vfs_file_t *file, int64_t offset, void *buffer, size_t size, size_t &bytes_read)
+{
+    return vfs_read_file_sync(VFSDriver, file, offset, buffer, size, bytes_read);
+}
+
+/// @summary Synchronously writes data to a file.
+/// @param file The file to write to.
+/// @param offset The absolute byte offset at which to start writing data.
+/// @param buffer The data to be written to the file.
+/// @param size The number of bytes to write to the file.
+/// @param bytes_written On return, this value is set to the number of bytes actually written to the file.
+/// @return ERROR_SUCCESS or a system error code.
+DWORD thread_io_t::write_sync(vfs_file_t *file, int64_t offset, void const *buffer, size_t size, size_t &bytes_written)
+{
+    return vfs_write_file_sync(VFSDriver, file, offset, buffer, size, bytes_written);
+}
+
+/// @summary Flush any buffered writes to the file and update file metadata.
+/// @param file The file to flush.
+/// @return ERROR_SUCCESS or a system error code.
+DWORD thread_io_t::flush_sync(vfs_file_t *file)
+{
+    return vfs_flush_file_sync(VFSDriver, file);
+}
+
+/// @summary Reads data from a file asynchronously by submitting commands to the AIO driver. The input pointer file is stored in the Identifier field of each AIO result descriptor.
+/// @param file The file to read from.
+/// @param offset The absolute byte offset at which to start reading data.
+/// @param buffer The buffer into which data will be written.
+/// @param size The maximum number of bytes to read.
+/// @param priority The priority value to assign to the read request(s).
+/// @param close_flags One of aio_close_flags_e specifying the auto-close behavior.
+/// @param result_queue The SPSC unbounded FIFO where the completed read result will be placed.
+/// @param result_alloc The FIFO node allocator used to write data to the result queue.
+/// @return ERROR_SUCCESS or a system error code.
+DWORD thread_io_t::read_async(vfs_file_t *file, int64_t offset, void *buffer, size_t size, uint32_t priority, uint32_t close_flags, aio_result_queue_t *result_queue, aio_result_alloc_t *result_alloc)
+{
+    return vfs_read_file_async(VFSDriver, file, offset, buffer, size, close_flags, priority, &PIOManualIoAlloc, result_queue, result_alloc);
+}
+
+/// @summary Writes data to a file asynchronously by submitting commands to the AIO driver. The input pointer file is stored in the Identifier field of each AIO result descriptor.
+/// @param file The file to write to.
+/// @param offset The absolute byte offset at which to start writing data.
+/// @param buffer The data to be written to the file.
+/// @param size The number of bytes to write to the file.
+/// @param priority The priority value to assign to the request(s).
+/// @param status_flags Application-defined status flags to pass through with the request.
+/// @param result_queue The SPSC unbounded FIFO where the completed write result will be placed.
+/// @param result_alloc The FIFO node allocator used to write data to the result queue.
+/// @return ERROR_SUCCESS or a system error code.
+DWORD thread_io_t::write_async(vfs_file_t *file, int64_t offset, void const *buffer, size_t size, uint32_t priority, uint32_t status_flags, aio_result_queue_t *result_queue, aio_result_alloc_t *result_alloc)
+{
+    return vfs_write_file_async(VFSDriver, file, offset, buffer, size, status_flags, priority, &PIOManualIoAlloc, result_queue, result_alloc);
+}
+
+/// @summary Closes the underlying file handle and releases the VFS driver's 
+/// reference to the underlying stream decoder.
+/// @param file_info Internal information relating to the file to close.
+void thread_io_t::close_file(vfs_file_t *file)
+{
+    vfs_close_file(file);
 }
 
 /// @summary Saves a file to disk. If the file exists, it is overwritten. This operation is performed entirely synchronously and will block the calling thread until the file is written. The file is guaranteed to have been either written successfully, or not at all.

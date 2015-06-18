@@ -539,7 +539,7 @@ internal_function vfs_mount_t* vfs_mounts_insert(vfs_mounts_t &plist, uintptr_t 
                 min_idx = mid + 1;
             }
         }
-        if (ins_idx == plist.Count)
+        if (size_t(ins_idx) == plist.Count)
         {   // insert the item at the end of the list.
             ins_idx =  plist.Count++;
             plist.MountIds[ins_idx] = id;
@@ -1904,8 +1904,7 @@ public_function void vfs_unmount_all(vfs_driver_t *driver, char const *mount_pat
     ReleaseSRWLockExclusive(&driver->MountsLock);
 }
 
-/// @summary Closes the underlying file handle and releases the VFS driver's 
-/// reference to the underlying stream decoder. For internal use only.
+/// @summary Closes the underlying file handle and releases the VFS driver's reference to the underlying stream decoder.
 /// @param file_info Internal information relating to the file to close.
 public_function void vfs_close_file(vfs_file_t *file_info)
 {
@@ -1926,6 +1925,7 @@ public_function void vfs_close_file(vfs_file_t *file_info)
 /// @param path A NULL-terminated UTF-8 string specifying the virtual file path.
 /// @param file_hints A combination of vfs_file_hint_e specifying how to open the file. The file is opened for reading and writing.
 /// @param decoder_hint One of vfs_decoder_hint_e specifying the type of stream decoder to create, or VFS_DECODER_HINT_NONE to not create a decoder.
+/// @param file On return, this structure is populated with file information.
 /// @return ERROR_SUCCESS or a system error code.
 public_function DWORD vfs_open_file(vfs_driver_t *driver, char const *path, uint32_t file_hints, int32_t decoder_hint, vfs_file_t *file)
 {
@@ -2184,7 +2184,7 @@ public_function DWORD vfs_write_file_async(vfs_driver_t *driver, vfs_file_t *fil
 
 /// @summary Flush any buffered writes to the file and update file metadata.
 /// @param driver The virtual file system driver that opened the file.
-/// @param file The file file state populated by vfs_open_file.
+/// @param file The file state populated by vfs_open_file().
 /// @return ERROR_SUCCESS or a system error code.
 public_function DWORD vfs_flush_file_sync(vfs_driver_t *driver, vfs_file_t *file)
 {   UNREFERENCED_PARAMETER(driver);
