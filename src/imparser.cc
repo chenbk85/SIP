@@ -40,24 +40,31 @@ enum image_parser_flags_e : uint32_t
 template <typename ParserT>
 struct image_parser_list_t
 {
-    size_t              Count;                     /// The number of active parsers in the list.
-    size_t              Capacity;                  /// The capacity of the list.
-    image_encoder_t   **TargetStream;              /// The set of pointers to image encoders (output) for each active parser.
-    stream_decoder_t  **SourceStream;              /// The set of pointers to stream decoders (input) for each active parser.
-    image_definition_t *ImageMetadata;             /// The image metadata for each active parser.
-    ParserT            *ParseState;                /// The format-specific parser state for each active parser.
+    size_t                    Count;               /// The number of active parsers in the list.
+    size_t                    Capacity;            /// The capacity of the list.
+    char const              **SourceFile;          /// The set of pointers to source file paths for each active parser.
+    stream_decoder_t        **SourceStream;        /// The set of pointers to stream decoders (input) for each active parser.
+    ParserT                  *ParseState;          /// The format-specific parser state for each active parser.
 };
 
 /// @summary Defines the configuration data passed to an image parser.
 struct image_parser_config_t
 {
-    uintptr_t           ImageId;                   /// The application-defined logical image identifier.
-    uintptr_t           Context;                   /// Opaque data passed to the metadata callback.
-    size_t              FirstFrame;                /// The zero-based index of the first frame to read.
-    size_t              FinalFrame;                /// The zero-based index of the final frame to read, or IMAGE_ALL_FRAMES to read all frames.
-    image_definition_t *Metadata;                  /// The known image metadata. Valid if ParseFlags has IMAGE_PARSER_FLAGS_METADATA_SET set.
-    stream_decode_pos_t StartOffset;               /// The position within the file at which to start reading data. Valid if ParseFlags has IMAGE_PARSER_FLAGS_START_OFFSET set.
-    uint32_t            ParseFlags;                /// A combination image_parser_flags_e controlling parser behavior.
+    uintptr_t                 ImageId;             /// The application-defined logical image identifier.
+    uintptr_t                 Context;             /// Opaque data passed to the metadata callback.
+    size_t                    FirstFrame;          /// The zero-based index of the first frame to read.
+    size_t                    FinalFrame;          /// The zero-based index of the final frame to read, or IMAGE_ALL_FRAMES to read all frames.
+    stream_decoder_t         *Decoder;             /// The stream decoder used to read input data.
+    image_memory_t           *Memory;              /// The image memory where pixel data will be stored.
+    image_definition_t       *Metadata;            /// The known image metadata. Valid if ParseFlags has IMAGE_PARSER_FLAGS_METADATA_SET set.
+    image_definition_queue_t *DefinitionQueue;     /// The MPSC unbounded FIFO where image definition information will be written.
+    image_definition_alloc_t *DefinitionAlloc;     /// The FIFO node allocator used to write to the image definition queue.
+    image_location_queue_t   *PlacementQueue;      /// The MPSC unbounded FIFO where image memory placement information will be written.
+    image_location_alloc_t   *PlacementAlloc;      /// The FIFO node allocator used to write to the image memory placement queue.
+    stream_decode_pos_t       StartOffset;         /// The position within the file at which to start reading data. Valid if ParseFlags has IMAGE_PARSER_FLAGS_START_OFFSET set.
+    uint32_t                  ParseFlags;          /// A combination image_parser_flags_e controlling parser behavior.
+    int                       Compression;         /// One of image_compression_e specifying the destination storage compression format.
+    int                       Encoding;            /// One of image_encoding_e specifying the destination storage encoding.
 };
 
 /*///////////////
@@ -79,21 +86,18 @@ void image_parser_list_create(image_parser_list_t<T> *ipsl, size_t capacity)
 {
     ipsl->Count         = 0;
     ipsl->Capacity      = 0;
-    ipsl->TargetStream  = NULL;
+    ipsl->SourceFile    = NULL;
     ipsl->SourceStream  = NULL;
-    ipsl->ImageMetadata = NULL;
     ipsl->ParseState    = NULL;
     if (capacity > 0)
     {   // pre-allocate storage for the specified number of items.
-        image_encoder_t      **te = (image_encoder_t     **)malloc(capacity * sizeof(image_encoder_t  *));
+        char const           **sf = (char const          **)malloc(capacity * sizeof(char const*));
         stream_decoder_t     **sd = (stream_decoder_t    **)malloc(capacity * sizeof(stream_decoder_t *));
-        image_definition_t    *im = (image_definition_t   *)malloc(capacity * sizeof(image_definition_t));
         T                     *ps = (T                    *)malloc(capacity * sizeof(T));
-        if (te != NULL)   ipsl->TargetStream  = te;
+        if (sf != NULL)   ipsl->SourceFile    = sf;
         if (sd != NULL)   ipsl->SourceStream  = sd;
-        if (im != NULL)   ipsl->ImageMetadata = im;
         if (ps != NULL)   ipsl->ParseState    = ps;
-        if (te != NULL && sd != NULL && im != NULL && ps != NULL) ipsl->Capacity = capacity;
+        if (sf != NULL && sd != NULL && ps != NULL) ipsl->Capacity = capacity;
     }
 }
 
@@ -110,13 +114,26 @@ void image_parser_list_ensure(image_parser_list_t<T> *ipsl, size_t capacity)
     }
     // determine new capacity and reallocate lists.
     size_t newc               = calculate_capacity(ipsl->Capacity, capacity, 128, 16);
-    image_encoder_t      **te = (image_encoder_t     **) realloc(ipsl->TargetStream , newc * sizeof(image_encoder_t  *));
+    char const           **sf = (char const          **) realloc(ipsl->SourceFile   , newc * sizeof(char const       *));
     stream_decoder_t     **sd = (stream_decoder_t    **) realloc(ipsl->SourceStream , newc * sizeof(stream_decoder_t *));
-    image_definition_t    *im = (image_definition_t   *) realloc(ipsl->ImageMetadata, newc * sizeof(image_definition_t));
     T                     *ps = (T                    *) realloc(ipsl->ParseState   , newc * sizeof(T));
-    if (te != NULL)   ipsl->TargetStream  = te;
+    if (sf != NULL)   ipsl->SourceFile    = sf;
     if (sd != NULL)   ipsl->SourceStream  = sd;
-    if (im != NULL)   ipsl->ImageMetadata = im;
     if (ps != NULL)   ipsl->ParseState    = ps;
-    if (te != NULL && sd != NULL && im != NULL && ps != NULL) ipsl->Capacity = newc;
+    if (sf != NULL && sd != NULL && ps != NULL) ipsl->Capacity = newc;
+}
+
+/// @summary Frees resources associated with an image parser list.
+/// @param ipsl The image parser list to delete.
+template <typename T>
+void image_parser_list_delete(image_parser_list_t<T> *ipsl)
+{
+    free(ipsl->ParseState);
+    free(ipsl->SourceStream);
+    free(ipsl->SourceFile);
+    ipsl->Count        = 0;
+    ipsl->Capacity     = 0;
+    ipsl->SourceFile   = NULL;
+    ipsl->SourceStream = NULL;
+    ipsl->ParseState   = NULL;
 }

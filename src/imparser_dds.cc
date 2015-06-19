@@ -50,6 +50,8 @@ enum dds_parser_error_e : int
     DDS_PARSE_ERROR_SUCCESS              = 0,   /// No error has occurred.
     DDS_PARSE_ERROR_NOMEMORY             = 1,   /// Required memory could not be allocated.
     DDS_PARSE_ERROR_DECODER              = 2,   /// The underlying stream decoder returned an error.
+    DDS_PARSE_ERROR_NOENCODER            = 3,   /// No encoder was found that supports the required transcoding.
+    DDS_PARSE_ERROR_ENCODER              = 4,   /// The image encoder returned an error.
 };
 
 /// @summary Define the possible return codes from the top-level streaming parser update function.
@@ -68,6 +70,7 @@ struct dds_parser_state_t
     int                   CurrentState;         /// One of dds_parser_state_e.
     int                   ParserError;          /// One of dds_parser_error_e.
     image_parser_config_t Config;               /// The input parser configuration.
+    image_encoder_t      *Encoder;              /// The local image encoder. Deleted on error or completion.
     image_definition_t   *Metadata;             /// Pointer to the image metadata block.
     size_t                ElementFinal;         /// The zero-based index of the final face or array element to read.
     size_t                ElementIndex;         /// The zero-based index of the face or array element currently being read.
@@ -99,9 +102,9 @@ struct dds_parser_state_t
 /// @param ddsp The parser state to update.
 /// @param encoder The encoder used to write data to image memory and specify image attributes.
 /// @return The new parser state.
-internal_function int dds_parser_setup_image_info(dds_parser_state_t *ddsp, image_encoder_t *encoder)
+internal_function int dds_parser_setup_image_info(dds_parser_state_t *ddsp)
 {
-    image_definition_t   *meta  = ddsp->Metadata;
+    image_definition_t    *meta = ddsp->Metadata;
     if (ddsp->Config.ParseFlags & IMAGE_PARSER_FLAGS_READ_METADATA)
     {   // completely initialize the metadata block with information we've read.
         dds_header_t        *dds      = ddsp->DDSHeader;
@@ -169,9 +172,55 @@ internal_function int dds_parser_setup_image_info(dds_parser_state_t *ddsp, imag
 
         // zero out all of the offset data. it will be set as the container is parsed.
         memset(offsets, 0, nitems * nlevels * sizeof(stream_decode_pos_t));
+    }
 
-        // notify the encoder of the image attributes:
-        encoder->define_image(meta);
+    // create the image encoder instance.
+    int access_type = IMAGE_ACCESS_UNKNOWN;
+    if (dxgi_array(&meta->DDSHeader, &meta->DX10Header))
+    {   // this is an image array - determine whether it's 1D, 2D or cubemap.
+        // note that DDS does not support arrays of 3D image data.
+        if (dxgi_cubemap(&meta->DDSHeader, &meta->DX10Header))
+            access_type = IMAGE_ACCESS_CUBEMAP_ARRAY;
+        else if (meta->Width > 1 && meta->Height > 1)
+            access_type = IMAGE_ACCESS_2D_ARRAY;
+        else
+            access_type = IMAGE_ACCESS_1D_ARRAY;
+    }
+    else
+    {   // this is a single-element image.
+        if (dxgi_cubemap(&meta->DDSHeader, &meta->DX10Header))
+            access_type = IMAGE_ACCESS_CUBEMAP;
+        else if (meta->SliceCount > 1)
+            access_type = IMAGE_ACCESS_3D;
+        else if (meta->Width > 1 && meta->Height > 1)
+            access_type = IMAGE_ACCESS_2D;
+        else
+            access_type = IMAGE_ACCESS_1D;
+    }
+    ddsp->Encoder = create_image_encoder(
+        ddsp->Config.ImageId, 
+        ddsp->Config.Memory, 
+        IMAGE_COMPRESSION_NONE, 
+        IMAGE_ENCODING_RAW, 
+        ddsp->Config.Compression, 
+        ddsp->Config.Encoding, 
+        access_type, 
+        ddsp->Config.DefinitionQueue, 
+        ddsp->Config.DefinitionAlloc, 
+        ddsp->Config.PlacementQueue, 
+        ddsp->Config.PlacementAlloc);
+    if (ddsp->Encoder == NULL)
+    {   // unable to create the encoder to write to image memory.
+        ddsp->ParserError = DDS_PARSE_ERROR_NOENCODER;
+        return DDS_PARSE_STATE_ERROR;
+    }
+    if (ddsp->Config.ParseFlags & IMAGE_PARSER_FLAGS_READ_METADATA)
+    {   // notify the encoder of the image attributes:
+        if (ddsp->Encoder->define_image(meta) != ERROR_SUCCESS)
+        {
+            ddsp->ParserError = DDS_PARSE_ERROR_ENCODER;
+            return DDS_PARSE_STATE_ERROR;
+        }
     }
 
     // initialize internal state based on parser flags and image metadata.
@@ -221,7 +270,7 @@ internal_function int dds_seek_offset(stream_decoder_t *decoder, dds_parser_stat
             }
             else
             {   // skip metadata, reading pixels only.
-                return dds_parser_setup_image_info(ddsp, encoder);
+                return dds_parser_setup_image_info(ddsp);
             }
         }
         // else, refill the decoded data buffer and remain in the same state.
@@ -272,7 +321,7 @@ internal_function int dds_buffer_header(stream_decoder_t *decoder, dds_parser_st
         else
         {   // no DX10 header present, so determine image properties and proceed.
             ddsp->DX10Header = NULL;
-            return dds_parser_setup_image_info(ddsp, encoder);
+            return dds_parser_setup_image_info(ddsp);
         }
     }
     else
@@ -301,7 +350,7 @@ internal_function int dds_buffer_header_dx10(stream_decoder_t *decoder, dds_pars
         // save a pointer to the DX10 header for easy reference.
         ddsp->DX10Header     = (dds_header_dxt10_t*) ddsp->DX10Buffer;
         // determine image properties and proceed with receiving data.
-        return dds_parser_setup_image_info(ddsp, encoder);
+        return dds_parser_setup_image_info(ddsp);
     }
     else
     {   // this is a partial read; consume all available bytes.
@@ -380,80 +429,62 @@ internal_function int dds_encode_level(stream_decoder_t *decoder, dds_parser_sta
 }
 
 /// @summary Implements the primary update tick for a streaming DDS parser.
-/// @param decoder The stream decoder providing the data to consume.
 /// @param ddsp The DDS parser state to update.
-/// @param encoder The image encoder to which pixel data should be written.
 /// @return One of dds_parser_result_e.
-internal_function int dds_parser_update(stream_decoder_t *decoder, dds_parser_state_t *ddsp, image_encoder_t *encoder)
+internal_function int dds_parser_update(dds_parser_state_t *ddsp)
 {
-    while (!decoder->atend())
-    {   // refill the decoder buffer with any available data.
-        switch (decoder->refill(decoder))
-        {
-        case STREAM_REFILL_RESULT_START:
-            break;                            // begin reading decoded data.
-        case STREAM_REFILL_RESULT_YIELD:
-            return DDS_PARSE_RESULT_CONTINUE; // no additional data available at this time.
-        case STREAM_REFILL_RESULT_ERROR:
-            ddsp->ParserError = DDS_PARSE_ERROR_DECODER;
-            return DDS_PARSE_RESULT_ERROR;    // the underlying stream encountered an error.
-        }
-        // parse as much decoded data as possible.
-        while (decoder->ReadCursor != decoder->FinalByte)
-        {   // dispatch to the appropriate function based on parser state.
-            int new_state;
-            switch (ddsp->CurrentState)
-            {
-            case DDS_PARSE_STATE_SEEK_OFFSET:
-                new_state = dds_seek_offset(decoder, ddsp, encoder);
-                break;
-            case DDS_PARSE_STATE_FIND_MAGIC:
-                new_state = dds_find_magic(decoder, ddsp, encoder);
-                break;
-            case DDS_PARSE_STATE_BUFFER_HEADER:
-                new_state = dds_buffer_header(decoder, ddsp, encoder);
-                break;
-            case DDS_PARSE_STATE_BUFFER_HEADER_DX10:
-                new_state = dds_buffer_header_dx10(decoder, ddsp, encoder);
-                break;
-            case DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT:
-                new_state = dds_receive_next_element(decoder, ddsp, encoder);
-                break;
-            case DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL:
-                new_state = dds_receive_next_level(decoder, ddsp, encoder);
-                break;
-            case DDS_PARSE_STATE_ENCODE_LEVEL_DATA:
-                new_state = dds_encode_level(decoder, ddsp, encoder);
-                break;
-            case DDS_PARSE_STATE_COMPLETE:
-                return DDS_PARSE_RESULT_COMPLETE;
-            case DDS_PARSE_STATE_ERROR:
-                return DDS_PARSE_RESULT_ERROR;
-            default:
-                new_state = ddsp->CurrentState;
-                break;
-            }
-            ddsp->CurrentState = new_state;
-        }
-    }
-    // reached end-of-stream; process any final state updates.
-    // these states do not require any input data to execute.
-    for ( ; ; )
+    stream_decoder_t *decoder   = ddsp->Config.Decoder;
+    while (ddsp->CurrentState  != DDS_PARSE_STATE_COMPLETE)
     {
-        switch (ddsp->CurrentState)
-        {
-        case DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT:
-            ddsp->CurrentState = dds_receive_next_element(decoder, ddsp, encoder);
-            break;
-        case DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL:
-            ddsp->CurrentState = dds_receive_next_level(decoder, ddsp, encoder);
-            break;
-        case DDS_PARSE_STATE_COMPLETE:
-            return DDS_PARSE_RESULT_COMPLETE;
-        default:
+        if (ddsp->CurrentState == DDS_PARSE_STATE_ERROR)
+        {   // return from the error state immediately.
             return DDS_PARSE_RESULT_ERROR;
         }
+        if (decoder->ReadCursor == decoder->FinalByte && !decoder->atend())
+        {   // attempt to obtain additional input data.
+            switch (decoder->refill(decoder))
+            {
+            case STREAM_REFILL_RESULT_START:
+                break;
+            case STREAM_REFILL_RESULT_YIELD:
+                return DDS_PARSE_RESULT_CONTINUE;
+            case STREAM_REFILL_RESULT_ERROR:
+                ddsp->CurrentState = DDS_PARSE_STATE_ERROR;
+                ddsp->ParserError  = DDS_PARSE_ERROR_DECODER;
+                return DDS_PARSE_RESULT_ERROR;
+            }
+        }
+        // perform a state update, which may consume zero or more bytes.
+        int s = ddsp->CurrentState;
+        switch (ddsp->CurrentState)
+        {
+        case DDS_PARSE_STATE_SEEK_OFFSET:
+            s = dds_seek_offset(decoder, ddsp, ddsp->Encoder);
+            break;
+        case DDS_PARSE_STATE_FIND_MAGIC:
+            s = dds_find_magic(decoder, ddsp, ddsp->Encoder);
+            break;
+        case DDS_PARSE_STATE_BUFFER_HEADER:
+            s = dds_buffer_header(decoder, ddsp, ddsp->Encoder);
+            break;
+        case DDS_PARSE_STATE_BUFFER_HEADER_DX10:
+            s = dds_buffer_header_dx10(decoder, ddsp, ddsp->Encoder);
+            break;
+        case DDS_PARSE_STATE_RECEIVE_NEXT_ELEMENT:
+            s = dds_receive_next_element(decoder, ddsp, ddsp->Encoder);
+            break;
+        case DDS_PARSE_STATE_RECEIVE_NEXT_LEVEL:
+            s = dds_receive_next_level(decoder, ddsp, ddsp->Encoder);
+            break;
+        case DDS_PARSE_STATE_ENCODE_LEVEL_DATA:
+            s = dds_encode_level(decoder, ddsp, ddsp->Encoder);
+            break;
+        default:
+            break;
+        }
+        ddsp->CurrentState = s;
     }
+    return DDS_PARSE_RESULT_COMPLETE;
 }
 
 /*////////////////////////
@@ -612,6 +643,7 @@ public_function void dds_parser_state_init(dds_parser_state_t *ddsp, image_parse
     ddsp->CurrentState  = DDS_PARSE_STATE_SEEK_OFFSET;
     ddsp->ParserError   = DDS_PARSE_ERROR_SUCCESS;
     ddsp->Config        = config;
+    ddsp->Encoder       = NULL;
     ddsp->Metadata      = config.Metadata;
     ddsp->ElementFinal  = 0;
     ddsp->ElementIndex  = 0;
@@ -626,4 +658,15 @@ public_function void dds_parser_state_init(dds_parser_state_t *ddsp, image_parse
     ddsp->DDSHWritePos  = 0;
     ddsp->DX10WritePos  = 0;
     ddsp->MagicBuffer   = 0;
+}
+
+/// @summary Frees any locally-allocated resources for a parser instance.
+/// @param ddsp The streaming DDS parser state to clean up.
+public_function void dds_parser_state_cleanup(dds_parser_state_t *ddsp)
+{
+    if (ddsp->Encoder != NULL)
+    {
+        delete  ddsp->Encoder;
+        ddsp->Encoder  = NULL;
+    }
 }
