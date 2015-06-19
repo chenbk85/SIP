@@ -397,7 +397,6 @@ inline void frame_load_queue_list_create(frame_load_queue_list_t<T> *list, size_
             list->QueueList      = storage;
             list->QueueCapacity  = capacity;
         }
-        dbg_printf("Alloc: 0x%p\n", storage);
     }
 }
 
@@ -406,7 +405,6 @@ inline void frame_load_queue_list_create(frame_load_queue_list_t<T> *list, size_
 template <typename T>
 inline void frame_load_queue_list_delete(frame_load_queue_list_t<T> *list)
 {
-    dbg_printf("Free:    0x%p\n", list->QueueList);
     free(list->QueueList); 
     list->QueueCount     = 0;
     list->QueueCapacity  = 0;
@@ -446,7 +444,6 @@ inline void frame_load_queue_list_put(frame_load_queue_list_t<T> *list, T *queue
         T    **new_queues =(T**) realloc(list->QueueList , new_amount * sizeof(T*));
         if (new_queues != NULL)
         {   // memory allocation was successful. update state.
-            dbg_printf("Realloc: 0x%p -> 0x%p\n", list->QueueList, new_queues);
             list->QueueList     = new_queues;
             list->QueueCapacity = new_amount;
         }
