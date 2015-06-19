@@ -572,10 +572,9 @@ internal_function void image_cache_process_pending_evict_and_drop(image_cache_t 
             // consider the frame to have been immediately evicted.
             bytes_dropped += entry.FrameData[i].BytesReserved;
             // remove it from the list of in-cache frames.
-            size_t           e    = entry.FrameCount - 1;
-            entry.FrameList [i]   = entry.FrameList [e];
-            entry.FrameData [i]   = entry.FrameData [e];
-            entry.FrameState[i]   = entry.FrameState[e];
+            array_swap(entry.FrameList , i, entry.FrameCount-1);
+            array_swap(entry.FrameData , i, entry.FrameCount-1);
+            array_swap(entry.FrameState, i, entry.FrameCount-1);
             entry.FrameCount--;
         }
         else i++;
@@ -799,6 +798,9 @@ internal_function uint32_t image_cache_add_entry(image_cache_t *cache, uintptr_t
         if (fi != NULL) entry.FrameData  = fi;
         if (ci != NULL) entry.FrameState = ci;
         if (fl != NULL && fi != NULL && ci != NULL) entry.FrameCapacity = frame_count;
+        memset(entry.FrameList, 0, frame_count * sizeof(size_t));
+        memset(entry.FrameData, 0, frame_count * sizeof(image_frame_info_t));
+        memset(entry.FrameState,0, frame_count * sizeof(image_cache_info_t));
     }
     // finally, update the image ID->cache entry table.
     id_table_put(&cache->EntryIds, image_id, index);
@@ -1412,7 +1414,9 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
             if (lock_frame)
             {
                 entry.FrameState[i].LockCount++;
-                entry.FrameState[i].TimeToLoad = now_time - t_start;
+                entry.FrameState[i].Attributes      = IMAGE_CACHE_ENTRY_FLAG_NONE;
+                entry.FrameState[i].LastRequestTime = now_time;
+                entry.FrameState[i].TimeToLoad      = now_time - t_start;
             }
             found_frame = true;
             break;
@@ -1432,25 +1436,30 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
             if (fl != NULL && fi != NULL && ci != NULL) entry.FrameCapacity = total_frames;
         }
         // update the frame with location data.
-        entry.FrameList [frame_index]               = pos.FrameIndex;
-        entry.FrameData [frame_index].BaseAddress   = pos.BaseAddress;
-        entry.FrameData [frame_index].BytesReserved = pos.BytesReserved;
-        entry.FrameData [frame_index].Context       = pos.Context;
-        entry.FrameState[frame_index].LockCount     = 1;
-        entry.FrameState[frame_index].TimeToLoad    = now_time - t_start;
+        entry.FrameList [frame_index]                 = pos.FrameIndex;
+        entry.FrameData [frame_index].BaseAddress     = pos.BaseAddress;
+        entry.FrameData [frame_index].BytesReserved   = pos.BytesReserved;
+        entry.FrameData [frame_index].Context         = pos.Context;
+        entry.FrameState[frame_index].LockCount       = 1;
+        entry.FrameState[frame_index].Attributes      = IMAGE_CACHE_ENTRY_FLAG_NONE;
+        entry.FrameState[frame_index].LastRequestTime = now_time;
+        entry.FrameState[frame_index].TimeToLoad      = now_time - t_start;
         entry.FrameCount++;
+        // update the total number of bytes used.
+        AcquireSRWLockExclusive(&cache->AttribLock);
+        cache->TotalBytes += pos.BytesReserved;
+        ReleaseSRWLockExclusive(&cache->AttribLock);
     }
 
-    // update the cache memory load status.
+    // retrieve the cache memory load status.
     int    behavior_id; 
     size_t bytes_total = 0;
     size_t bytes_limit = 0;
-    AcquireSRWLockExclusive(&cache->AttribLock);
-    cache->TotalBytes += pos.BytesReserved;
-    behavior_id        = cache->BehaviorId;
-    bytes_limit        = cache->LimitBytes;
-    bytes_total        = cache->TotalBytes;
-    ReleaseSRWLockExclusive(&cache->AttribLock);
+    AcquireSRWLockShared(&cache->AttribLock);
+    behavior_id = cache->BehaviorId;
+    bytes_limit = cache->LimitBytes;
+    bytes_total = cache->TotalBytes;
+    ReleaseSRWLockShared(&cache->AttribLock);
 
     // are we over the allowed memory budget?
     if (bytes_total > bytes_limit)
