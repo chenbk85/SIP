@@ -125,6 +125,26 @@ struct image_loader_t
     image_load_error_alloc_t  ErrorAlloc;      /// The FIFO node allocator used to write to the error queue.
 };
 
+/// @summary Encapsulates all of the thread-local data required to access an image loader.
+struct thread_image_loader_t
+{
+    thread_image_loader_t(void);
+    ~thread_image_loader_t(void);
+
+    void                      initialize
+    (
+        image_loader_t       *loader
+    );                                         /// Set the target loader and allocate thread-local resources.
+
+    void                      load
+    (
+        image_load_t const   &load_info
+    );                                         /// Request that an image be loaded into memory.
+
+    image_loader_t           *Loader;          /// The image loader to use for all requests.
+    image_load_alloc_t        LoadAlloc;       /// The FIFO node allocator used to submit load requests for the thread.
+};
+
 /*///////////////
 //   Globals   //
 ///////////////*/
@@ -445,4 +465,33 @@ public_function void image_loader_update(image_loader_t *loader)
     // update the state of all active parsers:
     image_loader_update_dds(loader);
     // ...
+}
+
+/// @summary Construct a new image loader instance for the calling thread.
+thread_image_loader_t::thread_image_loader_t(void)
+    :
+    Loader(NULL)
+{
+    fifo_allocator_init(&LoadAlloc);
+}
+
+/// @summary Free thread-local resources.
+thread_image_loader_t::~thread_image_loader_t(void)
+{
+    fifo_allocator_reinit(&LoadAlloc);
+    Loader = NULL;
+}
+
+/// @summary Set the target image loader instance.
+/// @param loader The target image loader.
+void thread_image_loader_t::initialize(image_loader_t *loader)
+{
+    Loader = loader;
+}
+
+/// @summary Queue an image to be loaded into image memory.
+/// @param load_info Information about the image data to load.
+void thread_image_loader_t::load(image_load_t const &load_info)
+{   // TODO(rlk): memory lifetime problem here with the FilePath.
+    image_loader_queue_load(Loader, load_info, &LoadAlloc);
 }
