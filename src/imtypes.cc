@@ -25,10 +25,6 @@
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
-/// @summary Only define DirectDraw and Direct3D constants relating to the DDS 
-/// image format if they haven't already been defined by including system headers.
-#ifndef IMAGE_DEFS_DIRECTX_ENUMS_DEFINED
-
 /// @summary Bitflags for dds_pixelformat_t::Flags. See MSDN documentation at:
 /// http://msdn.microsoft.com/en-us/library/windows/desktop/bb943984(v=vs.85).aspx
 /// for the DDS_PIXELFORMAT structure.
@@ -123,6 +119,22 @@ enum dds_caps4_e
 {
     DDSCAPS4_NONE = 0x00000000U
 };
+
+/// @summary Values for dds_header_dxt10_t::Flags2. See MSDN documentation at:
+/// http://msdn.microsoft.com/en-us/library/windows/desktop/bb943983(v=vs.85).aspx
+/// for the DDS_HEADER_DXT10 structure.
+enum dds_alpha_mode_e
+{
+    DDS_ALPHA_MODE_UNKNOWN                  = 0x00000000U,
+    DDS_ALPHA_MODE_STRAIGHT                 = 0x00000001U,
+    DDS_ALPHA_MODE_PREMULTIPLIED            = 0x00000002U,
+    DDS_ALPHA_MODE_OPAQUE                   = 0x00000003U,
+    DDS_ALPHA_MODE_CUSTOM                   = 0x00000004U
+};
+
+/// @summary Only define DirectDraw and Direct3D constants relating to the DDS 
+/// image format if they haven't already been defined by including system headers.
+#ifndef IMAGE_DEFS_DIRECTX_ENUMS_DEFINED
 
 /// @summary Values for dds_header_dxt10_t::Format. See MSDN documentation at:
 /// http://msdn.microsoft.com/en-us/library/windows/desktop/bb173059(v=vs.85).aspx
@@ -265,18 +277,6 @@ enum d3d11_resource_dimension_e
 enum d3d11_resource_misc_flag_e
 {
     D3D11_RESOURCE_MISC_TEXTURECUBE         = 0x00000004U,
-};
-
-/// @summary Values for dds_header_dxt10_t::Flags2. See MSDN documentation at:
-/// http://msdn.microsoft.com/en-us/library/windows/desktop/bb943983(v=vs.85).aspx
-/// for the DDS_HEADER_DXT10 structure.
-enum dds_alpha_mode_e
-{
-    DDS_ALPHA_MODE_UNKNOWN                  = 0x00000000U,
-    DDS_ALPHA_MODE_STRAIGHT                 = 0x00000001U,
-    DDS_ALPHA_MODE_PREMULTIPLIED            = 0x00000002U,
-    DDS_ALPHA_MODE_OPAQUE                   = 0x00000003U,
-    DDS_ALPHA_MODE_CUSTOM                   = 0x00000004U
 };
 
 #endif /* !defined(IMAGE_DEFS_DIRECTX_ENUMS_DEFINED) */
