@@ -397,6 +397,7 @@ inline void frame_load_queue_list_create(frame_load_queue_list_t<T> *list, size_
             list->QueueList      = storage;
             list->QueueCapacity  = capacity;
         }
+        dbg_printf("Alloc: 0x%p\n", storage);
     }
 }
 
@@ -405,9 +406,11 @@ inline void frame_load_queue_list_create(frame_load_queue_list_t<T> *list, size_
 template <typename T>
 inline void frame_load_queue_list_delete(frame_load_queue_list_t<T> *list)
 {
-    free(list->QueueList); list->QueueList = NULL;
+    dbg_printf("Free:    0x%p\n", list->QueueList);
+    free(list->QueueList); 
     list->QueueCount     = 0;
     list->QueueCapacity  = 0;
+    list->QueueList      = NULL;
 }
 
 /// @summary Mark a frame load queue list as empty without freeing any memory.
@@ -440,9 +443,10 @@ inline void frame_load_queue_list_put(frame_load_queue_list_t<T> *list, T *queue
     {
         size_t old_amount = list->QueueCapacity;
         size_t new_amount = calculate_capacity(old_amount, old_amount+1, 8, 8);
-        T    **new_queues =(T**) realloc(list->QueueList, new_amount * sizeof(T*));
+        T    **new_queues =(T**) realloc(list->QueueList , new_amount * sizeof(T*));
         if (new_queues != NULL)
         {   // memory allocation was successful. update state.
+            dbg_printf("Realloc: 0x%p -> 0x%p\n", list->QueueList, new_queues);
             list->QueueList     = new_queues;
             list->QueueCapacity = new_amount;
         }
@@ -1366,10 +1370,10 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
                 // remove from the list by swapping the last item into place.
                 size_t this_frame = frame_index;
                 size_t last_frame = load.FrameCount - 1;
-                load.FrameList   [this_frame] = load.FrameList   [last_frame];
-                load.RequestTime [this_frame] = load.RequestTime [last_frame];
-                load.ErrorQueues [this_frame] = load.ErrorQueues [last_frame];
-                load.ResultQueues[this_frame] = load.ResultQueues[last_frame];
+                array_swap(load.FrameList   , this_frame, last_frame);
+                array_swap(load.RequestTime , this_frame, last_frame);
+                array_swap(load.ErrorQueues , this_frame, last_frame);
+                array_swap(load.ResultQueues, this_frame, last_frame);
                 load.FrameCount--;
                 // if there are no frames remaining to load, remove the record.
                 if (load.FrameCount == 0)
@@ -1543,18 +1547,55 @@ public_function void image_cache_delete(image_cache_t *cache)
     spsc_fifo_u_delete(&cache->LoadQueue);
     fifo_allocator_reinit(&cache->LoadAlloc);
 
+    for (size_t i = 0, n = cache->LoadCapacity; i < n; ++i)
+    {
+        for (size_t j = 0, m = cache->LoadList[i].FrameCapacity; j < m; ++j)
+        {
+            frame_load_queue_list_delete(&cache->LoadList[i].ErrorQueues [j]);
+            frame_load_queue_list_delete(&cache->LoadList[i].ResultQueues[j]);
+        }
+        free(cache->LoadList[i].ErrorQueues);
+        free(cache->LoadList[i].ResultQueues);
+        free(cache->LoadList[i].RequestTime);
+        free(cache->LoadList[i].FrameList);
+    }
     free(cache->LoadList);
     cache->LoadCount    = 0;
     cache->LoadCapacity = 0;
     cache->LoadList     = NULL;
     id_table_delete(&cache->LoadIds);
 
+    for (size_t i = 0, n = cache->EntryCapacity; i < n; ++i)
+    {
+        free(cache->EntryList[i].FrameState);
+        free(cache->EntryList[i].FrameData);
+        free(cache->EntryList[i].FrameList);
+    }
     free(cache->EntryList);
     cache->EntryCount    = 0;
     cache->EntryCapacity = 0;
     cache->EntryList     = NULL;
     id_table_delete(&cache->EntryIds);
 
+    for (size_t i = 0, n = cache->ImageCapacity; i < n; ++i)
+    {   // clean up file data (file list, file paths):
+        for (size_t j = 0, m = cache->FileData[i].FileCapacity; j < m; ++j)
+        {
+            free((void*)cache->FileData[i].FileList[j].FilePath);
+        }
+        free(cache->FileData[i].FileList);
+        cache->FileData[i].FileList      = NULL;
+        cache->FileData[i].FileCount     = 0;
+        cache->FileData[i].FileCapacity  = 0;
+
+        // clean up image metadata (level info, block offsets):
+        free(cache->MetaData[i].BlockOffsets);
+        free(cache->MetaData[i].LevelInfo);
+        cache->MetaData[i].ElementCount = 0;
+        cache->MetaData[i].LevelCount   = 0;
+        cache->MetaData[i].LevelInfo    = NULL;
+        cache->MetaData[i].BlockOffsets = NULL;
+    }
     free(cache->MetaData);
     free(cache->FileData);
     cache->ImageCount    = 0;
