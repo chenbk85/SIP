@@ -218,6 +218,7 @@ internal_function bool image_loader_start_dds(image_loader_t *loader, size_t ima
     parse_config.ImageId                  = request.ImageId;
     parse_config.FirstFrame               = request.FirstFrame;
     parse_config.FinalFrame               = request.FinalFrame;
+    parse_config.Memory                   = loader->ImageMemory;
     parse_config.Decoder                  = dds;
     parse_config.Metadata                 =&loader->ImageMetadata[image_index];
     parse_config.DefinitionQueue          = loader->DefinitionQueue;
