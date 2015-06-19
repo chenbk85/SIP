@@ -46,6 +46,11 @@ enum pr_command_type_e : uint16_t
     /// @param blue A 32-bit floating-point value in [0, 1] specifying the blue channel value.
     /// @param alpha A 32-bit floating-point value in [0, 1] specifying the alpha channel value.
     PR_COMMAND_CLEAR_COLOR_BUFFER   = 2,
+    /// @summary Process and display a 2D image.
+    /// @param image_id The application-defined identifier of the logical image.
+    /// @param frame_index The zero-based index of the frame to display.
+    /// ...
+    PR_COMMAND_DRAW_IMAGE_2D        = 3,
 };
 
 /// @summary Defines the structure of a single presentation command. Each command consists
@@ -90,6 +95,28 @@ struct pr_clear_color_buffer_data_t
     float              Alpha;                 /// The value to write to the alpha channel.
 };
 
+/// @summary Define the data associated with PR_COMMAND_DRAW_IMAGE_2D.
+struct pr_draw_image2d_data_t
+{
+    uintptr_t          ImageId;               /// The application-defined logical image identifier.
+    uintptr_t          PipelineId;            /// The identifier of the presentation pipeline.
+    uint32_t           FrameId;               /// The zero-based index of the frame.
+    uint32_t           DXGIFormat;            /// One of dxgi_format_e specifying the data storage format.
+    uint32_t           ImageWidth;            /// The total width of the image, in pixels.
+    uint32_t           ImageHeight;           /// The total height of the image, in pixels.
+    uint32_t           SourceX;               /// The x-coordinate of the upper-left corner of the source rectangle on the image.
+    uint32_t           SourceY;               /// The y-coordinate of the upper-left corner of the source rectangle on the image.
+    uint32_t           SourceWidth;           /// The width of the source rectangle, in pixels.
+    uint32_t           SourceHeight;          /// The height of the source rectangle, in pixels.
+    uint32_t           TargetX;               /// The x-coordinate of the upper-left corner of the image on the render target.
+    uint32_t           TargetY;               /// The y-coordinate of the upper-left corner of the image on the render target.
+    uint32_t           TargetWidth;           /// The width of the destination rectangle, in pixels.
+    uint32_t           TargetHeight;          /// The height of the destination rectangle, in pixels.
+    float              Rotation;              /// The image rotation value, in radians.
+    void              *PixelData;             /// The locked pixel data of the image.
+    image_cache_t     *ImageCache;            /// The image cache managing the pixel data for the image.
+};
+
 /*///////////////
 //   Globals   //
 ///////////////*/
@@ -100,7 +127,8 @@ static char const *PR_COMMAND_NAMES[] =
 {
     "PR_COMMAND_NO_OP", 
     "PR_COMMAND_END_OF_FRAME",
-    "PR_COMMAND_CLEAR_COLOR_BUFFER"
+    "PR_COMMAND_CLEAR_COLOR_BUFFER", 
+    "PR_COMMAND_DRAW_IMAGE_2D"
 };
 
 /*///////////////////////
@@ -348,4 +376,52 @@ public_function void pr_command_clear_color_buffer(pr_command_list_t *cmdlist, f
     data->Green = g;
     data->Blue  = b;
     data->Alpha = a;
+}
+
+/// @summary Write a command to draw a 2D image, possibly with rotation, scaling and image processing.
+/// The presentation layer will automatically unlock the image data after the command is processed.
+/// @param cmdlist The command list to submit to.
+/// @param image_id The application-defined logical image identifier.
+/// @param frame_index The zero-based index of the frame being displayed.
+/// @param format One of dxgi_format_e specifying the data storage format.
+/// @param image_width The total width of the supplied image data, in pixels.
+/// @param image_height The total height of the supplied image data, in pixels.
+/// @param src_x The x-coordinate of the upper-left corner of the source rectangle on the image.
+/// @param src_y The y-coordinate of the upper-left corner of the source rectangle on the image.
+/// @param src_w The width of the source rectangle on the image, in pixels.
+/// @param src_h The height of the source rectangle on the image, in pixels.
+/// @param dst_x The x-coordinate of the upper-left corner of the destination rectangle on the render target.
+/// @param dst_y The y-coordinate of the upper-left corner of the destination rectangle on the render target.
+/// @param dst_w The width of the destination rectangle, in pixels.
+/// @param dst_h The height of the destination rectangle, in pixels.
+/// @param rotation The image rotation, specified in radians.
+/// @param pixels The locked pixel data for the frame.
+/// @param cache The image cache managing the image data.
+/// @param pipeline_id The application-defined image presentation pipeline identifier.
+public_function void pr_command_draw_image_2d(pr_command_list_t *cmdlist, uintptr_t image_id, size_t frame_index, uint32_t format, size_t image_width, size_t image_height, size_t src_x, size_t src_y, size_t src_w, size_t src_h, size_t dst_x, size_t dst_y, size_t dst_w, size_t dst_h, float rotation, void *pixels, image_cache_t *cache, uintptr_t pipeline_id)
+{
+    size_t        dsz = sizeof(pr_draw_image2d_data_t);
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
+    cmd->CommandId    = PR_COMMAND_DRAW_IMAGE_2D;
+    cmd->DataSize     = (uint16_t) dsz;
+
+    // TODO(rlk): data validation is probably worth it here.
+    pr_draw_image2d_data_t *data = (pr_draw_image2d_data_t*) cmd->Data;
+    data->ImageId     = image_id;
+    data->PipelineId  = pipeline_id;
+    data->FrameId     = (uint32_t) frame_index;
+    data->DXGIFormat  = (uint32_t) format;
+    data->ImageWidth  = (uint32_t) image_width;
+    data->ImageHeight = (uint32_t) image_height;
+    data->SourceX     = (uint32_t) src_x;
+    data->SourceY     = (uint32_t) src_y;
+    data->SourceWidth = (uint32_t) src_w;
+    data->SourceHeight= (uint32_t) src_h;
+    data->TargetX     = (uint32_t) dst_x;
+    data->TargetY     = (uint32_t) dst_y;
+    data->TargetWidth = (uint32_t) dst_w;
+    data->TargetHeight= (uint32_t) dst_h;
+    data->Rotation    = rotation;
+    data->PixelData   = pixels;
+    data->ImageCache  = cache;
 }
