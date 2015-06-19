@@ -8,14 +8,26 @@
 
 #pragma warning (disable:4505) // unreferenced local function was removed
 
+#ifndef _CRT_SECURE_NO_DEPRECATE
+#define _CRT_SECURE_NO_DEPRECATE
+#endif
+
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 /*////////////////
 //   Includes   //
 ////////////////*/
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <Windows.h>
+#include <objbase.h>
+#include <ShlObj.h>
 #include <tchar.h>
+#include <float.h>
 
 #include <d2d1_1.h>
 #include <d3d11_1.h>
@@ -23,6 +35,28 @@
 
 #include "intrinsics.h"
 #include "atomic_fifo.h"
+
+#include "runtime.cc"
+
+#include "idtable.cc"
+#include "strtable.cc"
+#include "parseutl.cc"
+
+#include "filepath.cc"
+#include "iobuffer.cc"
+#include "aiodriver.cc"
+#include "iodecoder.cc"
+#include "piodriver.cc"
+#include "vfsdriver.cc"
+#include "threadio.cc"
+
+#include "imtypes.cc"
+#include "immemory.cc"
+#include "imencode.cc"
+#include "imparser.cc"
+#include "imparser_dds.cc"
+#include "imloader.cc"
+#include "imcache.cc"
 
 #include "prcmdlist.cc"
 
@@ -503,7 +537,7 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
             while (read_ptr < end_ptr)
             {
                 pr_command_t *cmd_info = (pr_command_t*) read_ptr;
-                size_t        cmd_size =  cmd_info->DataSize;
+                size_t        cmd_size =  PR_COMMAND_SIZE_BASE + cmd_info->DataSize;
                 switch (cmd_info->CommandId)
                 {
                 case PR_COMMAND_NO_OP:
