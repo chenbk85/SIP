@@ -399,6 +399,18 @@ inline int_type mix_bits(int_type x)
     return uint_mixer(x);
 }
 
+/// @summary Swaps two array elements by copying.
+/// @param list The array containing the two items.
+/// @param a The zero-based index of the first item.
+/// @param b The zero-based index of the second item.
+template <typename T>
+inline void array_swap(T *list, size_t a, size_t b)
+{
+    T    t  = list[a];
+    list[a] = list[b];
+    list[b] = t;
+}
+
 #undef  PLATFORM_INTRINSICS_DEFINED
 #define PLATFORM_INTRINSICS_DEFINED
 #endif /* !defined(INTRINSICS_H) */
