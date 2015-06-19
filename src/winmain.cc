@@ -263,225 +263,52 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     trace_thread_id("main");
     win32_runtime_elevate();
 
-    aio_driver_t     aio;
-    aio_driver_open(&aio);
-
-    pio_driver_t     pio;
-    pio_driver_open(&pio, &aio);
-
-    vfs_driver_t     vfs;
-    vfs_driver_open(&vfs, &aio, &pio);
-
-    thread_io_t    io;
-    io.initialize(&vfs);
-
-    io.mount(VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
-    io.mount(VFS_KNOWN_PATH_PUBLIC_DOCUMENTS, "/doc", 0, 1);
-    io.put_file("/doc/test_save.txt", "This is a test (user)...\n", 25);
-    io.unmount(0); // remove user documents mount
-    io.put_file("/doc/test_save.txt", "This is a test (public)...\n", 27);
-    io.mount(VFS_KNOWN_PATH_USER_DOCUMENTS  , "/doc", 1, 0);
-    //io.mountv("/doc/test_archive.tar", "/doc", 2, 2);
-    uint64_t stns = pio_driver_nanotime(&pio);
-    stream_decoder_t *d1 = io.load_file("/doc/test_save.txt", VFS_FILE_HINT_NONE, VFS_DECODER_HINT_USE_DEFAULT, 0, 0, NULL);
-    if (d1 != NULL)
-    {   // here's how you read data from the stream.
-        while (!d1->atend())
-        {   // refill the stream with available data.
-            switch (d1->refill(d1))
-            {
-            case STREAM_REFILL_RESULT_START:
-                break; // begin reading decoded data.
-            case STREAM_REFILL_RESULT_YIELD:
-                pio_driver_poll(&pio);
-                aio_driver_poll(&aio);
-                continue; // try and refill again later.
-            case STREAM_REFILL_RESULT_ERROR:
-                break; // check d1->ErrorCode.
-            }
-            // read as much decoded data as possible.
-            while  (d1->ReadCursor != d1->FinalByte)
-            {
-                char ch     = (char) *d1->ReadCursor++;
-                char buf[2] = {ch,0};
-                OutputDebugStringA(buf);
-            }
-            pio_driver_poll(&pio);
-            aio_driver_poll(&aio);
-        }
-        d1->release();
-    }
-    uint64_t etns = pio_driver_nanotime(&pio);
-    uint64_t dtns = etns - stns;
-    double   dts  = (double) dtns / (double) 1000000000ULL;
-    vfs_driver_close(&vfs);
-    pio_driver_close(&pio);
-    aio_driver_close(&aio);
-
-    image_memory_t mem;
-    image_memory_create(&mem, 128);
-
-    image_definition_t img;
-    img.ImageId        = 0;
-    img.ImageFormat    = DXGI_FORMAT_R8G8B8A8_UNORM;
-    img.Width          = 2048;
-    img.Height         = 2048;
-    img.SliceCount     = 1;
-    img.ElementIndex   = 0;
-    img.ElementCount   = 2;
-    img.BytesPerPixel  = 4;
-    img.BytesPerBlock  = 0;
-    img.Compression    = IMAGE_COMPRESSION_NONE;
-    img.LevelCount     = 1;
-    img.BlockOffsets    =(stream_decode_pos_t*) malloc(2 * sizeof(stream_decode_pos_t));
-    img.BlockOffsets[0].FileOffset   = 0;
-    img.BlockOffsets[0].DecodeOffset = 0;
-    img.BlockOffsets[1].FileOffset   = 4 * 2048 * 2048;
-    img.BlockOffsets[1].DecodeOffset = 0;
-    img.LevelInfo      =(dds_level_desc_t    *) malloc(2 * sizeof(dds_level_desc_t));
-    img.LevelInfo[0].Index           = 0;
-    img.LevelInfo[0].Width           = 2048;
-    img.LevelInfo[0].Height          = 2048;
-    img.LevelInfo[0].Slices          = 1;
-    img.LevelInfo[0].BytesPerElement = 4;
-    img.LevelInfo[0].BytesPerRow     = 4 * 2048;
-    img.LevelInfo[0].BytesPerSlice   = 4 * 2048 * 2048;
-    img.LevelInfo[0].DataSize        = 4 * 2048 * 2048;
-    img.LevelInfo[0].Format          = DXGI_FORMAT_R8G8B8A8_UNORM;
-    img.LevelInfo[1].Index           = 0;
-    img.LevelInfo[1].Width           = 2048;
-    img.LevelInfo[1].Height          = 2048;
-    img.LevelInfo[1].Slices          = 1;
-    img.LevelInfo[1].BytesPerElement = 4;
-    img.LevelInfo[1].BytesPerRow     = 4 * 2048;
-    img.LevelInfo[1].BytesPerSlice   = 4 * 2048 * 2048;
-    img.LevelInfo[1].DataSize        = 4 * 2048 * 2048;
-    img.LevelInfo[1].Format          = DXGI_FORMAT_R8G8B8A8_UNORM;
-
-    uint32_t ime = image_memory_reserve_image(&mem, &img, IMAGE_ACCESS_2D);
-    dds_level_desc_t l0;
-    image_storage_info_t stor;
-    void    *pel = image_memory_lock_element(&mem, 0, 0, &l0, stor);
-    image_memory_unlock_element(&mem, 0, 0);
-    image_memory_evict_element(&mem, 0, pel, stor.BytesReserved, false);
-    image_memory_drop_image(&mem, 0);
-    image_memory_delete(&mem);
-    image_definition_free(&img);
-
-    size_t ofs_a = 0;
-    size_t ofs_b = 0;
-    size_t ofs_c = 0;
-    string_table_t st;
-    string_table_create(&st, 128, 0);
-    string_table_put(&st, "String A", ofs_a);
-    string_table_put(&st, "String B", ofs_b);
-    OutputDebugStringA(string_table_get(&st, ofs_a));
-    OutputDebugStringA(string_table_get(&st, ofs_b));
-    assert(string_table_put(&st, "String A", ofs_c) == string_table_get(&st, ofs_a));
-    string_table_delete(&st);
-
-    aio_driver_open(&aio);
-    pio_driver_open(&pio, &aio);
-    vfs_driver_open(&vfs, &aio, &pio);
-    io.initialize(&vfs);
+    // initialize the I/O subsystem.
+    aio_driver_t aio; aio_driver_open(&aio);
+    pio_driver_t pio; pio_driver_open(&pio, &aio);
+    vfs_driver_t vfs; vfs_driver_open(&vfs, &aio, &pio);
+    thread_io_t   io; io.initialize(&vfs);
     io.mount(VFS_KNOWN_PATH_EXECUTABLE, "/exec", 0, 0);
     io.mountv("/exec/images", "/images", 0, 1);
 
-    image_memory_t       imm;
-    image_memory_create(&imm, 256);
+    // initialize the imaging subsystem.
+    image_cache_t              imc;
+    image_loader_t             imld;
+    image_memory_t             immemory;
+    image_cache_config_t       cache_cfg;
+    image_loader_config_t      loader_cfg;
+    image_cache_error_queue_t  imfail_queue;
+    image_cache_result_queue_t imlock_queue;
+    thread_image_cache_t       imcache;
+    thread_image_loader_t      imloader;
 
-    image_cache_t        imc;
-    image_cache_config_t imcc;
-    imcc.Behavior      = IMAGE_CACHE_BEHAVIOR_MANUAL;
-    imcc.CacheSize     = 16 * 1024 * 1024; // 16MB
-    image_cache_create (&imc , 256, imcc);
+    image_memory_create(&immemory, 256);
+    
+    cache_cfg.Behavior  = IMAGE_CACHE_BEHAVIOR_MANUAL;
+    cache_cfg.CacheSize = 128 * 1024 * 1024;
+    image_cache_create(&imc, 1, cache_cfg);
+    imcache.initialize(&imc);
+    imcache.add_source(0, "/images/test.dds");
+    mpsc_fifo_u_init(&imfail_queue);
+    mpsc_fifo_u_init(&imlock_queue);
 
-    image_cache_error_queue_t  errq;
-    image_cache_result_queue_t resq;
-    mpsc_fifo_u_init(&errq);
-    mpsc_fifo_u_init(&resq);
-
-    thread_image_cache_t       cache;
-    cache.initialize(&imc);
-    cache.add_source(0, "/images/test.dds");
-    cache.lock(0, 0, IMAGE_ALL_FRAMES, &resq, &errq, 0);
-
-    // the following items are owned by the image loader.
-    image_loader_t        loader;
-    image_load_alloc_t    loadalloc;
-    image_loader_config_t load_cfg;
-    load_cfg.VFSDriver      = &vfs;
-    load_cfg.ImageMemory    = &imm;
-    load_cfg.DefinitionQueue= &imc.DefinitionQueue;
-    load_cfg.PlacementQueue = &imc.LocationQueue;
-    load_cfg.ErrorQueue     = NULL;
-    load_cfg.ImageCapacity  = 1;
-    load_cfg.Compression    = IMAGE_COMPRESSION_NONE;
-    load_cfg.Encoding       = IMAGE_ENCODING_RAW;
-    image_loader_create(&loader, load_cfg);
-    fifo_allocator_init(&loadalloc);
-
-    size_t nexpected  = 1;
-    size_t ncomplete  = 0;
-    while (ncomplete != nexpected)
-    {
-        image_load_t ld;
-        while(spsc_fifo_u_consume(&imc.LoadQueue, ld))
-        {   // dispatch the load request.
-            dbg_printf("Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
-            image_loader_queue_load(&loader, ld, &loadalloc);
-        }
-
-        image_location_t ev;
-        while (spsc_fifo_u_consume(&imc.EvictQueue, ev))
-        {   // TODO(rlk): dispatch the eviction request.
-            dbg_printf("Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
-            image_memory_evict_element(&imm, ev.ImageId, ev.FrameIndex);
-            ncomplete++;
-        }
-
-        image_basic_data_t attribs;
-        if (cache.image_attributes(0, attribs))
-        {
-            nexpected = attribs.ElementCount;
-        }
-
-        image_cache_error_t cache_err;
-        while (mpsc_fifo_u_consume(&errq, cache_err))
-        {   // TODO(rlk): handle errors.
-            dbg_printf("Error: %08X on image %Iu frames %Iu-%Iu.\n", cache_err.ErrorCode, cache_err.ImageId, cache_err.FirstFrame, cache_err.FinalFrame);
-        }
-
-        image_cache_result_t res;
-        while (mpsc_fifo_u_consume(&resq, res))
-        {   // TODO(rlk): process the pixel data.
-            dbg_printf("Lock : Frame %Iu of image %Iu at %p (%Iu bytes).\n", res.FrameIndex, res.ImageId, res.BaseAddress, res.BytesReserved);
-            cache.unlock(res.ImageId, res.FrameIndex, res.FrameIndex, IMAGE_CACHE_COMMAND_OPTION_EVICT);
-        }
-
-        // drive file I/O:
-        pio_driver_poll(&pio);
-        aio_driver_poll(&aio);
-
-        // drive file parsing:
-        image_loader_update(&loader);
-
-        // drive the image cache.
-        image_cache_update(&imc);
-    }
-
-    vfs_driver_close(&vfs);
-    pio_driver_close(&pio);
-    aio_driver_close(&aio);
-
-    image_cache_delete(&imc);
-    image_memory_delete(&imm);
-    image_loader_delete(&loader);
-    fifo_allocator_reinit(&loadalloc);
+    loader_cfg.VFSDriver       = &vfs;
+    loader_cfg.ImageMemory     = &immemory;
+    loader_cfg.DefinitionQueue = &imc.DefinitionQueue;
+    loader_cfg.PlacementQueue  = &imc.LocationQueue;
+    loader_cfg.ErrorQueue      = NULL;
+    loader_cfg.ImageCapacity   = 1;
+    loader_cfg.Compression     = IMAGE_COMPRESSION_NONE;
+    loader_cfg.Encoding        = IMAGE_ENCODING_RAW;
+    image_loader_create(&imld, loader_cfg);
+    imloader.initialize(&imld);
+    
+    // TODO(rlk): perhaps can specify flags like IMAGE_LOCK_NO_NOTIFY to just pre-load.
+    imcache.lock(0, 0, IMAGE_ALL_FRAMES, &imlock_queue, &imfail_queue, 0);
 
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
-    if (!create_file_list(&image_files, 0, 0) || !enumerate_files(&image_files, "images", "*.*", true))
+    /*if (!create_file_list(&image_files, 0, 0) || !enumerate_files(&image_files, "images", "*.*", true))
     {
         OutputDebugString(_T("ERROR: Unable to enumerate files in images subdirectory.\n"));
         return 0;
@@ -490,7 +317,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     {
         OutputDebugString(_T("ERROR: No images found in images subdirectory.\n"));
         return 0;
-    }
+    }*/
     
     // @TODO(rlk): init I/O driver and submit all images.
 
@@ -528,7 +355,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         OutputDebugString(_T("ERROR: Unable to create main application window.\n"));
         return 0;
     }
-    if (!display_driver_create(&display, PRESENTATION_TYPE_DIRECT2D, main_window))
+    if (!display_driver_create(&display, PRESENTATION_TYPE_GDI, main_window))
     {
         OutputDebugString(_T("ERROR: Unable to initialize the display driver.\n"));
         return 0;
@@ -549,6 +376,9 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     // initialize timer snapshots used to throttle update rate.
     int64_t last_clock     =  ticktime();
     int64_t flip_clock     =  ticktime();
+
+    int64_t frame_update_time = ticktime();
+    size_t  frame_index = 0;
 
     // run the main window message pump and user interface loop.
     while (Global_IsRunning)
@@ -577,6 +407,50 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         // this consists primarily of queueing commands to the display driver.
         pr_command_list_t *cmdlist = display.create_command_list();
         pr_command_clear_color_buffer(cmdlist, 1.0, 0.0, 0.0, 1.0);
+
+        // pump everything
+        pio_driver_poll(&pio);  // TODO(rlk): move to background thread
+        aio_driver_poll(&aio);  // TODO(rlk): move to background thread
+        image_loader_update(&imld);
+        image_cache_update(&imc);
+        image_load_t ld;
+        while(spsc_fifo_u_consume(&imc.LoadQueue, ld))
+        {
+            dbg_printf("Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
+            imloader.load(ld);
+        }
+        image_location_t ev;
+        while (spsc_fifo_u_consume(&imc.EvictQueue, ev))
+        {
+            dbg_printf("Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
+            //image_memory_evict_element(&immemory, ev.ImageId, ev.FrameIndex);
+        }
+
+        image_cache_error_t cache_err;
+        while (mpsc_fifo_u_consume(&imfail_queue, cache_err))
+        {   // TODO(rlk): handle errors.
+            dbg_printf("Error: %08X on image %Iu frames %Iu-%Iu.\n", cache_err.ErrorCode, cache_err.ImageId, cache_err.FirstFrame, cache_err.FinalFrame);
+        }
+
+        image_cache_result_t res;
+        while (mpsc_fifo_u_consume(&imlock_queue, res))
+        {   // TODO(rlk): process the pixel data.
+            dbg_printf("Lock : Frame %Iu of image %Iu at %p (%Iu bytes).\n", res.FrameIndex, res.ImageId, res.BaseAddress, res.BytesReserved);
+            RECT rc; GetWindowRect(main_window, &rc);
+            image_basic_data_t attr;
+            imcache.image_attributes(res.ImageId, attr);
+            pr_command_draw_image_2d(cmdlist, res.ImageId, res.FrameIndex, attr.ImageFormat, attr.Width, attr.Height, 0, 0, attr.Width, attr.Height, 0, 0, /*size_t(rc.right-rc.left)*/attr.Width, /*size_t(rc.bottom-rc.top)*/attr.Height, 0.0f, res.BaseAddress, &imc, 0);
+            int64_t nowt = ticktime();
+            if (ticks_to_seconds(nowt-frame_update_time) > 1.0f)
+            {   // time to display the next frame of the image.
+                frame_index=(frame_index+1)%attr.ElementCount;
+                frame_update_time=nowt;
+            }
+            //imcache.unlock(res.ImageId, res.FrameIndex, res.FrameIndex, 0);
+            imcache.lock(0, frame_index, frame_index, &imlock_queue, &imfail_queue, 0);
+        }
+
+        // ...
         pr_command_end_of_frame(cmdlist);
         display.submit_command_list(cmdlist, false, 0);
 
