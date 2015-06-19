@@ -89,6 +89,19 @@ global_variable WINDOWPLACEMENT Global_WindowPlacement = {0};
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
+/// @summary Format a message and write it to the debug output channel.
+/// @param fmt The printf-style format string.
+/// ... Substitution arguments.
+internal_function void dbg_printf(char const *fmt, ...)
+{
+    char buffer[1024];
+    va_list  args;
+    va_start(args, fmt);
+    vsnprintf_s(buffer, 1024, fmt, args);
+    va_end  (args);
+    OutputDebugStringA(buffer);
+}
+
 /// @summary Retrieve the current high-resolution timer value. 
 /// @return The current time value, specified in system ticks.
 internal_function inline int64_t ticktime(void)
@@ -394,15 +407,19 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     cache.lock(0, 0, IMAGE_ALL_FRAMES, &resq, &errq, 0);
 
     // the following items are owned by the image loader.
-    image_definition_alloc_t   imgdef_alloc;
-    fifo_allocator_init(&imgdef_alloc);
-    image_location_alloc_t     imgpos_alloc;
-    fifo_allocator_init(&imgpos_alloc);
-
-    stream_decoder_t  *dds = NULL;
-    image_encoder_t   *enc = NULL;
-    dds_parser_state_t dds_parser;
-    image_definition_t dds_info;
+    image_loader_t        loader;
+    image_load_alloc_t    loadalloc;
+    image_loader_config_t load_cfg;
+    load_cfg.VFSDriver      = &vfs;
+    load_cfg.ImageMemory    = &imm;
+    load_cfg.DefinitionQueue= &imc.DefinitionQueue;
+    load_cfg.PlacementQueue = &imc.LocationQueue;
+    load_cfg.ErrorQueue     = NULL;
+    load_cfg.ImageCapacity  = 1;
+    load_cfg.Compression    = IMAGE_COMPRESSION_NONE;
+    load_cfg.Encoding       = IMAGE_ENCODING_RAW;
+    image_loader_create(&loader, load_cfg);
+    fifo_allocator_init(&loadalloc);
 
     size_t nexpected  = 1;
     size_t ncomplete  = 0;
@@ -410,43 +427,15 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     {
         image_load_t ld;
         while(spsc_fifo_u_consume(&imc.LoadQueue, ld))
-        {   // TODO(rlk): dispatch the load request.
-            char b[1024] = {};
-            sprintf_s(b, "Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
-            OutputDebugStringA(b);
-
-            // load the data from the file.
-            dds = io.load_file(ld.FilePath, ld.FileHints, ld.DecoderHint, ld.ImageId, 0, NULL);
-
-            // set up the parser.
-            image_parser_config_t         parse_config;
-            parse_config.ImageId          = ld.ImageId;
-            parse_config.Context          = (uintptr_t) &imc; // the image cache
-            parse_config.FirstFrame       = ld.FirstFrame;
-            parse_config.FinalFrame       = ld.FinalFrame;
-            parse_config.Memory           =&imm;
-            parse_config.Decoder          = dds;
-            parse_config.Metadata         =&dds_info;         // obviously wrong for real-world usage
-            parse_config.DefinitionQueue  =&imc.DefinitionQueue;
-            parse_config.DefinitionAlloc  =&imgdef_alloc;
-            parse_config.PlacementQueue   =&imc.LocationQueue;
-            parse_config.PlacementAlloc   =&imgpos_alloc;
-            parse_config.ParseFlags       = IMAGE_PARSER_FLAGS_READ_ALL_DATA | IMAGE_PARSER_FLAGS_START_AT_OFFSET;
-            parse_config.StartOffset      ={0, 0};
-            parse_config.Compression      = IMAGE_COMPRESSION_NONE;
-            parse_config.Encoding         = IMAGE_ENCODING_RAW;
-            if (ld.FinalFrame == IMAGE_ALL_FRAMES)   parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_ALL_FRAMES;
-            else if (ld.FirstFrame != ld.FinalFrame) parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_FRAME_RANGE;
-            else                                     parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_SINGLE_FRAME;
-            dds_parser_state_init(&dds_parser, parse_config);
+        {   // dispatch the load request.
+            dbg_printf("Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
+            image_loader_queue_load(&loader, ld, &loadalloc);
         }
 
         image_location_t ev;
         while (spsc_fifo_u_consume(&imc.EvictQueue, ev))
         {   // TODO(rlk): dispatch the eviction request.
-            char b[1024] = {};
-            sprintf_s(b, "Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
-            OutputDebugStringA(b);
+            dbg_printf("Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
             image_memory_evict_element(&imm, ev.ImageId, ev.FrameIndex);
             ncomplete++;
         }
@@ -457,20 +446,16 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             nexpected = attribs.ElementCount;
         }
 
-        image_cache_error_t err;
-        while (mpsc_fifo_u_consume(&errq, err))
+        image_cache_error_t cache_err;
+        while (mpsc_fifo_u_consume(&errq, cache_err))
         {   // TODO(rlk): handle errors.
-            char b[1024] = {};
-            sprintf_s(b, "Error: %08X on image %Iu frames %Iu-%Iu.\n", err.ErrorCode, err.ImageId, err.FirstFrame, err.FinalFrame);
-            OutputDebugStringA(b);
+            dbg_printf("Error: %08X on image %Iu frames %Iu-%Iu.\n", cache_err.ErrorCode, cache_err.ImageId, cache_err.FirstFrame, cache_err.FinalFrame);
         }
 
         image_cache_result_t res;
         while (mpsc_fifo_u_consume(&resq, res))
         {   // TODO(rlk): process the pixel data.
-            char b[1024] = {};
-            sprintf_s(b, "Lock : Frame %Iu of image %Iu at %p (%Iu bytes).\n", res.FrameIndex, res.ImageId, res.BaseAddress, res.BytesReserved);
-            OutputDebugStringA(b);
+            dbg_printf("Lock : Frame %Iu of image %Iu at %p (%Iu bytes).\n", res.FrameIndex, res.ImageId, res.BaseAddress, res.BytesReserved);
             cache.unlock(res.ImageId, res.FrameIndex, res.FrameIndex, IMAGE_CACHE_COMMAND_OPTION_EVICT);
         }
 
@@ -479,25 +464,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         aio_driver_poll(&aio);
 
         // drive file parsing:
-        if (dds != NULL)
-        {
-            int state  = dds_parser_update(&dds_parser);
-            if (state == DDS_PARSE_RESULT_COMPLETE)
-            {
-                dds->release();
-                delete enc;
-                dds = NULL; enc = NULL;
-            }
-            if (state == DDS_PARSE_RESULT_ERROR)
-            {
-                char b[1024];
-                sprintf_s(b, "Error %u parsing DDS file for image %Iu\n.", dds->ErrorCode, dds->Identifier);
-                OutputDebugStringA(b);
-                dds->release();
-                delete enc;
-                dds = NULL; enc = NULL;
-            }
-        }
+        image_loader_update(&loader);
 
         // drive the image cache.
         image_cache_update(&imc);
@@ -509,8 +476,8 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
     image_cache_delete(&imc);
     image_memory_delete(&imm);
-    fifo_allocator_reinit(&imgpos_alloc);
-    fifo_allocator_reinit(&imgdef_alloc);
+    image_loader_delete(&loader);
+    fifo_allocator_reinit(&loadalloc);
 
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
