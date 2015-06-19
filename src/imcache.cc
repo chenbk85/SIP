@@ -245,8 +245,8 @@ struct image_cache_t
     typedef image_definition_queue_t                  definition_queue_t;
     typedef image_location_alloc_t                    location_alloc_t;
     typedef image_location_queue_t                    location_queue_t;
-    typedef image_load_alloc_t                        load_alloc_t;
-    typedef image_load_queue_t                        load_queue_t;
+    typedef fifo_allocator_t<image_load_t>            load_alloc_t;
+    typedef spsc_fifo_u_t   <image_load_t>            load_queue_t;
     typedef image_eviction_alloc_t                    eviction_alloc_t;
     typedef image_eviction_queue_t                    eviction_queue_t;
     typedef image_command_alloc_t                     command_alloc_t;

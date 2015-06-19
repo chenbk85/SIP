@@ -56,7 +56,7 @@
 #include "imencode.cc"
 #include "imparser.cc"
 #include "imparser_dds.cc"
-//#include "imloader.cc"
+#include "imloader.cc"
 #include "imcache.cc"
 
 #include "prcmdlist.cc"
@@ -417,7 +417,6 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
             // load the data from the file.
             dds = io.load_file(ld.FilePath, ld.FileHints, ld.DecoderHint, ld.ImageId, 0, NULL);
-            enc = create_image_encoder(ld.ImageId, &imm, IMAGE_COMPRESSION_NONE, IMAGE_ENCODING_RAW, IMAGE_COMPRESSION_NONE, IMAGE_ENCODING_RAW, IMAGE_ACCESS_2D_ARRAY, &imc.DefinitionQueue, &imgdef_alloc, &imc.LocationQueue, &imgpos_alloc);
 
             // set up the parser.
             image_parser_config_t         parse_config;
@@ -425,9 +424,17 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             parse_config.Context          = (uintptr_t) &imc; // the image cache
             parse_config.FirstFrame       = ld.FirstFrame;
             parse_config.FinalFrame       = ld.FinalFrame;
+            parse_config.Memory           =&imm;
+            parse_config.Decoder          = dds;
             parse_config.Metadata         =&dds_info;         // obviously wrong for real-world usage
+            parse_config.DefinitionQueue  =&imc.DefinitionQueue;
+            parse_config.DefinitionAlloc  =&imgdef_alloc;
+            parse_config.PlacementQueue   =&imc.LocationQueue;
+            parse_config.PlacementAlloc   =&imgpos_alloc;
             parse_config.ParseFlags       = IMAGE_PARSER_FLAGS_READ_ALL_DATA | IMAGE_PARSER_FLAGS_START_AT_OFFSET;
             parse_config.StartOffset      ={0, 0};
+            parse_config.Compression      = IMAGE_COMPRESSION_NONE;
+            parse_config.Encoding         = IMAGE_ENCODING_RAW;
             if (ld.FinalFrame == IMAGE_ALL_FRAMES)   parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_ALL_FRAMES;
             else if (ld.FirstFrame != ld.FinalFrame) parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_FRAME_RANGE;
             else                                     parse_config.ParseFlags |= IMAGE_PARSER_FLAGS_SINGLE_FRAME;
@@ -474,7 +481,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         // drive file parsing:
         if (dds != NULL)
         {
-            int state  = dds_parser_update(dds, &dds_parser, enc);
+            int state  = dds_parser_update(&dds_parser);
             if (state == DDS_PARSE_RESULT_COMPLETE)
             {
                 dds->release();
