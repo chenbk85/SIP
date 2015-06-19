@@ -5,17 +5,52 @@
 
 #pragma warning (disable:4505) // unreferenced local function was removed
 
+#ifndef _CRT_SECURE_NO_DEPRECATE
+#define _CRT_SECURE_NO_DEPRECATE
+#endif
+
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 /*////////////////
 //   Includes   //
 ////////////////*/
+#include <Windows.h>
+#include <objbase.h>
+#include <ShlObj.h>
+#include <tchar.h>
+
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <Windows.h>
-#include <tchar.h>
+#include <stdlib.h>
+#include <float.h>
 
 #include "intrinsics.h"
 #include "atomic_fifo.h"
+
+#include "runtime.cc"
+
+#include "idtable.cc"
+#include "strtable.cc"
+#include "parseutl.cc"
+
+#include "filepath.cc"
+#include "iobuffer.cc"
+#include "aiodriver.cc"
+#include "iodecoder.cc"
+#include "piodriver.cc"
+#include "vfsdriver.cc"
+#include "threadio.cc"
+
+#include "imtypes.cc"
+#include "immemory.cc"
+#include "imencode.cc"
+#include "imparser.cc"
+#include "imparser_dds.cc"
+#include "imloader.cc"
+#include "imcache.cc"
 
 #include "prcmdlist.cc"
 
@@ -32,16 +67,17 @@
 /// because some operations may need to render into the bitmap through the device context.
 struct present_driver_gdi_t
 {
-    size_t             Pitch;            /// The number of bytes per-scanline in the image.
-    size_t             Height;           /// The number of scanlines in the image.
-    uint8_t           *DIBMemory;        /// The DIBSection memory, allocated with VirtualAlloc.
-    size_t             Width;            /// The actual width of the image, in pixels.
-    size_t             BytesPerPixel;    /// The number of bytes allocated for each pixel.
-    HDC                MemoryDC;         /// The memory device context used for rendering operations.
-    HWND               Window;           /// The handle of the target window.
-    HBITMAP            DIBSection;       /// The DIBSection backing the memory device context.
-    BITMAPINFO         BitmapInfo;       /// A description of the bitmap layout and attributes.
-    pr_command_queue_t CommandQueue;     /// The driver's command list submission queue.
+    size_t                Pitch;            /// The number of bytes per-scanline in the image.
+    size_t                Height;           /// The number of scanlines in the image.
+    uint8_t              *DIBMemory;        /// The DIBSection memory, allocated with VirtualAlloc.
+    size_t                Width;            /// The actual width of the image, in pixels.
+    size_t                BytesPerPixel;    /// The number of bytes allocated for each pixel.
+    HDC                   MemoryDC;         /// The memory device context used for rendering operations.
+    HWND                  Window;           /// The handle of the target window.
+    HBITMAP               DIBSection;       /// The DIBSection backing the memory device context.
+    BITMAPINFO            BitmapInfo;       /// A description of the bitmap layout and attributes.
+    pr_command_queue_t    CommandQueue;     /// The driver's command list submission queue.
+    image_command_alloc_t CacheCmdAlloc;    /// The FIFO node allocator used to write to an image cache from the presentation thread.
 };
 
 /*///////////////
@@ -138,6 +174,7 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     driver->DIBSection    = dib;
     CopyMemory(&driver->BitmapInfo, &bmi, sizeof(BITMAPINFO));
     pr_command_queue_init(&driver->CommandQueue);
+    fifo_allocator_init(&driver->CacheCmdAlloc);
     return (uintptr_t)driver;
 }
 
@@ -272,7 +309,7 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
         while (read_ptr < end_ptr)
         {
             pr_command_t *cmd_info = (pr_command_t*) read_ptr;
-            size_t        cmd_size =  cmd_info->DataSize;
+            size_t        cmd_size =  PR_COMMAND_SIZE_BASE + cmd_info->DataSize;
             switch (cmd_info->CommandId)
             {
             case PR_COMMAND_NO_OP:
@@ -293,6 +330,27 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
                     HBRUSH brush  = CreateSolidBrush(RGB(r, g, b));
                     FillRect(driver->MemoryDC, &fill_rc, brush);
                     DeleteObject(brush);
+                }
+                break;
+            case PR_COMMAND_DRAW_IMAGE_2D:
+                {
+                    BITMAPINFO bmi;
+                    pr_draw_image2d_data_t *data = (pr_draw_image2d_data_t*) cmd_info->Data;
+                    // TODO(rlk): support additional bitmap formats. if source is not a supported format, must convert.
+                    // TODO(rlk): rotation is not supported, must perform the rotation in software (see handmade hero).
+                    bmi.bmiHeader.biSize         = sizeof(BITMAPINFOHEADER);
+                    bmi.bmiHeader.biWidth        = (LONG) data->ImageWidth; // TODO(rlk): alignment
+                    bmi.bmiHeader.biHeight       =-(LONG) data->ImageHeight;
+                    bmi.bmiHeader.biPlanes       = 1;
+                    bmi.bmiHeader.biBitCount     = 32;
+                    bmi.bmiHeader.biCompression  = BI_RGB;
+                    bmi.bmiHeader.biSizeImage    = 0;
+                    bmi.bmiHeader.biXPelsPerMeter= 0;
+                    bmi.bmiHeader.biYPelsPerMeter= 0;
+                    bmi.bmiHeader.biClrUsed      = 0;
+                    bmi.bmiHeader.biClrImportant = 0;
+                    StretchDIBits( driver->MemoryDC, (int) data->TargetX, (int) data->TargetY, (int) data->TargetWidth, (int) data->TargetHeight, (int) data->SourceX, (int) data->SourceY, (int) data->SourceWidth, (int) data->SourceHeight, data->PixelData, &bmi, DIB_RGB_COLORS, SRCCOPY);
+                    image_cache_unlock_frames(data->ImageCache, data->ImageId, data->FrameId, data->FrameId, 0, &driver->CacheCmdAlloc);
                 }
                 break;
             }
