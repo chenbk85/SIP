@@ -54,6 +54,10 @@
 
 #include "prcmdlist.cc"
 
+#include "cpipeline.cc"
+#include "gpipeline.cc"
+#include "gpipeline_gdi.cc"
+
 /*/////////////////
 //   Constants   //
 /////////////////*/
