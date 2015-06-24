@@ -81,7 +81,8 @@ enum presentation_type_e : uint32_t
     PRESENTATION_TYPE_NULL     = 0,                  /// All presentation operations resolve to no-ops.
     PRESENTATION_TYPE_GDI      = 1,                  /// Standard Windows GDI used for rendering.
     PRESENTATION_TYPE_DIRECT2D = 2,                  /// Direct3D and Direct2D used for accelerated rendering.
-    PRESENTATION_TYPE_COUNT    = 3,                  /// The number of loadable presentation types.
+    PRESENTATION_TYPE_OPENGL21 = 3,                  /// OpenGL 2.1 (compatibility) used for accelerated rendering.
+    PRESENTATION_TYPE_COUNT    = 4,                  /// The number of loadable presentation types.
     PRESENTATION_TYPE_FIRST    = PRESENTATION_TYPE_NULL
 };
 
@@ -186,6 +187,7 @@ global_variable presentation_driver_t Global_PresentationDrivers[PRESENTATION_TY
 {
     NULL_PRESENTATION_DRIVER, 
     NULL_PRESENTATION_DRIVER, 
+    NULL_PRESENTATION_DRIVER,
     NULL_PRESENTATION_DRIVER
 };
 
@@ -237,6 +239,10 @@ public_function bool load_presentation_driver(uint32_t presentation_type)
     case PRESENTATION_TYPE_DIRECT2D:
         OutputDebugString(_T("STATUS: Beginning load of presentation driver ") _T("PresentD2D.dll") _T(".\n"));
         dll_name  = _T("PresentD2D.dll");
+        break;
+    case PRESENTATION_TYPE_OPENGL21:
+        OutputDebugString(_T("STATUS: Beginning load of presentation driver ") _T("PresentGL2.dll") _T(".\n"));
+        dll_name  = _T("PresentGL2.dll");
         break;
     default:
         dll_name  = NULL;
