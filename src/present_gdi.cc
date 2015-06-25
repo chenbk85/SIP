@@ -87,6 +87,22 @@ struct present_driver_gdi_t
 /*///////////////
 //   Globals   //
 ///////////////*/
+// presentation command list is dequeued
+// - create a new local list entry
+// - read all commands, generate list of compute jobs
+// - submit lock requests to image cache
+//   - the pointer can be used to track lock completion status
+// - as each lock result is received, launch the corresponding compute job
+//   - needs a pointer to the locked data
+//   - needs basic data like image dimensions
+//   - needs a job identifier
+// - compute job completion is the job ID plus a status code plus an output uintptr_t?
+//   - key thing is how to represent the output data...
+// - so one open question is how do we link up compute pipeline output with with graphics pipeline input?
+//   - there may not be any graphics pipeline input
+// - each compute pipeline job needs its own presentation command
+//   - the data for the command defines input and output parameters, ie. output to this texture or buffer.
+// - once all (blocking) compute jobs have completed, process the command list
 
 /*///////////////////////
 //   Local Functions   //
