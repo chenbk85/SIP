@@ -79,11 +79,19 @@ typedef mpsc_fifo_u_t   <image_declaration_t>         image_declaration_queue_t;
 struct image_cache_result_t
 {
     uint32_t             CommandId;               /// One of image_cache_command_e specifying the command type.
+    uint32_t             ImageFormat;             /// One of dxgi_format_e specifying the storage format of the pixel data.
+    uint32_t             Compression;             /// One of image_compression_e specifying the storage compression format of the pixel data.
+    uint32_t             Encoding;                /// One of image_encoding_e specifying the storage encoding format for the pixel data.
     uintptr_t            ImageId;                 /// The application-defined identifier of the logical image.
     size_t               FrameIndex;              /// The zero-based frame index.
+    size_t               LevelCount;              /// The number of levels in the mipmap chain.
+    size_t               BytesPerPixel;           /// The number of bytes per-pixel of the image data.
+    size_t               BytesPerBlock;           /// The number of bytes per-block, for block-compressed data, or zero.
+    dds_header_t         DDSHeader;               /// Metadata defining basic image attributes.
+    dds_header_dxt10_t   DX10Header;              /// Metadata defining extended image attributes.
+    dds_level_desc_t    *LevelInfo;               /// An array of LevelCount entries describing the levels in the mipmap chain.
     void                *BaseAddress;             /// The base address of the frame data, if it was locked.
     size_t               BytesReserved;           /// The number of bytes of frame data, if the frame was locked.
-    // ... other stuff
 };
 typedef fifo_allocator_table_t<image_cache_result_t>  image_cache_result_alloc_table_t;
 typedef fifo_allocator_t      <image_cache_result_t>  image_cache_result_alloc_t;
@@ -184,6 +192,7 @@ struct image_basic_data_t
     uintptr_t            ImageId;                 /// The application-defined logical image identifier.
     uint32_t             ImageFormat;             /// One of dxgi_format_e specifying the storage format of the pixel data.
     uint32_t             Compression;             /// One of image_compression_e specifying the compression format of the pixel data.
+    uint32_t             Encoding;                /// One of image_encoding_e specifying the storage format encoding.
     size_t               Width;                   /// The width of the highest-resolution level of the image, in pixels.
     size_t               Height;                  /// The height of the highest-resolution level of the image, in pixels.
     size_t               SliceCount;              /// The number of slices in the highest-resolution level of the image.
@@ -197,7 +206,7 @@ struct image_basic_data_t
     stream_decode_pos_t *BlockOffsets;            /// An array of LevelCount * ElementCount entries specifying the byte offsets of each level in the source file.
 };
 #define IMAGE_BASIC_DATA_STATIC_INIT(iid) \
-    { (iid), DXGI_FORMAT_UNKNOWN, IMAGE_COMPRESSION_NONE, 0, 0, 0, 0, 0, 0, 0, {}, {}, NULL, NULL }
+    { (iid), DXGI_FORMAT_UNKNOWN, IMAGE_COMPRESSION_NONE, IMAGE_ENCODING_RAW, 0, 0, 0, 0, 0, 0, 0, {}, {}, NULL, NULL }
 
 /// @summary Defines per-frame image memory location information maintained for a 
 /// single entry in the image cache and updated from an image_location_t request.
@@ -711,15 +720,24 @@ internal_function void image_cache_process_drop(image_cache_t *cache, image_cach
 /// @param result_queue The result queue to which the completion event will be posted.
 /// @param loc Information about the placement of the frame in cache memory.
 /// @return The function always returns ERROR_SUCCESS.
-internal_function uint32_t image_cache_complete_lock(image_cache_t *cache, image_cache_command_t::result_queue_t *result_queue, image_location_t const &loc)
+internal_function uint32_t image_cache_complete_lock(image_cache_t *cache, image_cache_command_t::result_queue_t *result_queue, image_location_t const &loc, image_basic_data_t const &meta)
 {
     if (result_queue != NULL)
     {   // get the producer allocator from the table. one will be created if necessary.
         image_cache_result_alloc_t    *alloc = fifo_allocator_table_get(&cache->ResultAlloc, result_queue);
         fifo_node_t<image_cache_result_t> *n = fifo_allocator_get(alloc);
+        n->Item.CommandId      = IMAGE_CACHE_COMMAND_LOCK;
+        n->Item.ImageFormat    = meta.ImageFormat;
+        n->Item.Compression    = meta.Compression;
+        n->Item.Encoding       = meta.Encoding;
         n->Item.ImageId        = loc.ImageId;
         n->Item.FrameIndex     = loc.FrameIndex;
-        n->Item.CommandId      = IMAGE_CACHE_COMMAND_LOCK;
+        n->Item.LevelCount     = meta.LevelCount;
+        n->Item.BytesPerPixel  = meta.BytesPerPixel;
+        n->Item.BytesPerBlock  = meta.BytesPerBlock;
+        n->Item.DDSHeader      = meta.DDSHeader;
+        n->Item.DX10Header     = meta.DX10Header;
+        n->Item.LevelInfo      = meta.LevelInfo;
         n->Item.BaseAddress    = loc.BaseAddress;
         n->Item.BytesReserved  = loc.BytesReserved;
         mpsc_fifo_u_produce(result_queue, n);
@@ -1103,7 +1121,7 @@ internal_function uint32_t image_cache_process_lock(image_cache_t *cache, image_
                     loc.BaseAddress    = entry.FrameData[i].BaseAddress;
                     loc.BytesReserved  = entry.FrameData[i].BytesReserved;
                     loc.Context        = entry.FrameData[i].Context;
-                    image_cache_complete_lock(cache, cmd.ResultQueue, loc);
+                    image_cache_complete_lock(cache, cmd.ResultQueue, loc, image_info);
                     // no need to re-load this frame into cache.
                     load_the_frame = false;
                     frames_in_cache++;
@@ -1230,6 +1248,7 @@ internal_function void image_cache_update_image_definition(image_cache_t *cache,
             meta.ImageId         = def.ImageId;
             meta.ImageFormat     = def.ImageFormat;
             meta.Compression     = def.Compression;
+            meta.Encoding        = def.Encoding;
             meta.Width           = def.Width;
             meta.Height          = def.Height;
             meta.SliceCount      = def.SliceCount;
@@ -1283,8 +1302,10 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
     // determine the total number of image elements.
     AcquireSRWLockShared(&cache->MetadataLock);
     size_t meta_index;
+    image_basic_data_t image_info;
     if (id_table_get(&cache->ImageIds, pos.ImageId, &meta_index))
     {   // save off the total number of image elements/frames.
+        image_info    = cache->MetaData[meta_index];
         total_frames  = cache->MetaData[meta_index].ElementCount;
     }
     ReleaseSRWLockShared(&cache->MetadataLock);
@@ -1356,7 +1377,7 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
             {   // post the lock result to every registered queue.
                 for (size_t i = 0, n = load.ResultQueues[frame_index].QueueCount; i < n; ++i)
                 {
-                    image_cache_complete_lock(cache, load.ResultQueues[frame_index].QueueList[i], pos);
+                    image_cache_complete_lock(cache, load.ResultQueues[frame_index].QueueList[i], pos, image_info);
                 }
                 // images are only ever loaded in response to a lock request.
                 // indicate that we need to increment the lock count, and also

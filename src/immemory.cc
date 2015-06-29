@@ -144,7 +144,8 @@ struct image_definition_t
 {
     uintptr_t            ImageId;                 /// The application-defined logical image identifier.
     uint32_t             ImageFormat;             /// One of dxgi_format_e specifying the storage format of the pixel data.
-    uint32_t             Compression;             /// One of image_compression_e specifying the compression format of the pixel data.
+    int                  Compression;             /// One of image_compression_e specifying the compression format of the pixel data.
+    int                  Encoding;                /// One of image_encoding_e specifying the storage encoding of the pixel data.
     size_t               Width;                   /// The width of the highest-resolution level of the image, in pixels.
     size_t               Height;                  /// The height of the highest-resolution level of the image, in pixels.
     size_t               SliceCount;              /// The number of slices in the highest-resolution level of the image.
@@ -326,6 +327,7 @@ public_function void image_definition_copy(image_definition_t *dst, image_defini
     dst->ImageId       = src->ImageId;
     dst->ImageFormat   = src->ImageFormat;
     dst->Compression   = src->Compression;
+    dst->Encoding      = src->Encoding;
     dst->Width         = src->Width;
     dst->Height        = src->Height;
     dst->SliceCount    = src->SliceCount;
@@ -604,7 +606,7 @@ public_function bool image_memory_level_info(image_memory_t *mem, uintptr_t imag
 /// @param mem The image memory manager.
 /// @param element_size The maximum size of a single array item or frame, in bytes. The actual size may be less than this value.
 /// @param def Image dimension attributes used to deteremine how much address space to reserve.
-/// @param encoding One of image_encoding_e specifying the storage encoding for the image.
+/// @param encoding One of image_encoding_e specifying the pixel data encoding.
 /// @param access_type One of image_access_type_e specifying how the image data will be accessed.
 /// @param definition_queue The unbounded MPSC queue to post the image attributes to.
 /// @param thread_alloc The FIFO node allocator used to write to the target queue from the calling thread.
@@ -618,6 +620,8 @@ public_function uint32_t image_memory_reserve_image(image_memory_t *mem, size_t 
         if (def->ElementCount   == existing.ElementCount                   && 
             def->LevelCount     == existing.LevelCount                     && 
             def->ImageFormat    == existing.Format                         && 
+            def->Compression    == existing.Compression                    &&
+                 encoding       == existing.Encoding                       && 
             def->Width          == existing.LevelDimension[0].LevelWidth   && 
             def->Height         == existing.LevelDimension[0].LevelHeight  && 
             def->SliceCount     == existing.LevelDimension[0].LevelSlices)
