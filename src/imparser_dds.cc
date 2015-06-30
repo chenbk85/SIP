@@ -136,7 +136,8 @@ internal_function int dds_parser_setup_image_info(dds_parser_state_t *ddsp)
         // initialize basic metadata attributes:
         meta->ImageId      = ddsp->Config.ImageId;
         meta->ImageFormat  = format;
-        meta->Compression  = IMAGE_COMPRESSION_NONE;
+        meta->Compression  = ddsp->Config.Compression;
+        meta->Encoding     = ddsp->Config.Encoding;
         meta->Width        = basew;
         meta->Height       = baseh;
         meta->SliceCount   = based;
