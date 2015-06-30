@@ -61,27 +61,95 @@
 /*/////////////////
 //   Constants   //
 /////////////////*/
+/// @summary Define the maximum number of in-flight frames per-driver.
+static uint32_t const PRESENT_DRIVER_GDI_MAX_FRAMES = 4;
 
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
+/// @summary Define the possible states of an in-flight frame.
+enum gdi_frame_state_e : int
+{
+    GDI_FRAME_STATE_WAIT_FOR_IMAGES     = 0,   /// The frame is waiting for images to be locked in host memory.
+    GDI_FRAME_STATE_WAIT_FOR_COMPUTE    = 1,   /// The frame is waiting for compute jobs to complete.
+    GDI_FRAME_STATE_WAIT_FOR_DISPLAY    = 2,   /// The frame is waiting for display jobs to complete.
+    GDI_FRAME_STATE_COMPLETE            = 3,   /// The frame has completed.
+    GDI_FRAME_STATE_ERROR               = 4,   /// The frame encountered one or more errors.
+};
+
+/// @summary Represents a unique identifier for a locked image.
+struct gdi_image_id_t
+{
+    uintptr_t               ImageId;           /// The application-defined image identifier.
+    size_t                  FrameIndex;        /// The zero-based index of the frame.
+};
+
+/// @summary Defines the data stored for a locked image.
+struct gdi_image_data_t
+{
+    DWORD                   ErrorCode;         /// ERROR_SUCCESS or a system error code.
+    uint32_t                SourceFormat;      /// One of dxgi_format_e defining the source data storage format.
+    uint32_t                SourceCompression; /// One of image_compression_e defining the source data storage compression.
+    uint32_t                SourceEncoding;    /// One of image_encoding_e defining the source data storage encoding.
+    thread_image_cache_t   *SourceCache;       /// The image cache that manages the source image data.
+    size_t                  SourceWidth;       /// The width of the source image, in pixels.
+    size_t                  SourceHeight;      /// The height of the source image, in pixels.
+    size_t                  SourcePitch;       /// The number of bytes per-row in the source image data.
+    uint8_t                *SourceData;        /// Pointer to the start of the locked image data on the host.
+    size_t                  SourceSize;        /// The number of bytes of source data.
+};
+
+/// @summary Defines the data associated with a single in-flight frame.
+struct gdi_frame_t
+{
+    int                     FrameState;        /// One of gdi_frame_state_e indicating the current state of the frame.
+
+    pr_command_list_t      *CommandList;       /// The command list that generated this frame.
+
+    size_t                  ImageCount;        /// The number of images referenced in this frame.
+    size_t                  ImageCapacity;     /// The capacity of the frame image list.
+    gdi_image_id_t         *ImageIds;          /// The unique identifiers of the referenced images.
+};
+
 /// @summary Define all of the state associated with a GDI display driver. This display
 /// driver is compatible with Windows versions all the way back to Windows 95. Even 
 /// though technically it is not required to call CreateDIBSection, the driver does so 
 /// because some operations may need to render into the bitmap through the device context.
 struct present_driver_gdi_t
 {
-    size_t                Pitch;            /// The number of bytes per-scanline in the image.
-    size_t                Height;           /// The number of scanlines in the image.
-    uint8_t              *DIBMemory;        /// The DIBSection memory, allocated with VirtualAlloc.
-    size_t                Width;            /// The actual width of the image, in pixels.
-    size_t                BytesPerPixel;    /// The number of bytes allocated for each pixel.
-    HDC                   MemoryDC;         /// The memory device context used for rendering operations.
-    HWND                  Window;           /// The handle of the target window.
-    HBITMAP               DIBSection;       /// The DIBSection backing the memory device context.
-    BITMAPINFO            BitmapInfo;       /// A description of the bitmap layout and attributes.
-    pr_command_queue_t    CommandQueue;     /// The driver's command list submission queue.
-    image_command_alloc_t CacheCmdAlloc;    /// The FIFO node allocator used to write to an image cache from the presentation thread.
+    typedef image_cache_result_queue_t             image_lock_queue_t;
+    typedef image_cache_error_queue_t              image_error_queue_t;
+
+    size_t                  Pitch;             /// The number of bytes per-scanline in the image.
+    size_t                  Height;            /// The number of scanlines in the image.
+    uint8_t                *DIBMemory;         /// The DIBSection memory, allocated with VirtualAlloc.
+    size_t                  Width;             /// The actual width of the image, in pixels.
+    size_t                  BytesPerPixel;     /// The number of bytes allocated for each pixel.
+    HDC                     MemoryDC;          /// The memory device context used for rendering operations.
+    HWND                    Window;            /// The handle of the target window.
+    HBITMAP                 DIBSection;        /// The DIBSection backing the memory device context.
+    BITMAPINFO              BitmapInfo;        /// A description of the bitmap layout and attributes.
+    pr_command_queue_t      CommandQueue;      /// The driver's command list submission queue.
+
+    size_t                  CacheCount;        /// The number of thread-local cache writers.
+    size_t                  CacheCapacity;     /// The maximum capacity of the presentation thread image cache list.
+    thread_image_cache_t   *CacheList;         /// The list of interfaces used to access image caches from the presentation thread.
+
+    size_t                  ImageCount;        /// The number of locked images.
+    size_t                  ImageCapacity;     /// The maximum capacity of the locked image list.
+    gdi_image_id_t         *ImageIds;          /// The list of locked image identifiers.
+    gdi_image_data_t       *ImageData;         /// The list of locked image data descriptors.
+    size_t                 *ImageRefs;         /// The list of reference counts for each locked image.
+
+    image_lock_queue_t      ImageLockQueue;    /// The MPSC unbounded FIFO where completed image lock requests are stored.
+    image_error_queue_t     ImageErrorQueue;   /// The MPSC unbounded FIFO where failed image lock requests are stored.
+
+    #define MAXF            PRESENT_DRIVER_GDI_MAX_FRAMES
+    uint32_t                FrameHead;         /// The zero-based index of the oldest in-flight frame.
+    uint32_t                FrameTail;         /// The zero-based index of the newest in-flight frame.
+    uint32_t                FrameMask;         /// The bitmask used to map an index into the frame array.
+    gdi_frame_t             FrameQueue[MAXF];  /// Storage for in-flight frame data.
+    #undef  MAXF
 };
 
 /*///////////////
@@ -117,6 +185,215 @@ internal_function inline uint8_t float_to_u8_sat(float value)
     return (scaled > 255.0f) ? 255 : uint8_t(scaled);
 }
 
+/// @summary Calculate the number of in-flight frames.
+/// @param driver The presentation driver to query.
+/// @return The number of in-flight frames.
+internal_function inline size_t frame_count(present_driver_gdi_t *driver)
+{
+    return size_t(driver->FrameTail - driver->FrameHead);
+}
+
+/// @summary Prepare an image for use by locking its data in host memory. The lock request completes asynchronously.
+/// @param driver The presentation driver handling the request.
+/// @param frame The in-flight frame state requiring the image data.
+/// @param image A description of the portion of the image required for use.
+internal_function void prepare_image(present_driver_gdi_t *driver, gdi_frame_t *frame, pr_image_subresource_t *image)
+{
+    uintptr_t const image_id     = image->ImageId;
+    size_t    const frame_index  = image->FrameIndex;
+    size_t          local_index  = 0;
+    size_t          global_index = 0;
+    bool            found_image  = false;
+    // check the frame-local list first. if we find the image here, we know 
+    // that the frame has already been requested, and we don't need to lock it.
+    for (size_t i = 0, n = frame->ImageCount; i < n; ++i)
+    {
+        if (frame->ImageIds[i].ImageId    == image_id && 
+            frame->ImageIds[i].FrameIndex == frame_index)
+        {
+            local_index = i;
+            found_image = true;
+            break;
+        }
+    }
+    if (!found_image)
+    {   // add this image/frame to the local frame list.
+        if (frame->ImageCount == frame->ImageCapacity)
+        {   // increase the capacity of the local image list.
+            size_t old_amount  = frame->ImageCapacity;
+            size_t new_amount  = calculate_capacity(old_amount, old_amount+1, 1024, 1024);
+            gdi_image_id_t *il =(gdi_image_id_t*)   realloc(frame->ImageIds , new_amount * sizeof(gdi_image_id_t));
+            if (il != NULL)
+            {
+                frame->ImageIds      = il;
+                frame->ImageCapacity = new_amount;
+            }
+        }
+        local_index   = frame->ImageCount++;
+        frame->ImageIds[local_index].ImageId     = image_id;
+        frame->ImageIds[local_index].FrameIndex  = frame_index;
+        // attempt to locate the image in the global image list.
+        for (size_t gi = 0, gn = driver->ImageCount; gi < gn; ++gi)
+        {
+            if (driver->ImageIds[gi].ImageId    == image_id && 
+                driver->ImageIds[gi].FrameIndex == frame_index)
+            {   // this image already exists in the global image list.
+                // there's no need to lock it; just increment the reference count.
+                driver->ImageRefs[gi]++;
+                found_image = true;
+                break;
+            }
+        }
+        // if the image wasn't in the global list, add it.
+        if (!found_image)
+        {
+            if (driver->ImageCount == driver->ImageCapacity)
+            {   // increase the capacity of the global image list.
+                size_t old_amount   = driver->ImageCapacity;
+                size_t new_amount   = calculate_capacity(old_amount, old_amount+1, 1024 , 1024);
+                gdi_image_id_t       *il = (gdi_image_id_t  *) realloc(driver->ImageIds , new_amount * sizeof(gdi_image_id_t));
+                gdi_image_data_t     *dl = (gdi_image_data_t*) realloc(driver->ImageData, new_amount * sizeof(gdi_image_data_t));
+                size_t               *rl = (size_t          *) realloc(driver->ImageRefs, new_amount * sizeof(size_t));
+                if (il != NULL) driver->ImageIds    = il;
+                if (dl != NULL) driver->ImageData   = dl;
+                if (rl != NULL) driver->ImageRefs   = rl;
+                if (il != NULL && dl != NULL && rl != NULL) driver->ImageCapacity = new_amount;
+            }
+            global_index    = driver->ImageCount++;
+            driver->ImageRefs[global_index]                   = 1;
+            driver->ImageIds [global_index].ImageId           = image_id;
+            driver->ImageIds [global_index].FrameIndex        = frame_index;
+            driver->ImageData[global_index].ErrorCode         = ERROR_SUCCESS;
+            driver->ImageData[global_index].SourceFormat      = DXGI_FORMAT_UNKNOWN;
+            driver->ImageData[global_index].SourceCompression = IMAGE_COMPRESSION_NONE;
+            driver->ImageData[global_index].SourceEncoding    = IMAGE_ENCODING_RAW;
+            driver->ImageData[global_index].SourceCache       = NULL;
+            driver->ImageData[global_index].SourceWidth       = 0;
+            driver->ImageData[global_index].SourceHeight      = 0;
+            driver->ImageData[global_index].SourcePitch       = 0;
+            driver->ImageData[global_index].SourceData        = NULL;
+            driver->ImageData[global_index].SourceSize        = 0;
+            // locate the presentation thread cache interface for the source data:
+            bool found_cache = false;
+            for (size_t ci = 0, cn = driver->CacheCount; ci < cn; ++ci)
+            {
+                if (driver->CacheList[ci].Cache == image->ImageSource)
+                {
+                    driver->ImageData[global_index].SourceCache = &driver->CacheList[ci];
+                    found_cache = true;
+                    break;
+                }
+            }
+            if (!found_cache)
+            {   // create a new interface to write to this image cache.
+                if (driver->CacheCount == driver->CacheCapacity)
+                {   // increase the capacity of the image cache list.
+                    size_t old_amount   = driver->CacheCapacity;
+                    size_t new_amount   = calculate_capacity(old_amount, old_amount+1, 16, 16);
+                    thread_image_cache_t *cl = (thread_image_cache_t*)   realloc(driver->CacheList, new_amount * sizeof(thread_image_cache_t));
+                    if (cl != NULL)
+                    {
+                        driver->CacheList     = cl;
+                        driver->CacheCapacity = new_amount;
+                    }
+                }
+                thread_image_cache_t *cache = &driver->CacheList[driver->CacheCount++];
+                driver->ImageData[global_index].SourceCache = cache;
+                cache->initialize(image->ImageSource);
+            }
+            // finally, submit a lock request for the frame.
+            driver->ImageData[global_index].SourceCache->lock( image_id, frame_index, frame_index, &driver->ImageLockQueue, &driver->ImageErrorQueue, 0);
+        }
+    }
+}
+
+/// @summary Attempt to start a new in-flight frame.
+/// @param driver The presentation driver managing the frame.
+/// @param cmdlist The presentation command list defining the frame.
+/// @return true if the frame was launched, or false if too many frames are in-flight.
+internal_function bool launch_frame(present_driver_gdi_t *driver, pr_command_list_t *cmdlist)
+{   // insert a new frame at the tail of the queue.
+    if (frame_count(driver) == PRESENT_DRIVER_GDI_MAX_FRAMES)
+    {   // there are too many frames in-flight.
+        return false;
+    }
+    uint32_t     id    = driver->FrameTail++;
+    size_t       index = size_t(id & driver->FrameMask); 
+    gdi_frame_t *frame =&driver->FrameQueue[index];
+    frame->FrameState  = GDI_FRAME_STATE_WAIT_FOR_IMAGES;
+    frame->CommandList = cmdlist;
+    frame->ImageCount  = 0;
+
+    // iterate through the command list and locate all PREPARE_IMAGE commands.
+    // for each of these, update the frame-local image list as well as the 
+    // the driver-global image list. eventually, we'll also use this to initialize
+    // any compute and display jobs as well.
+    bool       end_of_frame = false;
+    uint8_t const *read_ptr = cmdlist->CommandData;
+    uint8_t const *end_ptr  = cmdlist->CommandData + cmdlist->BytesUsed;
+    while (read_ptr < end_ptr && !end_of_frame)
+    {
+        pr_command_t *cmd_info = (pr_command_t*) read_ptr;
+        size_t        cmd_size =  PR_COMMAND_SIZE_BASE + cmd_info->DataSize;
+        switch (cmd_info->CommandId)
+        {
+        case PR_COMMAND_END_OF_FRAME:
+            {   // break out of the command processing loop.
+                end_of_frame = true;
+            }
+            break;
+        case PR_COMMAND_PREPARE_IMAGE:
+            {   // lock the source data in host memory.
+                prepare_image(driver, frame, (pr_image_subresource_t*) cmd_info->Data);
+            }
+            break;
+        // TODO(rlk): case PR_COMMAND_compute_x: init compute job record, but don't start
+        // TODO(rlk): case PR_COMMAND_display_x: init display job record, but don't start
+        default:
+            break;
+        }
+        // advance to the start of the next buffered command.
+        read_ptr += cmd_size;
+    }
+    return true;
+}
+
+/// @summary Perform cleanup operations when the display commands for the oldest in-flight frame have completed.
+/// @param driver The presentation driver to update.
+internal_function void retire_frame(present_driver_gdi_t *driver)
+{   // retire the frame at the head of the queue.
+    uint32_t     id    = driver->FrameHead++;
+    size_t       index = size_t(id & driver->FrameMask);
+    gdi_frame_t *frame =&driver->FrameQueue[index];
+    gdi_image_id_t *gl = driver->ImageIds;
+    gdi_image_id_t *ll = frame->ImageIds;
+    for (size_t li = 0 , ln = frame->ImageCount; li < ln; ++li)
+    {   // locate the corresponding entry in the global list.
+        gdi_image_id_t &lid = ll[li];
+        for (size_t gi = 0; gi < driver->ImageCount; ++gi)
+        {   gdi_image_id_t &gid  = gl[gi];
+            if (lid.ImageId == gid.ImageId && lid.FrameIndex == gid.FrameIndex)
+            {   // found a match. decrement the reference count.
+                if (driver->ImageRefs[gi]-- == 1)
+                {   // the image reference count has dropped to zero.
+                    // unlock the image data, and delete the entry from the global list.
+                    size_t  last_index  = driver->ImageCount - 1;
+                    driver->ImageData[gi].SourceCache->unlock(gid.ImageId, gid.FrameIndex, gid.FrameIndex);
+                    driver->ImageIds [gi] = driver->ImageIds [last_index];
+                    driver->ImageData[gi] = driver->ImageData[last_index];
+                    driver->ImageRefs[gi] = driver->ImageRefs[last_index];
+                    driver->ImageCount--;
+                }
+                break;
+            }
+        }
+    }
+    // TODO(rlk): cleanup compute jobs
+    // TODO(rlk): cleanup display state
+    pr_command_queue_return(&driver->CommandQueue, frame->CommandList);
+    frame->ImageCount = 0;
+}
+
 /*///////////////////////
 //  Public Functions   //
 ///////////////////////*/
@@ -140,6 +417,21 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     driver->Window        = NULL;
     driver->DIBSection    = NULL;
     ZeroMemory(&driver->BitmapInfo, sizeof(driver->BitmapInfo));
+
+    driver->CacheCount    = 0;
+    driver->CacheCapacity = 0;
+    driver->CacheList     = NULL;
+    
+    driver->ImageCount    = 0;
+    driver->ImageCapacity = 0;
+    driver->ImageIds      = NULL;
+    driver->ImageData     = NULL;
+    driver->ImageRefs     = NULL;
+    
+    driver->FrameHead     = 0;
+    driver->FrameTail     = 0;
+    driver->FrameMask     = PRESENT_DRIVER_GDI_MAX_FRAMES-1;
+    ZeroMemory(&driver->FrameQueue, sizeof(gdi_frame_t) * PRESENT_DRIVER_GDI_MAX_FRAMES);
 
     // retrieve the current dimensions of the client area of the window.
     RECT rc;
@@ -193,8 +485,26 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     driver->Window        = window;
     driver->DIBSection    = dib;
     CopyMemory(&driver->BitmapInfo, &bmi, sizeof(BITMAPINFO));
+
+    // initialize a dynamic list holding interfaces used to submit 
+    // image cache control commands from the presentation thread.
+    driver->CacheCapacity = 4;
+    driver->CacheList     =(thread_image_cache_t*) malloc(4 * sizeof(thread_image_cache_t));
+
+    // initialize a dynamic list of images referenced by in-flight frames.
+    driver->ImageCapacity = 8;
+    driver->ImageIds      =(gdi_image_id_t      *) malloc(8 * sizeof(gdi_image_id_t));
+    driver->ImageData     =(gdi_image_data_t    *) malloc(8 * sizeof(gdi_image_data_t));
+    driver->ImageRefs     =(size_t              *) malloc(8 * sizeof(size_t));
+
+    // initialize queues for receiving image data from the host:
+    mpsc_fifo_u_init(&driver->ImageLockQueue);
+    mpsc_fifo_u_init(&driver->ImageErrorQueue);
+
+    // initialize the queue for receiving submitted command lists:
     pr_command_queue_init(&driver->CommandQueue);
-    fifo_allocator_init(&driver->CacheCmdAlloc);
+
+    // finally, finished with driver initialization.
     return (uintptr_t)driver;
 }
 
@@ -320,75 +630,191 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
     present_driver_gdi_t *driver = (present_driver_gdi_t*) drv;
     if (driver == NULL)   return;
 
-    pr_command_list_t *cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
-    while (cmdlist != NULL)
+    // launch as many frames as possible:
+    while (frame_count(driver) < PRESENT_DRIVER_GDI_MAX_FRAMES)
     {
-        bool       end_of_frame = false;
-        uint8_t const *read_ptr = cmdlist->CommandData;
-        uint8_t const *end_ptr  = cmdlist->CommandData + cmdlist->BytesUsed;
-        while (read_ptr < end_ptr)
+        pr_command_list_t *cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
+        if (cmdlist == NULL) break;  // no more pending frames
+        launch_frame(driver, cmdlist);
+    }
+
+    // process any pending image lock errors:
+    image_cache_error_t lock_error;
+    while (mpsc_fifo_u_consume(&driver->ImageErrorQueue, lock_error))
+    {   // locate the image in the global image list:
+        for (size_t gi = 0, gn = driver->ImageCount; gi < gn; ++gi)
         {
-            pr_command_t *cmd_info = (pr_command_t*) read_ptr;
-            size_t        cmd_size =  PR_COMMAND_SIZE_BASE + cmd_info->DataSize;
-            switch (cmd_info->CommandId)
-            {
-            case PR_COMMAND_NO_OP:
-                break;
-            case PR_COMMAND_END_OF_FRAME:
-                {   // break out of the command processing loop and submit
-                    // submit the translated command list to the system driver.
-                    end_of_frame = true;
-                }
-                break;
-            case PR_COMMAND_CLEAR_COLOR_BUFFER:
-                {
-                    pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd_info->Data;
-                    RECT fill_rc  = { 0, 0, (int) driver->Width, (int) driver->Height };
-                    uint8_t    r  = float_to_u8_sat(data->Red);
-                    uint8_t    g  = float_to_u8_sat(data->Green);
-                    uint8_t    b  = float_to_u8_sat(data->Blue);
-                    HBRUSH brush  = CreateSolidBrush(RGB(r, g, b));
-                    FillRect(driver->MemoryDC, &fill_rc, brush);
-                    DeleteObject(brush);
-                }
-                break;
-            case PR_COMMAND_DRAW_IMAGE_2D:
-                {
-                    BITMAPINFO bmi;
-                    pr_draw_image2d_data_t *data = (pr_draw_image2d_data_t*) cmd_info->Data;
-                    // TODO(rlk): support additional bitmap formats. if source is not a supported format, must convert.
-                    // TODO(rlk): rotation is not supported, must perform the rotation in software (see handmade hero).
-                    bmi.bmiHeader.biSize         = sizeof(BITMAPINFOHEADER);
-                    bmi.bmiHeader.biWidth        = (LONG) data->ImageWidth; // TODO(rlk): alignment
-                    bmi.bmiHeader.biHeight       =-(LONG) data->ImageHeight;
-                    bmi.bmiHeader.biPlanes       = 1;
-                    bmi.bmiHeader.biBitCount     = 32;
-                    bmi.bmiHeader.biCompression  = BI_RGB;
-                    bmi.bmiHeader.biSizeImage    = 0;
-                    bmi.bmiHeader.biXPelsPerMeter= 0;
-                    bmi.bmiHeader.biYPelsPerMeter= 0;
-                    bmi.bmiHeader.biClrUsed      = 0;
-                    bmi.bmiHeader.biClrImportant = 0;
-                    StretchDIBits( driver->MemoryDC, (int) data->TargetX, (int) data->TargetY, (int) data->TargetWidth, (int) data->TargetHeight, (int) data->SourceX, (int) data->SourceY, (int) data->SourceWidth, (int) data->SourceHeight, data->PixelData, &bmi, DIB_RGB_COLORS, SRCCOPY);
-                    image_cache_unlock_frames(data->ImageCache, data->ImageId, data->FrameId, data->FrameId, 0, &driver->CacheCmdAlloc);
-                }
+            if (driver->ImageIds [gi].ImageId    == lock_error.ImageId && 
+                driver->ImageIds [gi].FrameIndex == lock_error.FirstFrame)
+            {   // save the error code. it will be checked later.
+                driver->ImageData[gi].ErrorCode   = lock_error.ErrorCode;
                 break;
             }
-            // advance to the start of the next buffered command.
-            read_ptr += cmd_size;
         }
-        // signal to any waiters that processing of the command list has finished.
-        SetEvent(cmdlist->SyncHandle);
-        // return the current command list to the driver's free list
-        // and determine whether to continue submitting commands.
-        pr_command_queue_return(&driver->CommandQueue, cmdlist);
-        if (end_of_frame)
-        {   // finished with command submission for this frame.
-            break;
+    }
+
+    // process any completed image locks:
+    image_cache_result_t lock_result;
+    while (mpsc_fifo_u_consume(&driver->ImageLockQueue, lock_result))
+    {   // locate the image in the global image list:
+        for (size_t gi = 0, gn = driver->ImageCount; gi < gn; ++gi)
+        {
+            if (driver->ImageIds [gi].ImageId    == lock_result.ImageId && 
+                driver->ImageIds [gi].FrameIndex == lock_result.FrameIndex)
+            {   // save the image metadata and host memory pointer.
+                driver->ImageData[gi].ErrorCode         = ERROR_SUCCESS;
+                driver->ImageData[gi].SourceFormat      = lock_result.ImageFormat;
+                driver->ImageData[gi].SourceCompression = lock_result.Compression;
+                driver->ImageData[gi].SourceEncoding    = lock_result.Encoding;
+                driver->ImageData[gi].SourceWidth       = lock_result.LevelInfo[0].Width;
+                driver->ImageData[gi].SourceHeight      = lock_result.LevelInfo[0].Height;
+                driver->ImageData[gi].SourcePitch       = lock_result.LevelInfo[0].BytesPerRow;
+                driver->ImageData[gi].SourceData        =(uint8_t*) lock_result.BaseAddress;
+                driver->ImageData[gi].SourceSize        = lock_result.BytesReserved;
+                break;
+            }
         }
-        else
-        {   // advance to the next queued command list.
-            cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
+    }
+    
+    // update the state of all in-flight frames:
+    size_t frame_id  = driver->FrameHead;
+    while (frame_count(driver) > 0 && frame_id != driver->FrameTail)
+    {
+        size_t  fifo_index = size_t(frame_id & driver->FrameMask);
+        gdi_frame_t *frame = &driver->FrameQueue[fifo_index];
+
+        if (frame->FrameState == GDI_FRAME_STATE_WAIT_FOR_IMAGES)
+        {   // have all pending image locks completed successfully?
+            size_t n_expected  = frame->ImageCount;
+            size_t n_success   = 0;
+            size_t n_error     = 0;
+            for (size_t li = 0, ln = frame->ImageCount; li < ln; ++li)
+            {   // locate this frame in the global image list.
+                for (size_t gi = 0, gn = driver->ImageCount; gi < gn; ++gi)
+                {
+                    if (frame->ImageIds[li].ImageId    == driver->ImageIds[gi].ImageId && 
+                        frame->ImageIds[li].FrameIndex == driver->ImageIds[gi].FrameIndex)
+                    {
+                        if (driver->ImageData[gi].ErrorCode != ERROR_SUCCESS)
+                        {   // the image could not be locked in host memory.
+                            n_error++;
+                        }
+                        else if (driver->ImageData[gi].SourceData != NULL)
+                        {   // the image was locked in host memory and is ready for use.
+                            n_success++;
+                        }
+                        // else, the lock request hasn't completed yet.
+                        break;
+                    }
+                }
+            }
+            if (n_success == n_expected)
+            {   // all images are ready, wait for compute jobs.
+                frame->FrameState = GDI_FRAME_STATE_WAIT_FOR_COMPUTE;
+            }
+            if (n_error > 0)
+            {   // at least one image could not be locked. complete immediately.
+                frame->FrameState = GDI_FRAME_STATE_ERROR;
+            }
+        }
+
+        // TODO(rlk): launch any compute jobs whose dependencies are satisfied. 
+        
+        if (frame->FrameState == GDI_FRAME_STATE_WAIT_FOR_COMPUTE)
+        {   // have all pending compute jobs completed successfully?
+            // TODO(rlk): when we have compute jobs implemented...
+            frame->FrameState  = GDI_FRAME_STATE_WAIT_FOR_DISPLAY;
+        }
+
+        // TODO(rlk): launch any display jobs whose dependencies are satisfied.
+
+        if (frame->FrameState == GDI_FRAME_STATE_WAIT_FOR_DISPLAY)
+        {   // have all pending display jobs completed successfully?
+            // TODO(rlk): when we have display jobs implemented...
+            frame->FrameState  = GDI_FRAME_STATE_COMPLETE;
+        }
+
+        if (frame->FrameState == GDI_FRAME_STATE_COMPLETE)
+        {   // there's no work remaining for this frame.
+        }
+        
+        if (frame->FrameState == GDI_FRAME_STATE_ERROR)
+        {   // TODO(rlk): cancel any in-progress jobs.
+        }
+
+        // check the next pending frame.
+        ++frame_id;
+    }
+
+    // if the oldest frame has completed, retire it.
+    if (frame_count(driver) > 0)
+    {
+        size_t oldest_index = size_t(driver->FrameHead & driver->FrameMask);
+        gdi_frame_t  *frame =&driver->FrameQueue[oldest_index];
+
+        if (frame->FrameState == GDI_FRAME_STATE_COMPLETE)
+        {   // execute the display list. all data is ready.
+            bool       end_of_frame = false;
+            uint8_t const *read_ptr = frame->CommandList->CommandData;
+            uint8_t const *end_ptr  = frame->CommandList->CommandData + frame->CommandList->BytesUsed;
+            while (read_ptr < end_ptr && !end_of_frame)
+            {
+                pr_command_t *cmd_info = (pr_command_t*) read_ptr;
+                size_t        cmd_size =  PR_COMMAND_SIZE_BASE + cmd_info->DataSize;
+                switch (cmd_info->CommandId)
+                {
+                case PR_COMMAND_END_OF_FRAME:
+                    {   // break out of the command processing loop and submit
+                        // submit the translated command list to the system driver.
+                        end_of_frame = true;
+                    }
+                    break;
+                case PR_COMMAND_CLEAR_COLOR_BUFFER:
+                    {
+                        pr_color_t *c = (pr_color_t*) cmd_info->Data;
+                        RECT fill_rc  = { 0, 0, (int) driver->Width, (int) driver->Height };
+                        uint8_t    r  = float_to_u8_sat(c->Red);
+                        uint8_t    g  = float_to_u8_sat(c->Green);
+                        uint8_t    b  = float_to_u8_sat(c->Blue);
+                        HBRUSH brush  = CreateSolidBrush(RGB(r, g, b));
+                        FillRect(driver->MemoryDC, &fill_rc, brush);
+                        DeleteObject(brush);
+                    }
+                    break;
+                /*case PR_COMMAND_DRAW_IMAGE_2D:
+                    {
+                        BITMAPINFO bmi;
+                        pr_draw_image2d_data_t *data = (pr_draw_image2d_data_t*) cmd_info->Data;
+                        // TODO(rlk): support additional bitmap formats. if source is not a supported format, must convert.
+                        // TODO(rlk): rotation is not supported, must perform the rotation in software (see handmade hero).
+                        // TODO(rlk): red and blue channels are swapped
+                        bmi.bmiHeader.biSize         = sizeof(BITMAPINFOHEADER);
+                        bmi.bmiHeader.biWidth        = (LONG) data->ImageWidth; // TODO(rlk): alignment
+                        bmi.bmiHeader.biHeight       =-(LONG) data->ImageHeight;
+                        bmi.bmiHeader.biPlanes       = 1;
+                        bmi.bmiHeader.biBitCount     = 32;
+                        bmi.bmiHeader.biCompression  = BI_RGB;
+                        bmi.bmiHeader.biSizeImage    = 0;
+                        bmi.bmiHeader.biXPelsPerMeter= 0;
+                        bmi.bmiHeader.biYPelsPerMeter= 0;
+                        bmi.bmiHeader.biClrUsed      = 0;
+                        bmi.bmiHeader.biClrImportant = 0;
+                        SetStretchBltMode(driver->MemoryDC, COLORONCOLOR); // or HALFTONE, which is much more expensive (COLORONCOLOR=NEAREST, HALFTONE=LINEAR)
+                        StretchDIBits(driver->MemoryDC, (int) data->TargetX, (int) data->TargetY, (int) data->TargetWidth, (int) data->TargetHeight, (int) data->SourceX, (int) data->SourceY, (int) data->SourceWidth, (int) data->SourceHeight, data->PixelData, &bmi, DIB_RGB_COLORS, SRCCOPY);
+                        image_cache_unlock_frames(data->ImageCache, data->ImageId, data->FrameId, data->FrameId, 0, &driver->CacheCmdAlloc);
+                    }
+                    break;*/
+                }
+                // advance to the start of the next buffered command.
+                read_ptr += cmd_size;
+            }
+            // signal to any waiters that processing of the command list has finished.
+            SetEvent(frame->CommandList->SyncHandle);
+        }
+        if (frame->FrameState == GDI_FRAME_STATE_COMPLETE || 
+            frame->FrameState == GDI_FRAME_STATE_ERROR)
+        {
+            retire_frame(driver);
         }
     }
 
@@ -417,5 +843,19 @@ void __cdecl PrDisplayDriverClose(uintptr_t drv)
         driver->MemoryDC   = NULL;
         driver->Pitch      = 0;
     }
+    mpsc_fifo_u_delete(&driver->ImageErrorQueue);
+    mpsc_fifo_u_delete(&driver->ImageLockQueue);
+    for (size_t i = 0, n = driver->CacheCount; i < n; ++i)
+    {   // dispose of any cache writer data for caches that have been initialized.
+        driver->CacheList[i].dispose();
+    }
+    for (size_t i = 0, n = PRESENT_DRIVER_GDI_MAX_FRAMES; i < n; ++i)
+    {   // free memory allocated for each in-flight frame.
+        free(driver->FrameQueue[i].ImageIds);
+    }
+    free(driver->ImageRefs);
+    free(driver->ImageData);
+    free(driver->ImageIds );
+    free(driver->CacheList);
     free(driver);
 }

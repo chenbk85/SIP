@@ -406,7 +406,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         // TODO(rlk): perform application update here.
         // this consists primarily of queueing commands to the display driver.
         pr_command_list_t *cmdlist = display.create_command_list();
-        pr_command_clear_color_buffer(cmdlist, 1.0, 0.0, 0.0, 1.0);
+        pr_command_clear_color_buffer(cmdlist, 0.0, 0.0, 1.0, 1.0);
 
         // pump everything
         pio_driver_poll(&pio);  // TODO(rlk): move to background thread
@@ -423,10 +423,10 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         while (spsc_fifo_u_consume(&imc.EvictQueue, ev))
         {
             dbg_printf("Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
-            //image_memory_evict_element(&immemory, ev.ImageId, ev.FrameIndex);
+            image_memory_evict_element(&immemory, ev.ImageId, ev.FrameIndex);
         }
 
-        image_cache_error_t cache_err;
+        /*image_cache_error_t cache_err;
         while (mpsc_fifo_u_consume(&imfail_queue, cache_err))
         {   // TODO(rlk): handle errors.
             dbg_printf("Error: %08X on image %Iu frames %Iu-%Iu.\n", cache_err.ErrorCode, cache_err.ImageId, cache_err.FirstFrame, cache_err.FinalFrame);
@@ -439,7 +439,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             RECT rc; GetWindowRect(main_window, &rc);
             image_basic_data_t attr;
             imcache.image_attributes(res.ImageId, attr);
-            pr_command_draw_image_2d(cmdlist, res.ImageId, res.FrameIndex, attr.ImageFormat, attr.Width, attr.Height, 0, 0, attr.Width, attr.Height, 0, 0, /*size_t(rc.right-rc.left)*/attr.Width, /*size_t(rc.bottom-rc.top)*/attr.Height, 0.0f, res.BaseAddress, &imc, 0);
+            //pr_command_draw_image_2d(cmdlist, res.ImageId, res.FrameIndex, attr.ImageFormat, attr.Width, attr.Height, 0, 0, attr.Width, attr.Height, 0, 0, size_t(rc.right-rc.left), size_t(rc.bottom-rc.top), 0.0f, res.BaseAddress, &imc, 0);
             int64_t nowt = ticktime();
             if (ticks_to_seconds(nowt-frame_update_time) > 1.0f)
             {   // time to display the next frame of the image.
@@ -448,7 +448,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
             }
             //imcache.unlock(res.ImageId, res.FrameIndex, res.FrameIndex, 0);
             imcache.lock(0, frame_index, frame_index, &imlock_queue, &imfail_queue, 0);
-        }
+        }*/
 
         // ...
         pr_command_end_of_frame(cmdlist);
