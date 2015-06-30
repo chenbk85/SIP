@@ -22,6 +22,9 @@ static size_t const PR_COMMAND_LIST_QUEUE_MAX              = 16;
 /// @summary Define the allocation granularity for command list command data.
 static size_t const PR_COMMAND_LIST_ALLOCATION_GRANULARITY = 64 * 1024;
 
+/// @summary Define a special constant meaning 'all remaining items'.
+static size_t const PR_LAST_ITEM_INDEX                     =~size_t(0);
+
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
@@ -29,8 +32,8 @@ static size_t const PR_COMMAND_LIST_ALLOCATION_GRANULARITY = 64 * 1024;
 struct  pr_command_list_t;
 
 /// @summary Define aliases for types used internally by a command list queue.
-typedef fifo_allocator_t<pr_command_list_t*> cmdq_alloc_t;
-typedef mpsc_fifo_u_t<pr_command_list_t*>    cmdq_queue_t;
+typedef fifo_allocator_t<pr_command_list_t*> pr_cmd_alloc_t;
+typedef mpsc_fifo_u_t   <pr_command_list_t*> pr_cmd_queue_t;
 
 /// @summary Define the set of recognized command identifiers.
 enum pr_command_type_e : uint16_t
@@ -41,16 +44,11 @@ enum pr_command_type_e : uint16_t
     /// This command is added to the buffer when it is submitted to the presentation driver.
     PR_COMMAND_END_OF_FRAME         = 1, 
     /// @summary Clear the color buffer to a specified color.
-    /// @param red A 32-bit floating-point value in [0, 1] specifying the red channel value.
-    /// @param green A 32-bit floating-point value in [0, 1] specifying the green channel value.
-    /// @param blue A 32-bit floating-point value in [0, 1] specifying the blue channel value.
-    /// @param alpha A 32-bit floating-point value in [0, 1] specifying the alpha channel value.
+    /// @data An instance of pr_color_t specifying the clear color.
     PR_COMMAND_CLEAR_COLOR_BUFFER   = 2,
-    /// @summary Process and display a 2D image.
-    /// @param image_id The application-defined identifier of the logical image.
-    /// @param frame_index The zero-based index of the frame to display.
-    /// ...
-    PR_COMMAND_DRAW_IMAGE_2D        = 3,
+    /// @summary Prepare image data for processing or use. The presentation system will lock the image in memory until it is no longer needed.
+    /// @data An instance of pr_image_subresource_t specifying the image in host memory.
+    PR_COMMAND_PREPARE_IMAGE        = 3,
 };
 
 /// @summary Defines the structure of a single presentation command. Each command consists
@@ -78,43 +76,33 @@ struct pr_command_list_t
 struct pr_command_queue_t
 {
     #define N  PR_COMMAND_LIST_QUEUE_MAX
-    cmdq_alloc_t       CommandListAlloc;      /// The FIFO node allocator for the queue.
-    cmdq_queue_t       CommandListQueue;      /// The MPSC queue of submitted command lists.
+    pr_cmd_alloc_t     CommandListAlloc;      /// The FIFO node allocator for the queue.
+    pr_cmd_queue_t     CommandListQueue;      /// The MPSC queue of submitted command lists.
     size_t             ListFreeCount;         /// The number of valid items in the free list.
     pr_command_list_t *CommandListFree [N];   /// Pointers into CommandListStore representing available lists.
     pr_command_list_t  CommandListStore[N];   /// Actual storage for all of the command lists.
     #undef  N
 };
 
-/// @summary Define the data associated with PR_COMMAND_CLEAR_COLOR_BUFFER.
-struct pr_clear_color_buffer_data_t
+/// @summary Define the data associated with a floating-point RGBA color value.
+struct pr_color_t
 {
-    float              Red;                   /// The value to write to the red channel.
-    float              Green;                 /// The value to write to the green channel.
-    float              Blue;                  /// The value to write to the blue channel.
-    float              Alpha;                 /// The value to write to the alpha channel.
+    float              Red;                   /// The value to write to the red channel, in [0, 1].
+    float              Green;                 /// The value to write to the green channel, in [0, 1].
+    float              Blue;                  /// The value to write to the blue channel, in [0, 1].
+    float              Alpha;                 /// The value to write to the alpha channel, in [0, 1].
 };
 
-/// @summary Define the data associated with PR_COMMAND_DRAW_IMAGE_2D.
-struct pr_draw_image2d_data_t
+/// @summary Define the data describing a particular subregion of an image in host memory.
+struct pr_image_subresource_t
 {
-    uintptr_t          ImageId;               /// The application-defined logical image identifier.
-    uintptr_t          PipelineId;            /// The identifier of the presentation pipeline.
-    uint32_t           FrameId;               /// The zero-based index of the frame.
-    uint32_t           DXGIFormat;            /// One of dxgi_format_e specifying the data storage format.
-    uint32_t           ImageWidth;            /// The total width of the image, in pixels.
-    uint32_t           ImageHeight;           /// The total height of the image, in pixels.
-    uint32_t           SourceX;               /// The x-coordinate of the upper-left corner of the source rectangle on the image.
-    uint32_t           SourceY;               /// The y-coordinate of the upper-left corner of the source rectangle on the image.
-    uint32_t           SourceWidth;           /// The width of the source rectangle, in pixels.
-    uint32_t           SourceHeight;          /// The height of the source rectangle, in pixels.
-    uint32_t           TargetX;               /// The x-coordinate of the upper-left corner of the image on the render target.
-    uint32_t           TargetY;               /// The y-coordinate of the upper-left corner of the image on the render target.
-    uint32_t           TargetWidth;           /// The width of the destination rectangle, in pixels.
-    uint32_t           TargetHeight;          /// The height of the destination rectangle, in pixels.
-    float              Rotation;              /// The image rotation value, in radians.
-    void              *PixelData;             /// The locked pixel data of the image.
-    image_cache_t     *ImageCache;            /// The image cache managing the pixel data for the image.
+    uintptr_t          ImageId;               /// The application-defined image identifier.
+    image_cache_t     *ImageSource;           /// The image cache responsible for managing the image data in host memory.
+    size_t             FrameIndex;            /// The zero-based index of the frame or array element to access.
+    size_t             FirstSliceOrFace;      /// The zero-based index of the first slice or cubemap face to access.
+    size_t             FinalSliceOrFace;      /// The zero-based index of the final slice or cubemap face to access, or PR_LAST_ITEM_INDEX.
+    size_t             FirstLevel;            /// The zero-based index of the first mipmap level to access.
+    size_t             FinalLevel;            /// The zero-based index of the final mipmap level to access, or PR_LAST_ITEM_INDEX.
 };
 
 /*///////////////
@@ -128,7 +116,7 @@ static char const *PR_COMMAND_NAMES[] =
     "PR_COMMAND_NO_OP", 
     "PR_COMMAND_END_OF_FRAME",
     "PR_COMMAND_CLEAR_COLOR_BUFFER", 
-    "PR_COMMAND_DRAW_IMAGE_2D"
+    "PR_COMMAND_PREPARE_IMAGE"
 };
 
 /*///////////////////////
@@ -271,7 +259,7 @@ public_function void pr_command_queue_return(pr_command_queue_t *fifo, pr_comman
 /// @param fifo The command list submission queue to allocate from.
 /// @return An available command list, or NULL.
 public_function pr_command_list_t* pr_command_queue_next_available(pr_command_queue_t *fifo)
-{
+{   // TODO(rlk): This function needs to be made thread-safe.
     if (fifo->ListFreeCount > 0)
     {   // retrieve the command list from the free list.
         pr_command_list_t *list = fifo->CommandListFree[--fifo->ListFreeCount];
@@ -322,6 +310,22 @@ public_function char const* pr_command_name(pr_command_t *command)
     return PR_COMMAND_NAMES[command->CommandId];
 }
 
+/// @summary Helper function to initialize a pr_image_subresource_t structure.
+/// @param dest The structure to initialize.
+/// @param image_id The application-defined image identifier.
+/// @param frame The zero-based index of the frame or array element.
+/// @param source The image cache maintaining the image data on the host.
+public_function void pr_image_subresource_init(pr_image_subresource_t *dest, uintptr_t image_id, size_t frame, image_cache_t *source)
+{
+    dest->ImageId          = image_id;
+    dest->ImageSource      = source;
+    dest->FrameIndex       = frame;
+    dest->FirstSliceOrFace = 0;
+    dest->FinalSliceOrFace = PR_LAST_ITEM_INDEX;
+    dest->FirstLevel       = 0;
+    dest->FinalLevel       = PR_LAST_ITEM_INDEX;
+}
+
 /// @summary Write a no-op command into a command list.
 /// @param cmdlist The command list to update.
 public_function void pr_command_no_op(pr_command_list_t *cmdlist)
@@ -340,22 +344,30 @@ public_function void pr_command_end_of_frame(pr_command_list_t *cmdlist)
     cmd->DataSize     = 0;
 }
 
+/// @summary Writes a color buffer clear command into a command list.
+/// @param cmdlist The command list to update.
+/// @param color The color value to write to the color buffer.
+public_function void pr_command_clear_color_buffer(pr_command_list_t *cmdlist, pr_color_t const &color)
+{
+    size_t        dsz = sizeof(pr_color_t);
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
+    cmd->CommandId    = PR_COMMAND_CLEAR_COLOR_BUFFER;
+    cmd->DataSize     = (uint16_t) dsz;
+    pr_color_t  *data = (pr_color_t*) cmd->Data; *data = color;
+}
+
 /// @summary Write a color buffer clear command into a command list.
 /// @param cmdlist The command list to update.
 /// @param rgba Pointer to an array specifying four values representing the values to write to 
 /// the red, green, blue and alpha channels, in that order.
 public_function void pr_command_clear_color_buffer(pr_command_list_t *cmdlist, float const *rgba)
 {
-    size_t        dsz = sizeof(float) * 4;
+    size_t        dsz = sizeof(pr_color_t);
     pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
     cmd->CommandId    = PR_COMMAND_CLEAR_COLOR_BUFFER;
     cmd->DataSize     = (uint16_t) dsz;
-
-    pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd->Data;
-    data->Red   = rgba[0];
-    data->Green = rgba[1];
-    data->Blue  = rgba[2];
-    data->Alpha = rgba[3];
+    pr_color_t  *data = (pr_color_t*) cmd->Data;
+    data->Red   = rgba[0]; data->Green = rgba[1]; data->Blue  = rgba[2]; data->Alpha = rgba[3];
 }
 
 /// @summary Write a color buffer clear command into a command list.
@@ -366,62 +378,82 @@ public_function void pr_command_clear_color_buffer(pr_command_list_t *cmdlist, f
 /// @param a The alpha channel value of the clear color.
 public_function void pr_command_clear_color_buffer(pr_command_list_t *cmdlist, float r, float g, float b, float a)
 {
-    size_t        dsz = sizeof(float) * 4;
+    size_t        dsz = sizeof(pr_color_t);
     pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
     cmd->CommandId    = PR_COMMAND_CLEAR_COLOR_BUFFER;
     cmd->DataSize     = (uint16_t) dsz;
-
-    pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd->Data;
-    data->Red   = r;
-    data->Green = g;
-    data->Blue  = b;
-    data->Alpha = a;
+    pr_color_t  *data = (pr_color_t*) cmd->Data;
+    data->Red   = r; data->Green = g; data->Blue  = b; data->Alpha = a;
 }
 
-/// @summary Write a command to draw a 2D image, possibly with rotation, scaling and image processing.
-/// The presentation layer will automatically unlock the image data after the command is processed.
-/// @param cmdlist The command list to submit to.
-/// @param image_id The application-defined logical image identifier.
-/// @param frame_index The zero-based index of the frame being displayed.
-/// @param format One of dxgi_format_e specifying the data storage format.
-/// @param image_width The total width of the supplied image data, in pixels.
-/// @param image_height The total height of the supplied image data, in pixels.
-/// @param src_x The x-coordinate of the upper-left corner of the source rectangle on the image.
-/// @param src_y The y-coordinate of the upper-left corner of the source rectangle on the image.
-/// @param src_w The width of the source rectangle on the image, in pixels.
-/// @param src_h The height of the source rectangle on the image, in pixels.
-/// @param dst_x The x-coordinate of the upper-left corner of the destination rectangle on the render target.
-/// @param dst_y The y-coordinate of the upper-left corner of the destination rectangle on the render target.
-/// @param dst_w The width of the destination rectangle, in pixels.
-/// @param dst_h The height of the destination rectangle, in pixels.
-/// @param rotation The image rotation, specified in radians.
-/// @param pixels The locked pixel data for the frame.
-/// @param cache The image cache managing the image data.
-/// @param pipeline_id The application-defined image presentation pipeline identifier.
-public_function void pr_command_draw_image_2d(pr_command_list_t *cmdlist, uintptr_t image_id, size_t frame_index, uint32_t format, size_t image_width, size_t image_height, size_t src_x, size_t src_y, size_t src_w, size_t src_h, size_t dst_x, size_t dst_y, size_t dst_w, size_t dst_h, float rotation, void *pixels, image_cache_t *cache, uintptr_t pipeline_id)
+/// @summary Prepares a region of an image for processing or display.
+/// @param cmdlist The command list to update.
+/// @param image The image subresource descriptor defining the data to access.
+public_function void pr_command_prepare_image(pr_command_list_t *cmdlist, pr_image_subresource_t const &image)
 {
-    size_t        dsz = sizeof(pr_draw_image2d_data_t);
+    size_t        dsz = sizeof(pr_image_subresource_t);
     pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
-    cmd->CommandId    = PR_COMMAND_DRAW_IMAGE_2D;
+    cmd->CommandId    = PR_COMMAND_PREPARE_IMAGE;
     cmd->DataSize     = (uint16_t) dsz;
+    pr_image_subresource_t *data = (pr_image_subresource_t*) cmd->Data; *data = image;
+}
 
-    // TODO(rlk): data validation is probably worth it here.
-    pr_draw_image2d_data_t *data = (pr_draw_image2d_data_t*) cmd->Data;
-    data->ImageId     = image_id;
-    data->PipelineId  = pipeline_id;
-    data->FrameId     = (uint32_t) frame_index;
-    data->DXGIFormat  = (uint32_t) format;
-    data->ImageWidth  = (uint32_t) image_width;
-    data->ImageHeight = (uint32_t) image_height;
-    data->SourceX     = (uint32_t) src_x;
-    data->SourceY     = (uint32_t) src_y;
-    data->SourceWidth = (uint32_t) src_w;
-    data->SourceHeight= (uint32_t) src_h;
-    data->TargetX     = (uint32_t) dst_x;
-    data->TargetY     = (uint32_t) dst_y;
-    data->TargetWidth = (uint32_t) dst_w;
-    data->TargetHeight= (uint32_t) dst_h;
-    data->Rotation    = rotation;
-    data->PixelData   = pixels;
-    data->ImageCache  = cache;
+/// @summary Prepares all mipmap levels of an image for processing or display.
+/// @param cmdlist The command list to update.
+/// @param image_id The application-defined logical image identifier.
+/// @param frame The zero-based index of the frame or array element.
+/// @param source The image cache maintaining the image data on the host.
+public_function void pr_command_prepare_image(pr_command_list_t *cmdlist, uintptr_t image_id, size_t frame, image_cache_t *source)
+{
+    size_t        dsz = sizeof(pr_image_subresource_t);
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
+    cmd->CommandId    = PR_COMMAND_PREPARE_IMAGE;
+    cmd->DataSize     = (uint16_t) dsz;
+    pr_image_subresource_t *data = (pr_image_subresource_t*) cmd->Data;
+    pr_image_subresource_init(data, image_id, frame, source);
+}
+
+/// @summary Prepares all mipmap levels of an image for processing or display.
+/// @param cmdlist The command list to update.
+/// @param image_id The application-defined logical image identifier.
+/// @param frame The zero-based index of the frame or array element.
+/// @param source The image cache maintaining the image data on the host.
+/// @param slice_or_face The zero-based index of the slice or cubemap face to access.
+public_function void pr_command_prepare_image(pr_command_list_t *cmdlist, uintptr_t image_id, size_t frame, image_cache_t *source, size_t slice_or_face)
+{
+    size_t        dsz = sizeof(pr_image_subresource_t);
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
+    cmd->CommandId    = PR_COMMAND_PREPARE_IMAGE;
+    cmd->DataSize     = (uint16_t) dsz;
+    pr_image_subresource_t *data = (pr_image_subresource_t*) cmd->Data;
+    data->ImageId          = image_id;
+    data->ImageSource      = source;
+    data->FrameIndex       = frame;
+    data->FirstSliceOrFace = slice_or_face;
+    data->FinalSliceOrFace = slice_or_face;
+    data->FirstLevel       = 0;
+    data->FinalLevel       = PR_LAST_ITEM_INDEX;
+}
+
+/// @summary Prepares a single mipmap level of an image for processing or display.
+/// @param cmdlist The command list to update.
+/// @param image_id The application-defined logical image identifier.
+/// @param frame The zero-based index of the frame or array element.
+/// @param source The image cache maintaining the image data on the host.
+/// @param slice_or_face The zero-based index of the slice or cubemap face to access.
+/// @param mip_level The zero-based index of the mipmap level to access.
+public_function void pr_command_prepare_image(pr_command_list_t *cmdlist, uintptr_t image_id, size_t frame, image_cache_t *source, size_t slice_or_face, size_t mip_level)
+{
+    size_t        dsz = sizeof(pr_image_subresource_t);
+    pr_command_t *cmd = pr_command_list_allocate(cmdlist, PR_COMMAND_SIZE_BASE + dsz);
+    cmd->CommandId    = PR_COMMAND_PREPARE_IMAGE;
+    cmd->DataSize     = (uint16_t) dsz;
+    pr_image_subresource_t *data = (pr_image_subresource_t*) cmd->Data;
+    data->ImageId          = image_id;
+    data->ImageSource      = source;
+    data->FrameIndex       = frame;
+    data->FirstSliceOrFace = slice_or_face;
+    data->FinalSliceOrFace = slice_or_face;
+    data->FirstLevel       = mip_level;
+    data->FinalLevel       = mip_level;
 }
