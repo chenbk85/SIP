@@ -27,9 +27,20 @@
 #include <stdlib.h>
 #include <float.h>
 
+// GLEW configuration - the GLEW implementation is built directly into the 
+// presentation library. build with support for multiple contexts since 
+// we may have multiple windows that produce output. any place that makes 
+// a call into OpenGL or WGL must have a local variable driver that points
+// to the present_driver_gl2_t instance.
+#define  GLEW_MX
 #define  GLEW_STATIC
 #include "GL/glew.h"
 #include "GL/wglew.h"
+#include "glew.c"
+#undef   glewGetContext
+#define  glewGetContext()    (&driver->GLEW)
+#undef   wglewGetContext
+#define  wglewGetContext()   (&driver->WGLEW)
 
 #include "intrinsics.h"
 #include "atomic_fifo.h"
@@ -58,32 +69,84 @@
 
 #include "prcmdlist.cc"
 
-#include "glew.c"
-
 /*/////////////////
 //   Constants   //
 /////////////////*/
+#define GL2_HIDDEN_WNDCLASS_NAME             _T("GL2_Hidden_WndClass")
 
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
+/// @summary Defines the data required to uniquely identify an image.
+struct image_id_t
+{
+    uintptr_t              ImageId;          /// The application-defined image identifier.
+    size_t                 FrameIndex;       /// The zero-based index of the frame of the image.
+};
+
+/// @summary Defines the data required to access an image.
+struct image_data_t
+{
+    void                  *ImageData;        /// Pointer to the locked image data.
+    size_t                 BytesLocked;      /// The number of bytes locked in memory.
+    size_t                 FirstLevel;       /// The zero-based index of the first locked mipmap level.
+    size_t                 LevelCount;       /// The number of locked mipmap levels.
+    size_t                 Width;            /// The width of the first locked mipmap level, in pixels.
+    size_t                 Height;           /// The height of the first locked mipmap level, in pixels.
+    size_t                 Slices;           /// The number of slices in the first locked mipmap level.
+    uint32_t               Format;           /// The underlying storage format (one of dxgi_format_e).
+    int                    Compression;      /// The storage compression format (one of image_compression_e).
+    int                    Encoding;         /// The storage encoding format (one of image_encoding_e).
+};
+
+/// @summary Defines the state data associated with a single in-flight frame. 
+/// Each frame needs to perform several asynchronous operations, such as locking 
+/// images, copying data to GPU memory, and executing compute pipelines. Once 
+/// all asynchronous operations have completed, the frame can be submitted to the GPU.
+struct display_frame_t
+{
+    pr_command_list_t     *CommandList;      /// Pointer to the command list for the frame.
+
+    size_t                 ImageCount;       /// The number of images referenced by the frame.
+    size_t                 ImageCapacity;    /// The current capacity of the image list for the frame.
+    image_id_t            *ImageIds;         /// The set of image identifiers.
+    image_data_t          *ImageData;        /// The set of image data, valid after the corresponding lock has completed.
+};
+
 /// @summary Define all of the state associated with an OpenGL 2.1 display driver. This 
 /// display driver is designed for compatibility across a wide range of hardware, from 
 /// integrated GPUs up, and on both native OS and virtual machines.
 struct present_driver_gl2_t
 {
-    size_t                Width;            /// The width of the window, in pixels.
-    size_t                Height;           /// The height of the window, in pixels.
-    HDC                   DC;               /// The window device context used for rendering operations.
-    HGLRC                 WndRC;            /// The OpenGL rendering context for the window.
-    HGLRC                 MainRC;           /// The primary OpenGL rendering context. All resources are created in this context.
-    HWND                  Window;           /// The handle of the target window.
-    pr_command_queue_t    CommandQueue;     /// The driver's command list submission queue.
+    size_t                 Width;            /// The width of the window, in pixels.
+    size_t                 Height;           /// The height of the window, in pixels.
+    HDC                    WndDC;            /// The window device context used for rendering operations.
+    HGLRC                  WndRC;            /// The OpenGL rendering context for the window.
+    HWND                   Window;           /// The handle of the target window.
+
+    size_t                 FrameCount;       /// The number of in-flight frames.
+    size_t                 FrameCapacity;    /// The current capacity of the frame list.
+    display_frame_t       *FrameList;        /// The list of in-flight frames.
+
+    pr_command_queue_t     CommandQueue;     /// The driver's command list submission queue.
+    GLEWContext            GLEW;             /// The set of GLEW function pointers for this rendering context.
+    WGLEWContext           WGLEW;            /// The set of WGL GLEW function pointers for this rendering context.
 };
 
 /*///////////////
 //   Globals   //
 ///////////////*/
+/// @summary When using the Microsoft Linker, __ImageBase is set to the base address of the DLL.
+/// This is the same as the HINSTANCE/HMODULE of the DLL passed to DllMain.
+/// See: http://blogs.msdn.com/b/oldnewthing/archive/2004/10/25/247180.aspx
+EXTERN_C IMAGE_DOS_HEADER  __ImageBase;
+
+/// @summary The window class for hidden windows used for image streaming and context creation.
+global_variable WNDCLASSEX HiddenWndClass;
+
+/// @summary Global indicating whether the hidden window class needs to be registered.
+global_variable bool       CreateWndClass = true;
+
 // presentation command list is dequeued
 // - create a new local list entry
 // - read all commands, generate list of compute jobs
@@ -104,6 +167,115 @@ struct present_driver_gl2_t
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
+/// @summary Implement the Windows message callback for the main application window.
+/// @param hWnd The handle of the main application window.
+/// @param uMsg The identifier of the message being processed.
+/// @param wParam An unsigned pointer-size value specifying data associated with the message.
+/// @param lParam A signed pointer-size value specifying data associated with the message.
+/// @return The return value depends on the message being processed.
+internal_function LRESULT CALLBACK HiddenWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    return DefWindowProc(hWnd, uMsg, wParam, lParam);
+}
+
+/// @summary Initialize Windows GLEW and resolve WGL extension entry points.
+/// @param driver The presentation driver performing the initialization.
+/// @param real_wnd The handle of the window that is the target of rendering operations.
+/// @param active_dc The device context associated with the current OpenGL rendering context.
+/// @param active_rc The OpenGL rendering context active on the current thread.
+/// @return true if WGLEW is initialized successfully.
+internal_function bool initialize_wglew(present_driver_gl2_t *driver, HWND real_wnd, HDC active_dc, HGLRC active_rc)
+{   
+    PIXELFORMATDESCRIPTOR pfd;
+    RECT   window_rect;
+    GLenum e = GLEW_OK;
+    HWND wnd = NULL;
+    HDC   dc = NULL;
+    HGLRC rc = NULL;
+    bool res = true;
+    int  fmt = 0;
+
+    // if necessary, register the window class used for hidden windows.
+    if (CreateWndClass)
+    {   // the window class is only registered once per-process.
+        CreateWndClass                = false;
+        HiddenWndClass.cbSize         = sizeof(WNDCLASSEX);
+        HiddenWndClass.cbClsExtra     = 0;
+        HiddenWndClass.cbWndExtra     = sizeof(void*);
+        HiddenWndClass.hInstance      = (HINSTANCE)&__ImageBase;
+        HiddenWndClass.lpszClassName  = GL2_HIDDEN_WNDCLASS_NAME;
+        HiddenWndClass.lpszMenuName   = NULL;
+        HiddenWndClass.lpfnWndProc    = HiddenWndProc;
+        HiddenWndClass.hIcon          = LoadIcon  (0, IDI_APPLICATION);
+        HiddenWndClass.hIconSm        = LoadIcon  (0, IDI_APPLICATION);
+        HiddenWndClass.hCursor        = LoadCursor(0, IDC_ARROW);
+        HiddenWndClass.style          = CS_HREDRAW | CS_VREDRAW ;
+        HiddenWndClass.hbrBackground  = NULL;
+        if (!RegisterClassEx(&HiddenWndClass))
+        {   CreateWndClass = true;
+            return false;
+        }
+    }
+
+    // retrieve the window bounds to position and size the dummy window.
+    GetWindowRect(real_wnd, &window_rect);
+
+    // now that we've saved the current DC and rendering context, we need
+    // to create a dummy window, pixel format and rendering context and 
+    // make them current so we can retrieve the wgl extension entry points.
+    // in order to create a rendering context, the pixel format must be set
+    // on a window, and Windows only allows the pixel format to be set once.
+    if ((wnd = CreateWindow(GL2_HIDDEN_WNDCLASS_NAME, _T("WGLEW_InitWnd"), WS_POPUP, window_rect.left, window_rect.top, window_rect.right - window_rect.left, window_rect.bottom - window_rect.top, NULL, NULL, (HINSTANCE)&__ImageBase, driver)) == NULL)
+    {   // unable to create the hidden window - can't create an OpenGL rendering context.
+        res  = false; goto cleanup;
+    }
+    if ((dc  = GetDC(wnd)) == NULL)
+    {   // unable to retrieve the window device context - can't create an OpenGL rendering context.
+        res  = false; goto cleanup;
+    }
+    // fill out a PIXELFORMATDESCRIPTOR using common pixel format attributes.
+    memset(&pfd,   0, sizeof(PIXELFORMATDESCRIPTOR)); 
+    pfd.nSize       = sizeof(PIXELFORMATDESCRIPTOR); 
+    pfd.nVersion    = 1; 
+    pfd.dwFlags     = PFD_DOUBLEBUFFER | PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW; 
+    pfd.iPixelType  = PFD_TYPE_RGBA; 
+    pfd.cColorBits  = 32; 
+    pfd.cDepthBits  = 24; 
+    pfd.cStencilBits=  8;
+    pfd.iLayerType  = PFD_MAIN_PLANE; 
+    if ((fmt = ChoosePixelFormat(dc, &pfd)) == 0)
+    {   // unable to find a matching pixel format - can't create an OpenGL rendering context.
+        res  = false; goto cleanup;
+    }
+    if (SetPixelFormat(dc, fmt, &pfd) != TRUE)
+    {   // unable to set the dummy window pixel format - can't create an OpenGL rendering context.
+        res  = false; goto cleanup;
+    }
+    if ((rc  = wglCreateContext(dc))  == NULL)
+    {   // unable to create the dummy OpenGL rendering context.
+        res  = false; goto cleanup;
+    }
+    if (wglMakeCurrent(dc, rc) != TRUE)
+    {   // unable to make the OpenGL rednering context current.
+        res  = false; goto cleanup;
+    }
+    // finally, we can initialize GLEW and get the function entry points.
+    // this populates the function pointers in the driver->WGLEW field.
+    if ((e   = wglewInit())  != GLEW_OK)
+    {   // unable to initialize GLEW - WGLEW extensions are unavailable.
+        res  = false; goto cleanup;
+    }
+    // initialization completed successfully. fallthrough to cleanup.
+    res = true;
+
+cleanup:
+    wglMakeCurrent(NULL, NULL);
+    wglMakeCurrent(active_dc , active_rc);
+    if (rc  != NULL) wglDeleteContext(rc);
+    if (dc  != NULL) ReleaseDC(wnd, dc);
+    if (wnd != NULL) DestroyWindow(wnd);
+    return res;
+}
 
 /*///////////////////////
 //  Public Functions   //
@@ -119,48 +291,175 @@ uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
     if (driver == NULL)   return 0;
 
     // initialize the fields of the driver structure to be invalid.
-    driver->DC            = NULL;
-    driver->WndRC         = NULL; 
-    driver->MainRC        = wglGetCurrentContext();
-    driver->Window        = NULL;
+    driver->WndDC    = NULL;
+    driver->WndRC    = NULL; 
+    driver->Window   = NULL;
+
+    // save the current device and GL rendering context.
+    HDC   current_dc = wglGetCurrentDC();
+    HGLRC current_rc = wglGetCurrentContext();
 
     // retrieve the current dimensions of the client area of the window.
-    RECT rc;
+    RECT  rc;
     GetClientRect(window, &rc);
-    int width   =(int)    (rc.right  - rc.left);
-    int height  =(int)    (rc.bottom - rc.top);
+    int   width  = (int)  (rc.right  - rc.left);
+    int   height = (int)  (rc.bottom - rc.top);
 
-    // create a memory device context compatible with the screen (window):
-    HDC win_dc  = GetDC(window);
-    HDC mem_dc  = CreateCompatibleDC(win_dc);
-    if (mem_dc == NULL)
-    {
-        OutputDebugString(_T("ERROR: Cannot create memory device context.\n"));
-        ReleaseDC(window, win_dc);
-        free(driver);
+    // initialize WGLEW - lets us proceed with 'modern' style initialization.
+    if (initialize_wglew(driver, window, current_dc, current_rc) == false)
+    {   // no worthwhile OpenGL implementation is available.
         return (uintptr_t) 0;
     }
-    // the window DC is no longer required so release it back to the pool.
-    ReleaseDC(window, win_dc);
+    
+    // save off the window device context:
+    PIXELFORMATDESCRIPTOR pfd;
+    HDC  win_dc = GetDC(window);
+    HGLRC gl_rc = NULL;
+    GLenum  err = GLEW_OK;
+    int     fmt = 0;
+    memset(&pfd , 0, sizeof(PIXELFORMATDESCRIPTOR));
+    pfd.nSize   =    sizeof(PIXELFORMATDESCRIPTOR);
+    pfd.nVersion= 1;
 
-    // ...
-    if (driver->MainRC != NULL)
-    {   // share textures, shaders, programs, etc. between the contexts.
-        wglShareLists(driver->WndRC, driver->MainRC);
+    // for creating a rendering context and pixel format, we can either use
+    // the new method, or if that's not available, fall back to the old way.
+    if (WGLEW_ARB_pixel_format)
+    {   // use the more recent method to find a pixel format.
+        UINT fmt_count     = 0;
+        int  fmt_attribs[] = 
+        {
+            WGL_SUPPORT_OPENGL_ARB,                      GL_TRUE, 
+            WGL_DRAW_TO_WINDOW_ARB,                      GL_TRUE, 
+            WGL_DEPTH_BITS_ARB    ,                           24, 
+            WGL_STENCIL_BITS_ARB  ,                            8,
+            WGL_RED_BITS_ARB      ,                            8, 
+            WGL_GREEN_BITS_ARB    ,                            8,
+            WGL_BLUE_BITS_ARB     ,                            8,
+            WGL_PIXEL_TYPE_ARB    ,            WGL_TYPE_RGBA_ARB,
+            WGL_ACCELERATION_ARB  ,    WGL_FULL_ACCELERATION_ARB, 
+            WGL_SAMPLE_BUFFERS_ARB,                     GL_FALSE, /* GL_TRUE to enable MSAA */
+            WGL_SAMPLES_ARB       ,                            1, /* ex. 4 = 4x MSAA        */
+            0
+        };
+        if (wglChoosePixelFormatARB(win_dc, fmt_attribs, NULL, 1, &fmt, &fmt_count) == FALSE)
+        {   // unable to find a matching pixel format - can't create an OpenGL rendering context.
+            ReleaseDC(window, win_dc);
+            return (uintptr_t) 0;
+        }
     }
     else
-    {   // the WndRC is essentially the main rendering context.
-        driver->MainRC = NULL; // TODO(rlk): set this to WndRC
+    {   // use the legacy method to find the pixel format.
+        pfd.dwFlags     = PFD_DOUBLEBUFFER | PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW; 
+        pfd.iPixelType  = PFD_TYPE_RGBA; 
+        pfd.cColorBits  = 32; 
+        pfd.cDepthBits  = 24; 
+        pfd.cStencilBits=  8;
+        pfd.iLayerType  = PFD_MAIN_PLANE; 
+        if ((fmt = ChoosePixelFormat(win_dc, &pfd)) == 0)
+        {   // unable to find a matching pixel format - can't create an OpenGL rendering context.
+            ReleaseDC(window, win_dc);
+            return (uintptr_t) 0;
+        }
+    }
+    if (SetPixelFormat(win_dc, fmt, &pfd)  != TRUE)
+    {   // unable to assign the pixel format to the window.
+        ReleaseDC(window, win_dc);
+        return (uintptr_t)0;
+    }
+    if (WGLEW_ARB_create_context)
+    {
+        if (WGLEW_ARB_create_context_profile)
+        {
+            int  rc_attribs[] = 
+            {
+                WGL_CONTEXT_MAJOR_VERSION_ARB,    2, 
+                WGL_CONTEXT_MINOR_VERSION_ARB,    1, 
+                WGL_CONTEXT_PROFILE_MASK_ARB ,    WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB,
+#ifdef _DEBUG
+                WGL_CONTEXT_FLAGS_ARB        ,    WGL_CONTEXT_DEBUG_BIT_ARB,
+#endif
+                0
+            };
+            if ((gl_rc = wglCreateContextAttribsARB(win_dc, current_rc, rc_attribs)) == NULL)
+            {   // unable to create the OpenGL rendering context.
+                ReleaseDC(window, win_dc);
+                return (uintptr_t)0;
+            }
+        }
+        else
+        {
+            int  rc_attribs[] = 
+            {
+                WGL_CONTEXT_MAJOR_VERSION_ARB,    2,
+                WGL_CONTEXT_MINOR_VERSION_ARB,    1,
+#ifdef _DEBUG
+                WGL_CONTEXT_FLAGS_ARB        ,    WGL_CONTEXT_DEBUG_BIT_ARB,
+#endif
+                0
+            };
+            if ((gl_rc = wglCreateContextAttribsARB(win_dc, current_rc, rc_attribs)) == NULL)
+            {   // unable to create the OpenGL rendering context.
+                ReleaseDC(window, win_dc);
+                return (uintptr_t)0;
+            }
+        }
+    }
+    else
+    {   // use the legacy method to create the OpenGL rendering context.
+        if ((gl_rc = wglCreateContext(win_dc)) == NULL)
+        {   // unable to create the OpenGL rendering context.
+            ReleaseDC(window, win_dc);
+            return (uintptr_t)0;
+        }
+        if (current_rc != NULL)
+        {   // share textures, shaders, programs, etc. between the rendering contexts.
+            wglShareLists(gl_rc, current_rc);
+        }
+    }
+    if (wglMakeCurrent(win_dc, gl_rc) != TRUE)
+    {   // unable to activate the OpenGL rendering context on the current thread.
+        wglMakeCurrent(current_dc, current_rc);
+        ReleaseDC(window, win_dc);
+        return (uintptr_t)0;
+    }
+    if ((err = glewInit()) != GLEW_OK)
+    {   // unable to initialize GLEW - OpenGL entry points are not available.
+        wglMakeCurrent(current_dc, current_rc);
+        ReleaseDC(window, win_dc);
+        return (uintptr_t)0;
+    }
+    if (GLEW_VERSION_2_1 == GL_FALSE)
+    {   // OpenGL 2.1 is not supported by the driver.
+        wglMakeCurrent(current_dc, current_rc);
+        ReleaseDC(window, win_dc);
+        return (uintptr_t) 0;
     }
 
-    GLenum glewError = glewInit(); // TODO(rlk): requires current context
+    // optionally, enable synchronization with vertical retrace.
+    if (WGLEW_EXT_swap_control)
+    {
+        if (WGLEW_EXT_swap_control_tear)
+        {   // SwapBuffers synchronizes with the vertical retrace interval, 
+            // except when the interval is missed, in which case the swap 
+            // is performed immediately.
+            wglSwapIntervalEXT(-1);
+        }
+        else
+        {   // SwapBuffers synchronizes with the vertical retrace interval.
+            wglSwapIntervalEXT(+1);
+        }
+    }
+
+    // finally, select the master rendering context. 
+    // the window rendering context is only active when submitting a command list.
+    wglMakeCurrent(current_dc, current_rc);
 
     // initialize the fields of the driver structure.
-    driver->Width         = size_t(width);
-    driver->Height        = size_t(height);
-    driver->DC            = mem_dc;
-    driver->WndRC         = NULL; // TODO(rlk): set this
-    driver->Window        = window;
+    driver->Width   = size_t(width);
+    driver->Height  = size_t(height);
+    driver->WndDC   = win_dc;
+    driver->WndRC   = gl_rc;
+    driver->Window  = window;
     pr_command_queue_init(&driver->CommandQueue);
     return (uintptr_t)driver;
 }
@@ -227,6 +526,8 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
     present_driver_gl2_t *driver = (present_driver_gl2_t*) drv;
     if (driver == NULL)   return;
 
+    wglMakeCurrent(driver->WndDC, driver->WndRC);
+
     pr_command_list_t *cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
     while (cmdlist != NULL)
     {
@@ -274,7 +575,8 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
     }
 
     // swap buffers to submit the command list to the OpenGL driver.
-    SwapBuffers(driver->DC);
+    SwapBuffers(driver->WndDC);
+    wglMakeCurrent(NULL, NULL);
 }
 
 /// @summary Closes a display driver instance and releases all associated resources.
@@ -283,6 +585,18 @@ void __cdecl PrDisplayDriverClose(uintptr_t drv)
 {
     present_driver_gl2_t *driver = (present_driver_gl2_t*) drv;
     if (driver == NULL)   return;
+    if (driver->WndRC != NULL)
+    {
+        wglMakeCurrent(NULL, NULL);
+        wglDeleteContext(driver->WndRC);
+    }
+    if (driver->WndDC != NULL)
+    {
+        ReleaseDC(driver->Window, driver->WndDC);
+    }
+    driver->WndDC  = NULL;
+    driver->WndRC  = NULL;
+    driver->Window = NULL;
     pr_command_queue_delete(&driver->CommandQueue);
     free(driver);
 }
