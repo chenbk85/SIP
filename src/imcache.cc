@@ -376,6 +376,10 @@ struct thread_image_cache_t
         uintptr_t          id
     );                                            /// Asynchronoulsy evict all frames of an image, and drop the image record.
 
+    void dispose
+    (
+    );                                            /// Explicitly dispose of all resources.
+
     image_cache_t         *Cache;                 /// The target image cache.
     command_alloc_t        CommandAlloc;          /// The FIFO node allocator for the thread, used to submit control commands.
     declaration_alloc_t    DeclarationAlloc;      /// The FIFO node allocator for the thread, used to submit frame source definitions.
@@ -1936,4 +1940,12 @@ void thread_image_cache_t::evict(uintptr_t id)
 void thread_image_cache_t::drop(uintptr_t id)
 {
     image_cache_drop_image(Cache, id, &CommandAlloc);
+}
+
+/// @summary Disposes of all outstanding allocations, invalidating all pending requests.
+/// The image cache reference is not reset.
+void thread_image_cache_t::dispose(void)
+{
+    fifo_allocator_reinit(&DeclarationAlloc);
+    fifo_allocator_reinit(&CommandAlloc);
 }
