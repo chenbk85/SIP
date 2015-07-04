@@ -432,6 +432,25 @@ internal_function void compute_platform_delete(compute_platform_t *desc)
     memset(desc, 0, sizeof(compute_platform_t));
 }
 
+/// @summary Check a device to determine whether it supports at least OpenCL 1.2.
+/// @param platform The OpenCL platform that defines the device.
+/// @param device_index The zero-based index of the OpenCL device to check.
+/// @return true if the device supports OpenCL 1.2 or later.
+internal_function bool compute_device_supported(compute_platform_t *platform, size_t device_index)
+{
+    int major_ver = 0;
+    int minor_ver = 0;
+    if (sscanf(platform->DeviceVersions[device_index], "OpenCL %d.%d", &major_ver , &minor_ver) != 2)
+    {   // the version string doesn't appear to follow the format spec; ignore this device.
+        return false;
+    }
+    if (major_ver == 1 && minor_ver < 2)
+    {   // the device doesn't support OpenCL 1.2; ignore the device.
+        return false;
+    }
+    return true;
+}
+
 /// @summary Queries the number of OpenCL platforms on the system.
 /// @return The number of OpenCL platforms on the system.
 internal_function cl_uint compute_platform_count(void)
@@ -444,6 +463,9 @@ internal_function cl_uint compute_platform_count(void)
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
+/// @summary Open the compute driver by enumerating all OpenCL-capable devices in the system. 
+/// @param driver The compute driver to initialize.
+/// @return 0 if the driver is opened successfully, or -1 if an error has occurred.
 public_function int compute_driver_open(compute_driver_t *driver)
 {   
     size_t              cpu_device_count  = 0;
@@ -477,8 +499,27 @@ public_function int compute_driver_open(compute_driver_t *driver)
 
         size_t  cpu_count = 0;
         size_t  gpu_count = 0;
-        for (cl_uint device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
+        for (size_t device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
         {
+            int major_ver = 0;
+            int minor_ver = 0;
+            if (sscanf(desc->DeviceVersions[device_index], "OpenCL %d.%d", &major_ver , &minor_ver) != 2)
+            {   // the version string doesn't appear to follow the format spec; ignore this device.
+                OutputDebugString(_T("Unable to determine OpenCL device version from: "));
+                OutputDebugStringA(desc->DeviceNames[device_index]);
+                OutputDebugStringA(desc->DeviceVersions[device_index]);
+                OutputDebugString(_T(".\n"));
+                continue;
+            }
+            if (major_ver == 1 && minor_ver < 2)
+            {   // the device doesn't support OpenCL 1.2; ignore the device.
+                OutputDebugString(_T("Device doesn't support OpenCL 1.2+; skipping: "));
+                OutputDebugStringA(desc->DeviceNames[device_index]);
+                OutputDebugStringA(desc->DeviceVersions[device_index]);
+                OutputDebugStringA(desc->DeviceVersions[device_index]);
+                OutputDebugString(_T(".\n"));
+                continue;
+            }
             if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU) ++cpu_count;
             if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_GPU) ++gpu_count;
         }
@@ -496,9 +537,9 @@ public_function int compute_driver_open(compute_driver_t *driver)
     }
 
     // store all of the resulting data on the driver structure.
-    driver->PlatformCount = (size_t) platform_count;
-    driver->PlatformIds   = platform_ids;
-    driver->Platforms     = platform_desc;
+    driver->PlatformCount     = (size_t) platform_count;
+    driver->PlatformIds       = platform_ids;
+    driver->Platforms         = platform_desc;
 
     // reserve storage for the compute groups:
     driver->CPU.DeviceCount   =  0;
@@ -524,18 +565,25 @@ public_function int compute_driver_open(compute_driver_t *driver)
 
         size_t  cpu_count = 0;
         size_t  gpu_count = 0;
-        for (cl_uint device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
+        for (size_t device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
         {
-            if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU) ++cpu_count;
-            if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_GPU) ++gpu_count;
+            if (compute_device_supported(desc, device_index))
+            {   // only include devices meeting our OpenCL requirements.
+                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU) ++cpu_count;
+                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_GPU) ++gpu_count;
+            }
         }
         if ((cpu_count == gpu_count) && (cpu_count > 0))
         {   // CPUs and GPUs are paired, so these are all APU devices.
-            for (cl_uint device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
+            for (size_t device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
             {
+                if (compute_device_supported(desc, device_index) == false)
+                {   // skip unsupported devices.
+                    continue;
+                }
                 if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU)
                 {   // find the matching GPU device, which will have the same device ID.
-                    for (cl_uint i = 0, n = desc->DeviceCount; i < n; ++i)
+                    for (size_t i = 0, n = desc->DeviceCount; i < n; ++i)
                     {
                         if (desc->DeviceTypes[i] == CL_DEVICE_TYPE_GPU && desc->DeviceIds[i] == desc->DeviceIds[device_index])
                         {   // we've located the corresponding GPU device.
@@ -543,21 +591,21 @@ public_function int compute_driver_open(compute_driver_t *driver)
                             size_t  apu_index = driver->APU.DeviceCount++;
                             driver->APU.CPUDeviceIds[apu_index] = desc->DeviceIds[device_index];
                             driver->APU.GPUDeviceIds[apu_index] = desc->DeviceIds[i];
-                            driver->APU.Devices[apu_index].PlatformId         = platform;
-                            driver->APU.Devices[apu_index].SharedContext      = NULL;
-                            driver->APU.Devices[apu_index].CPU.PlatformId     = platform;
-                            driver->APU.Devices[apu_index].CPU.MasterDeviceId = desc->DeviceIds[device_index];
-                            driver->APU.Devices[apu_index].CPU.SubDeviceCount = 0;
-                            driver->APU.Devices[apu_index].CPU.SubDeviceId    = NULL;
-                            driver->APU.Devices[apu_index].CPU.SubDeviceCaps  = NULL;
-                            driver->APU.Devices[apu_index].CPU.ComputeContext = NULL;
-                            driver->APU.Devices[apu_index].CPU.ComputeQueue   = NULL;
-                            driver->APU.Devices[apu_index].GPU.PlatformId     = platform;
-                            driver->APU.Devices[apu_index].GPU.DeviceId       = desc->DeviceIds[i];
-                            driver->APU.Devices[apu_index].GPU.ComputeContext = NULL;
-                            driver->APU.Devices[apu_index].GPU.ComputeQueue   = NULL;
-                            driver->APU.Devices[apu_index].GPU.TransferQueue  = NULL;
-                            driver->APU.Devices[apu_index].GPU.Capabilities   =&desc->DeviceCaps[i];
+                            driver->APU.Devices     [apu_index].PlatformId         = platform;
+                            driver->APU.Devices     [apu_index].SharedContext      = NULL;
+                            driver->APU.Devices     [apu_index].CPU.PlatformId     = platform;
+                            driver->APU.Devices     [apu_index].CPU.MasterDeviceId = desc->DeviceIds[device_index];
+                            driver->APU.Devices     [apu_index].CPU.SubDeviceCount = 0;
+                            driver->APU.Devices     [apu_index].CPU.SubDeviceId    = NULL;
+                            driver->APU.Devices     [apu_index].CPU.SubDeviceCaps  = NULL;
+                            driver->APU.Devices     [apu_index].CPU.ComputeContext = NULL;
+                            driver->APU.Devices     [apu_index].CPU.ComputeQueue   = NULL;
+                            driver->APU.Devices     [apu_index].GPU.PlatformId     = platform;
+                            driver->APU.Devices     [apu_index].GPU.DeviceId       = desc->DeviceIds[i];
+                            driver->APU.Devices     [apu_index].GPU.ComputeContext = NULL;
+                            driver->APU.Devices     [apu_index].GPU.ComputeQueue   = NULL;
+                            driver->APU.Devices     [apu_index].GPU.TransferQueue  = NULL;
+                            driver->APU.Devices     [apu_index].GPU.Capabilities   =&desc->DeviceCaps[i];
                             break;
                         }
                     }
@@ -566,8 +614,41 @@ public_function int compute_driver_open(compute_driver_t *driver)
         }
         else
         {   // CPUs and GPUs are not paired. treat them individually.
+            for (size_t device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
+            {
+                if (compute_device_supported(desc, device_index) == false)
+                {   // skip unsupported devices.
+                    continue;
+                }
+                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU)
+                {   // the device ranks, caps, contexts and queues are set on CPU configuration.
+                    size_t  cpu_index = driver->CPU.DeviceCount++;
+                    driver->CPU.DeviceIds[cpu_index] = desc->DeviceIds[device_index];
+                    driver->CPU.Devices  [cpu_index].PlatformId     = platform;
+                    driver->CPU.Devices  [cpu_index].MasterDeviceId = desc->DeviceIds[device_index];
+                    driver->CPU.Devices  [cpu_index].ComputeQueue   = NULL;
+                    driver->CPU.Devices  [cpu_index].ComputeContext = NULL;
+                    driver->CPU.Devices  [cpu_index].SubDeviceCount = 0;
+                    driver->CPU.Devices  [cpu_index].SubDeviceId    = NULL;
+                    driver->CPU.Devices  [cpu_index].SubDeviceCaps  = NULL;
+                }
+                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_GPU)
+                {   // GPU devices can't be sub-divided, so set caps, etc.
+                    size_t  gpu_index = driver->GPU.DeviceCount++;
+                    driver->GPU.DeviceIds[gpu_index] = desc->DeviceIds[device_index];
+                    driver->GPU.Devices  [gpu_index].PlatformId     = platform;
+                    driver->GPU.Devices  [gpu_index].DeviceId       = desc->DeviceIds[device_index];
+                    driver->GPU.Devices  [gpu_index].ComputeContext = NULL;
+                    driver->GPU.Devices  [gpu_index].ComputeQueue   = NULL;
+                    driver->GPU.Devices  [gpu_index].TransferQueue  = NULL;
+                    driver->GPU.Devices  [gpu_index].Capabilities   =&desc->DeviceCaps[device_index];
+                }
+            }
         }
     }
+    // TODO(rlk): configure devices.
+    // TODO(rlk): initialize pipelines.
+    return 0;
 }
 
 public_function void compute_driver_close(compute_driver_t *driver)
