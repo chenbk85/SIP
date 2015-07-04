@@ -216,7 +216,7 @@ struct compute_driver_t
     compute_platform_t         *Platforms;            /// The set of platform metadata.
 
     size_t                      PipelineCount;        /// The number of compute pipelines defined.
-    uintptr_t                   PipelineIds;          /// The unique ID of each registered compute pipeline.
+    uintptr_t                  *PipelineIds;          /// The unique ID of each registered compute pipeline.
     void                       *PipelineData;         /// Opaque data associated with each compute pipeline.
 
     compute_group_cpu_t         CPU;                  /// The set of all CPU-only OpenCL compute devices.
@@ -651,8 +651,78 @@ public_function int compute_driver_open(compute_driver_t *driver)
     return 0;
 }
 
+/// @summary Releases all resources associated with an OpenCL compute driver.
+/// @param driver The compute driver to delete.
 public_function void compute_driver_close(compute_driver_t *driver)
-{
+{   // release any resources associated with compute pipelines:
+    for (size_t i = 0, n = driver->PipelineCount; i < n; ++i)
+    {   // TODO(rlk): pipeline cleanup...
+    }
+    free(driver->PipelineData);
+    free(driver->PipelineIds);
+    driver->PipelineCount = 0;
+
+    // release any command queues and contexts allocated to configured devices:
+    for (size_t i = 0, n = driver->CPU.DeviceCount; i < n; ++i)
+    {
+        for (size_t j = 0, m = driver->CPU.Devices[i].SubDeviceCount; j < m; ++j)
+        {
+            clReleaseCommandQueue(driver->CPU.Devices[i].ComputeQueue[j]);
+            clReleaseContext(driver->CPU.Devices[i].ComputeContext[j]);
+        }
+        free(driver->CPU.Devices[i].ComputeContext);
+        free(driver->CPU.Devices[i].ComputeQueue);
+        free(driver->CPU.Devices[i].SubDeviceCaps);
+        free(driver->CPU.Devices[i].SubDeviceId);
+        driver->CPU.Devices[i].SubDeviceCount = 0;
+    }
+    for (size_t i = 0, n = driver->GPU.DeviceCount; i < n; ++i)
+    {
+        clReleaseCommandQueue(driver->GPU.Devices[i].TransferQueue);
+        clReleaseCommandQueue(driver->GPU.Devices[i].ComputeQueue);
+        clReleaseContext(driver->GPU.Devices[i].ComputeContext);
+    }
+    for (size_t i = 0, n = driver->APU.DeviceCount; i < n; ++i)
+    {
+        for (size_t j = 0, m = driver->APU.Devices[i].CPU.SubDeviceCount; j < m; ++j)
+        {
+            clReleaseCommandQueue(driver->APU.Devices[i].CPU.ComputeQueue[j]);
+            clReleaseContext(driver->APU.Devices[i].CPU.ComputeContext[j]);
+        }
+        clReleaseCommandQueue(driver->APU.Devices[i].GPU.TransferQueue);
+        clReleaseCommandQueue(driver->APU.Devices[i].GPU.ComputeQueue);
+        clReleaseContext(driver->APU.Devices[i].GPU.ComputeContext);
+        clReleaseContext(driver->APU.Devices[i].SharedContext);
+        free(driver->APU.Devices[i].CPU.ComputeContext);
+        free(driver->APU.Devices[i].CPU.ComputeQueue);
+        free(driver->APU.Devices[i].CPU.SubDeviceCaps);
+        free(driver->APU.Devices[i].CPU.SubDeviceId);
+        driver->APU.Devices[i].CPU.SubDeviceCount = 0;
+    }
+    free(driver->APU.Devices);
+    free(driver->APU.GPUDeviceRank);
+    free(driver->APU.GPUDeviceIds);
+    free(driver->APU.CPUDeviceRank);
+    free(driver->APU.CPUDeviceIds);
+    free(driver->GPU.Devices);
+    free(driver->GPU.DeviceRank);
+    free(driver->GPU.DeviceIds);
+    free(driver->CPU.Devices);
+    free(driver->CPU.DeviceRank);
+    free(driver->CPU.DeviceIds);
+    driver->CPU.DeviceCount = 0;
+    driver->GPU.DeviceCount = 0;
+    driver->APU.DeviceCount = 0;
+
+    // release resources associated with platform definitions.
+    for (size_t i = 0, n = driver->PlatformCount; i < n; ++i)
+    {
+        compute_platform_delete(&driver->Platforms[i]);
+    }
+    free(driver->Platforms);
+    free(driver->PlatformIds);
+    driver->PlatformCount = 0;
 }
 
 // TODO(rlk): need a function to query the number of physical and logical CPUs/NUMA nodes.
+// See GetLogicalProcessorInformationEx
