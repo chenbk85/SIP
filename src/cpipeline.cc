@@ -647,6 +647,8 @@ public_function int compute_driver_open(compute_driver_t *driver)
         }
     }
     // TODO(rlk): configure devices.
+    // TODO(rlk): during configuration, if a command queue or context is shared between multiple devices, be sure to increase its reference count
+    //            for each device that shares it.
     // TODO(rlk): initialize pipelines.
     return 0;
 }
