@@ -27,27 +27,28 @@
 //   Local Types   //
 ///////////////////*/
 /// @summary Defines the support image cache control commands.
-enum image_cache_command_e          : uint32_t
+enum image_cache_command_e             : uint32_t
 {
-    IMAGE_CACHE_COMMAND_UNLOCK      = 0,          /// Unlock an image; its data is no longer needed.
-    IMAGE_CACHE_COMMAND_LOCK        = 1,          /// Lock an image to access its data. Load it if necessary.
-    IMAGE_CACHE_COMMAND_EVICT       = 2,          /// Evict frames when their lock count reaches zero.
-    IMAGE_CACHE_COMMAND_DROP        = 3,          /// Evict all frames and drop an image as soon as its lock count reaches zero.
+    IMAGE_CACHE_COMMAND_UNLOCK         = 0,       /// Unlock an image; its data is no longer needed.
+    IMAGE_CACHE_COMMAND_LOCK           = 1,       /// Lock an image to access its data. Load it if necessary.
+    IMAGE_CACHE_COMMAND_EVICT          = 2,       /// Evict frames when their lock count reaches zero.
+    IMAGE_CACHE_COMMAND_DROP           = 3,       /// Evict all frames and drop an image as soon as its lock count reaches zero.
 };
 
 /// @summary Defines modifier options that can be specified with a cache control command.
-enum image_cache_command_option_e   : uint32_t
+enum image_cache_command_option_e      : uint32_t
 {
-    IMAGE_CACHE_COMMAND_OPTION_NONE =(0 << 0),    /// No special behavior is requested.
-    IMAGE_CACHE_COMMAND_OPTION_EVICT=(1 << 0),    /// Valid on unlock. If the lock count after unlock is zero, drop the image.
+    IMAGE_CACHE_COMMAND_OPTION_NONE    =(0 << 0), /// No special behavior is requested.
+    IMAGE_CACHE_COMMAND_OPTION_EVICT   =(1 << 0), /// Valid on unlock. If the lock count after unlock is zero, drop the image.
+    IMAGE_CACHE_COMMAND_OPTION_PRELOAD =(1 << 1), /// Valid on lock. Load the image into image memory, but don't lock it.
 };
 
 /// @summary Defines status flags that can be set on cache entries.
-enum image_cache_entry_flag_e       : uint32_t
+enum image_cache_entry_flag_e          : uint32_t
 {
-    IMAGE_CACHE_ENTRY_FLAG_NONE     =(0 << 0),    /// No special status flags are set.
-    IMAGE_CACHE_ENTRY_FLAG_EVICT    =(1 << 0),    /// The frame(s) should be dropped when its lock count reaches zero.
-    IMAGE_CACHE_ENTRY_FLAG_DROP     =(1 << 1),    /// All information about the image should be deleted when it falls out of cache.
+    IMAGE_CACHE_ENTRY_FLAG_NONE        =(0 << 0), /// No special status flags are set.
+    IMAGE_CACHE_ENTRY_FLAG_EVICT       =(1 << 0), /// The frame(s) should be dropped when its lock count reaches zero.
+    IMAGE_CACHE_ENTRY_FLAG_DROP        =(1 << 1), /// All information about the image should be deleted when it falls out of cache.
 };
 
 /// @summary Defines the supported victim selection behaviors of the image cache.
@@ -181,6 +182,7 @@ struct image_loads_data_t
     size_t               FrameCapacity;           /// The number of frame indices that can be stored in FrameList.
     size_t              *FrameList;               /// The set of frame indices waiting to be loaded.
     uint64_t            *RequestTime;             /// The set of frame initial request times, in nanoseconds.
+    uint32_t            *LockCounts;              /// The set of pending lock counts. Preload-only commands don't increment the lock count.
     error_queues_t      *ErrorQueues;             /// The set of frame load error queues.
     result_queues_t     *ResultQueues;            /// The set of frame load result queues.
 };
@@ -365,6 +367,14 @@ struct thread_image_cache_t
         size_t             final_frame, 
         uint32_t           options      = IMAGE_CACHE_COMMAND_OPTION_NONE
     );                                            /// Asynchronously unlock one or more frames in cache memory.
+
+    void preload
+    (
+        uintptr_t          id, 
+        size_t             first_frame, 
+        size_t             final_frame, 
+        uint8_t            priority
+    );                                            /// Asynchronously preload one or more frames into cache memory.
 
     void evict
     (
@@ -857,21 +867,23 @@ internal_function size_t image_cache_frame_load_list_put(image_loads_data_t &loa
         size_t  new_amount = calculate_capacity(old_amount, old_amount+1, 1024, 128);
         size_t         *nf =(size_t  *)realloc (load.FrameList   , new_amount * sizeof(size_t));
         uint64_t       *nt =(uint64_t*)realloc (load.RequestTime , new_amount * sizeof(uint64_t));
+        uint32_t       *nl =(uint32_t*)realloc (load.LockCounts  , new_amount * sizeof(uint32_t));
         equeue_t       *ne =(equeue_t*)realloc (load.ErrorQueues , new_amount * sizeof(equeue_t));
         rqueue_t       *nr =(rqueue_t*)realloc (load.ResultQueues, new_amount * sizeof(rqueue_t));
         if (nf != NULL) load.FrameList      = nf;
         if (nt != NULL) load.RequestTime    = nt;
+        if (nl != NULL) load.LockCounts     = nl;
         if (ne != NULL) load.ErrorQueues    = ne;
         if (nr != NULL) load.ResultQueues   = nr;
-        if (nf != NULL && nt != NULL && ne != NULL && nr != NULL)
+        if (nf != NULL && nt != NULL && nl != NULL && ne != NULL && nr != NULL)
         {   // all lists reallocated successfully. update capacity.
             load.FrameCapacity = new_amount;
             // initialize any new queue lists.
             size_t new_first   = old_amount;
             size_t new_count   = new_amount - old_amount;
-            for (size_t n = 0, i = new_first; n < new_count; ++n, ++i)
+            for (size_t n = 0, i = new_first; n < new_count;  ++n, ++i)
             {
-                frame_load_queue_list_create(&load.ErrorQueues[i] , 1);
+                frame_load_queue_list_create(&load.ErrorQueues [i], 1);
                 frame_load_queue_list_create(&load.ResultQueues[i], 8);
             }
         }
@@ -924,8 +936,9 @@ internal_function uint32_t image_cache_load_frame(image_cache_t *cache, image_lo
     
     if (new_frame)
     {   // initialize the frame pending-load state.
-        load.FrameList  [list_index] = frame_index;
-        load.RequestTime[list_index] = now_time;
+        load.FrameList  [list_index]  = frame_index;
+        load.RequestTime[list_index]  = now_time;
+        load.LockCounts [list_index]  = 0;
         // submit the load requests for each frame.
         uint32_t    file_error = ERROR_NOT_FOUND;
         for (size_t file_index = 0, file_count = file_info.FileCount; file_index < file_count; ++file_index)
@@ -968,6 +981,10 @@ internal_function uint32_t image_cache_load_frame(image_cache_t *cache, image_lo
         {
             return file_error;
         }
+    }
+    if ((cmd.Options & IMAGE_CACHE_COMMAND_OPTION_PRELOAD) == 0)
+    {   // increment the pending lock count for the frame.
+        load.LockCounts[list_index]++;
     }
     // add the queues to the notify lists.
     frame_load_queue_list_put(&load.ErrorQueues [list_index], cmd.ErrorQueue);
@@ -1114,18 +1131,27 @@ internal_function uint32_t image_cache_process_lock(image_cache_t *cache, image_
             for (size_t i = 0, n = entry.FrameCount; i < n; ++i)
             {
                 if (entry.FrameList[i] == frame_index)
-                {   // update the state of the cache entry. increment the lock 
-                    // count so that the frame won't get evicted from cache memory.
-                    entry.FrameState[i].LastRequestTime = now_time;
-                    entry.FrameState[i].LockCount++;
-                    // complete the lock request for the caller.
-                    image_location_t loc;
-                    loc.ImageId        = cmd.ImageId;
-                    loc.FrameIndex     = frame_index;
-                    loc.BaseAddress    = entry.FrameData[i].BaseAddress;
-                    loc.BytesReserved  = entry.FrameData[i].BytesReserved;
-                    loc.Context        = entry.FrameData[i].Context;
-                    image_cache_complete_lock(cache, cmd.ResultQueue, loc, image_info);
+                {   
+                    if (cmd.Options & IMAGE_CACHE_COMMAND_OPTION_PRELOAD)
+                    {   // for preload only, just update the last request time.
+                        // do not increment the lock count, as there will be no corresponding unlock.
+                        // likewise, don't generate a lock completion event.
+                        entry.FrameState[i].LastRequestTime = now_time;
+                    }
+                    else
+                    {   // update the state of the cache entry. increment the lock 
+                        // count so that the frame won't get evicted from cache memory.
+                        entry.FrameState[i].LastRequestTime = now_time;
+                        entry.FrameState[i].LockCount++;
+                        // complete the lock request for the caller.
+                        image_location_t loc;
+                        loc.ImageId        = cmd.ImageId;
+                        loc.FrameIndex     = frame_index;
+                        loc.BaseAddress    = entry.FrameData[i].BaseAddress;
+                        loc.BytesReserved  = entry.FrameData[i].BytesReserved;
+                        loc.Context        = entry.FrameData[i].Context;
+                        image_cache_complete_lock(cache, cmd.ResultQueue, loc, image_info);
+                    }
                     // no need to re-load this frame into cache.
                     load_the_frame = false;
                     frames_in_cache++;
@@ -1298,10 +1324,11 @@ internal_function void image_cache_update_image_definition(image_cache_t *cache,
 /// @return ERROR_SUCCESS, or a system error code.
 internal_function uint32_t image_cache_update_location(image_cache_t *cache, image_location_t const &pos, uint64_t now_time)
 {   
-    uint64_t  t_start   = 0;
-    bool   lock_frame   = false;
-    size_t load_index   = 0;
-    size_t total_frames = 0;
+    uint64_t t_start      = 0;
+    uint32_t lock_count   = 0;     // the number of locks waiting on the load to complete
+    bool     loaded_frame = false; // was the frame just loaded?
+    size_t   load_index   = 0;
+    size_t   total_frames = 0;
 
     // determine the total number of image elements.
     AcquireSRWLockShared(&cache->MetadataLock);
@@ -1355,9 +1382,12 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
                 {   // copy the request time to the new record.
                     load.FrameList  [list_index] = i;
                     load.RequestTime[list_index] = load.RequestTime[all_frames_ix];
+                    load.LockCounts [list_index] = 0;
                 }
                 if (list_index != all_frames_ix)
-                {   // copy the request and error queues to the new record.
+                {   // copy the lock count over to the new record.
+                    load.LockCounts[list_index] = load.LockCounts[all_frames_ix];
+                    // copy the request and error queues to the new record.
                     for (size_t j = 0, m = load.ErrorQueues[all_frames_ix].QueueCount; j < m; ++j)
                     {
                         frame_load_queue_list_put(
@@ -1378,7 +1408,9 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
         for (size_t frame_index = 0, frame_count = load.FrameCount; frame_index < frame_count; ++frame_index)
         {
             if (load.FrameList[frame_index] == pos.FrameIndex)
-            {   // post the lock result to every registered queue.
+            {   // save off the number of pending locks.
+                lock_count = load.LockCounts[frame_index];
+                // post the lock result to every registered queue.
                 for (size_t i = 0, n = load.ResultQueues[frame_index].QueueCount; i < n; ++i)
                 {
                     image_cache_complete_lock(cache, load.ResultQueues[frame_index].QueueList[i], pos, image_info);
@@ -1386,8 +1418,8 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
                 // images are only ever loaded in response to a lock request.
                 // indicate that we need to increment the lock count, and also
                 // save off the request time to track frame load time.
-                lock_frame = true;
-                t_start    = load.RequestTime[frame_index];
+                loaded_frame = true;
+                t_start      = load.RequestTime[frame_index];
                 // the frame has finished loading, so remove it from the list.
                 frame_load_queue_list_clear(&load.ErrorQueues [frame_index]);
                 frame_load_queue_list_clear(&load.ResultQueues[frame_index]);
@@ -1396,6 +1428,7 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
                 size_t last_frame = load.FrameCount - 1;
                 array_swap(load.FrameList   , this_frame, last_frame);
                 array_swap(load.RequestTime , this_frame, last_frame);
+                array_swap(load.LockCounts  , this_frame, last_frame);
                 array_swap(load.ErrorQueues , this_frame, last_frame);
                 array_swap(load.ResultQueues, this_frame, last_frame);
                 load.FrameCount--;
@@ -1436,9 +1469,9 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
             entry.FrameData[i].BytesReserved = pos.BytesReserved;
             entry.FrameData[i].Context       = pos.Context;
             // update the cache data of the entry, if it was just loaded.
-            if (lock_frame)
+            if (loaded_frame)
             {
-                entry.FrameState[i].LockCount++;
+                entry.FrameState[i].LockCount      += lock_count;
                 entry.FrameState[i].Attributes      = IMAGE_CACHE_ENTRY_FLAG_NONE;
                 entry.FrameState[i].LastRequestTime = now_time;
                 entry.FrameState[i].TimeToLoad      = now_time - t_start;
@@ -1465,7 +1498,7 @@ internal_function uint32_t image_cache_update_location(image_cache_t *cache, ima
         entry.FrameData [frame_index].BaseAddress     = pos.BaseAddress;
         entry.FrameData [frame_index].BytesReserved   = pos.BytesReserved;
         entry.FrameData [frame_index].Context         = pos.Context;
-        entry.FrameState[frame_index].LockCount       = 1;
+        entry.FrameState[frame_index].LockCount       = lock_count;
         entry.FrameState[frame_index].Attributes      = IMAGE_CACHE_ENTRY_FLAG_NONE;
         entry.FrameState[frame_index].LastRequestTime = now_time;
         entry.FrameState[frame_index].TimeToLoad      = now_time - t_start;
@@ -1788,6 +1821,27 @@ public_function void image_cache_unlock_frames(image_cache_t *cache, uintptr_t i
     mpsc_fifo_u_produce(&cache->CommandQueue, n);
 }
 
+/// @summary Request that one or more frames of an image be preloaded into cache memory for access.
+/// @param cache The image cache managing the image.
+/// @param id The application-defined identifier of the image to preload.
+/// @param first_frame The zero-based index of the first frame to preload.
+/// @param final_frame The zero-based index of the last frame to lpreload, or IMAGE_ALL_FRAMES.
+/// @param priority The priority value to use if a frame needs to be re-loaded into cache memory.
+/// @param thread_alloc The allocator used to submit cache control commands from the calling thread.
+public_function void image_cache_preload_frames(image_cache_t *cache, uintptr_t id, size_t first_frame, size_t final_frame, uint8_t priority, image_command_alloc_t *thread_alloc)
+{
+    fifo_node_t<image_cache_command_t> *n = fifo_allocator_get(thread_alloc);
+    n->Item.CommandId   = IMAGE_CACHE_COMMAND_LOCK;
+    n->Item.ImageId     = id;
+    n->Item.Options     = IMAGE_CACHE_COMMAND_OPTION_PRELOAD;
+    n->Item.FirstFrame  = first_frame;
+    n->Item.FinalFrame  = final_frame;
+    n->Item.ErrorQueue  = NULL;
+    n->Item.ResultQueue = NULL;
+    n->Item.Priority    = priority;
+    mpsc_fifo_u_produce(&cache->CommandQueue, n);
+}
+
 /// @summary Executes a single update tick for an image cache.
 /// @param cache The image cache to update.
 public_function void image_cache_update(image_cache_t *cache)
@@ -1926,6 +1980,16 @@ void thread_image_cache_t::lock(uintptr_t id, size_t first_frame, size_t final_f
 void thread_image_cache_t::unlock(uintptr_t id, size_t first_frame, size_t final_frame, uint32_t options)
 {
     image_cache_unlock_frames(Cache, id, first_frame, final_frame, options, &CommandAlloc);
+}
+
+/// @summary Preload one or more frames of an image into cache memory.
+/// @param id The application-defined identifier of the image to preload.
+/// @param first_frame The zero-based index of the first frame to preload.
+/// @param final_frame The zero-based index of the last frame to preload, or IMAGE_ALL_FRAMES.
+/// @param priority The priority value to use if a frame needs to be loaded into cache memory.
+void thread_image_cache_t::preload(uintptr_t id, size_t first_frame, size_t final_frame, uint8_t priority)
+{
+    image_cache_preload_frames(Cache, id, first_frame, final_frame, priority, &CommandAlloc);
 }
 
 /// @summary Mark all frames of an image to be evicted from cache memory.
