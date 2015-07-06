@@ -16,58 +16,6 @@
 /*////////////////
 //   Includes   //
 ////////////////*/
-#include <Windows.h>
-#include <objbase.h>
-#include <ShlObj.h>
-#include <tchar.h>
-
-#include <assert.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <float.h>
-
-// GLEW configuration - the GLEW implementation is built directly into the 
-// presentation library. build with support for multiple contexts since 
-// we may have multiple windows that produce output. any place that makes 
-// a call into OpenGL or WGL must have a local variable driver that points
-// to the present_driver_gl2_t instance.
-#define  GLEW_MX
-#define  GLEW_STATIC
-#include "GL/glew.h"
-#include "GL/wglew.h"
-#include "glew.c"
-#undef   glewGetContext
-#define  glewGetContext()    (&driver->GLEW)
-#undef   wglewGetContext
-#define  wglewGetContext()   (&driver->WGLEW)
-
-#include "intrinsics.h"
-#include "atomic_fifo.h"
-
-#include "runtime.cc"
-
-#include "idtable.cc"
-#include "strtable.cc"
-#include "parseutl.cc"
-
-#include "filepath.cc"
-#include "iobuffer.cc"
-#include "aiodriver.cc"
-#include "iodecoder.cc"
-#include "piodriver.cc"
-#include "vfsdriver.cc"
-#include "threadio.cc"
-
-#include "imtypes.cc"
-#include "immemory.cc"
-#include "imencode.cc"
-#include "imparser.cc"
-#include "imparser_dds.cc"
-#include "imloader.cc"
-#include "imcache.cc"
-
-#include "prcmdlist.cc"
 
 /*/////////////////
 //   Constants   //

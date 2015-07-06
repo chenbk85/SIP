@@ -19,46 +19,6 @@
 /*////////////////
 //   Includes   //
 ////////////////*/
-#include <assert.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <Windows.h>
-#include <objbase.h>
-#include <ShlObj.h>
-#include <tchar.h>
-#include <float.h>
-
-#include <d2d1_1.h>
-#include <d3d11_1.h>
-#include <dwrite_1.h>
-
-#include "intrinsics.h"
-#include "atomic_fifo.h"
-
-#include "runtime.cc"
-
-#include "idtable.cc"
-#include "strtable.cc"
-#include "parseutl.cc"
-
-#include "filepath.cc"
-#include "iobuffer.cc"
-#include "aiodriver.cc"
-#include "iodecoder.cc"
-#include "piodriver.cc"
-#include "vfsdriver.cc"
-#include "threadio.cc"
-
-#include "imtypes.cc"
-#include "immemory.cc"
-#include "imencode.cc"
-#include "imparser.cc"
-#include "imparser_dds.cc"
-#include "imloader.cc"
-#include "imcache.cc"
-
-#include "prcmdlist.cc"
 
 /*/////////////////
 //   Constants   //
@@ -550,7 +510,7 @@ void __cdecl PrPresentFrameToWindow(uintptr_t drv)
                     break;
                 case PR_COMMAND_CLEAR_COLOR_BUFFER:
                     {
-                        pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd_info->Data;
+                        pr_color_t   *data = (pr_color_t*) cmd_info->Data;
                         D2D1_COLOR_F  clear_color;
                         clear_color.r = data->Red;
                         clear_color.g = data->Green;

@@ -16,47 +16,6 @@
 /*////////////////
 //   Includes   //
 ////////////////*/
-#include <Windows.h>
-#include <objbase.h>
-#include <ShlObj.h>
-#include <tchar.h>
-
-#include <assert.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <float.h>
-
-#include "intrinsics.h"
-#include "atomic_fifo.h"
-
-#include "runtime.cc"
-
-#include "idtable.cc"
-#include "strtable.cc"
-#include "parseutl.cc"
-
-#include "filepath.cc"
-#include "iobuffer.cc"
-#include "aiodriver.cc"
-#include "iodecoder.cc"
-#include "piodriver.cc"
-#include "vfsdriver.cc"
-#include "threadio.cc"
-
-#include "imtypes.cc"
-#include "immemory.cc"
-#include "imencode.cc"
-#include "imparser.cc"
-#include "imparser_dds.cc"
-#include "imloader.cc"
-#include "imcache.cc"
-
-#include "prcmdlist.cc"
-
-#include "cpipeline.cc"
-#include "gpipeline.cc"
-#include "gpipeline_gdi.cc"
 
 /*/////////////////
 //   Constants   //

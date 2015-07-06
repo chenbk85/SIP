@@ -20,13 +20,49 @@
 #include <crtdbg.h>
 #endif
 
+#ifndef  PRESENT_DRIVER_GDI
+#define  PRESENT_DRIVER_GDI   1
+#endif
+
+#ifndef  PRESENT_DRIVER_D2D
+#define  PRESENT_DRIVER_D2D   0
+#endif
+
+#ifndef  PRESENT_DRIVER_GL3
+#define  PRESENT_DRIVER_GL3   0
+#endif
+
 /*////////////////
 //   Includes   //
 ////////////////*/
 #include <Windows.h>
+#include <process.h>
 #include <objbase.h>
 #include <ShlObj.h>
 #include <tchar.h>
+
+#if PRESENT_DRIVER_D2D
+#include <d2d1_1.h>
+#include <d3d11_1.h>
+#include <dwrite_1.h>
+#endif
+
+#if PRESENT_DRIVER_GL3
+// GLEW configuration - the GLEW implementation is built directly into the 
+// presentation library. build with support for multiple contexts since 
+// we may have multiple windows that produce output. any place that makes 
+// a call into OpenGL or WGL must have a local variable driver that points
+// to the present_driver_gl3_t instance.
+#define  GLEW_MX
+#define  GLEW_STATIC
+#include "GL/glew.h"
+#include "GL/wglew.h"
+#include "glew.c"
+#undef   glewGetContext
+#define  glewGetContext()    (&driver->GLEW)
+#undef   wglewGetContext
+#define  wglewGetContext()   (&driver->WGLEW)
+#endif
 
 #include <assert.h>
 #include <stddef.h>
@@ -60,7 +96,20 @@
 #include "imcache.cc"
 
 #include "prcmdlist.cc"
-#include "presentation.cc"
+
+#if PRESENT_DRIVER_GL3
+#include "gl3driver.cc"
+#endif
+
+#if PRESENT_DRIVER_D2D
+#include "d2ddriver.cc"
+#endif
+
+#if PRESENT_DRIVER_GDI
+#include "gdidriver.cc"
+#endif
+
+#include "ocldriver.cc"
 
 /*/////////////////
 //   Constants   //
@@ -71,6 +120,16 @@ static uint64_t const SEC_TO_NANOSEC = 1000000000ULL;
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
+/// @summary Defines the data required by the background I/O thread.
+struct io_thread_args_t
+{
+    HANDLE          Shutdown;    /// A manual reset event used to signal thread shutdown.
+    aio_driver_t   *AIODriver;   /// The application asynchronous I/O driver.
+    pio_driver_t   *PIODriver;   /// The application prioritized I/O driver.
+    vfs_driver_t   *VFSDriver;   /// The application virtual file system driver.
+    image_memory_t *ImageMemory; /// The memory block into which image data will be loaded.
+    image_cache_t  *ImageCache;  /// The image cache used to manage the image memory.
+};
 
 /*///////////////
 //   Globals   //
@@ -120,6 +179,16 @@ internal_function inline uint64_t nanotime(void)
     return (SEC_TO_NANOSEC * uint64_t(counter.QuadPart) / uint64_t(Global_ClockFrequency));
 }
 
+/// @summary Retrieve the current high-resolution timer value.
+/// @param frequency The clock frequency, in ticks-per-second.
+/// @return The current time value, specified in nanoseconds.
+internal_function inline uint64_t nanotime(int64_t frequency)
+{
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return (SEC_TO_NANOSEC * uint64_t(counter.QuadPart) / uint64_t(frequency));
+}
+
 /// @summary Calculate the elapsed time in nanoseconds.
 /// @param start The nanosecond timestamp at the start of the measured interval.
 /// @param end The nanosecond timestamp at the end of the measured interval.
@@ -146,6 +215,15 @@ internal_function inline float ticks_to_seconds(int64_t ticks)
     return ((float) ticks / (float) Global_ClockFrequency);
 }
 
+/// @summary Convert a time duration specified in system ticks to seconds.
+/// @param ticks The duration, specified in system ticks.
+/// @param frequency The clock frequency in ticks-per-second.
+/// @return The specified duration, specified in seconds.
+internal_function inline float ticks_to_seconds(int64_t ticks, int64_t frequency)
+{
+    return ((float) ticks / (float) frequency);
+}
+
 /// @summary Convert a time duration specified in nanoseconds to seconds.
 /// @param nanos The duration, specified in nanoseconds.
 /// @return The specified duration, specified in nanoseconds.
@@ -154,7 +232,7 @@ internal_function inline float nanos_to_seconds(int64_t nanos)
     return ((float) nanos / (float) SEC_TO_NANOSEC);
 }
 
-/// @summaey Toggles the window styles of a given window between standard 
+/// @summary Toggles the window styles of a given window between standard 
 /// windowed mode and a borderless fullscreen" mode. The display resolution
 /// is not changed, so rendering will be performed at the desktop resolution.
 /// @param window The window whose styles will be updated.
@@ -181,6 +259,140 @@ internal_function void toggle_fullscreen(HWND window)
     }
 }
 
+/// @summary Helper function used to terminate the calling thread.
+/// @param retval The thread exit code.
+/// @return The value specified in retval.
+internal_function unsigned thread_terminate(unsigned retval)
+{
+    _endthreadex(retval);
+    return retval;
+}
+
+/// @summary Implements the main loop of the application background I/O thread.
+/// @param args An instance of io_thread_args_t.
+/// @return Zero if the thread has terminated normally.
+internal_function unsigned __stdcall IoDriverThread(void *args)
+{
+    io_thread_args_t          *state  = (io_thread_args_t*) args;
+    image_cache_error_queue_t  cache_error_queue;
+    image_load_error_queue_t   load_error_queue;
+    image_loader_t             raw_loader_state;
+    image_loader_config_t      raw_loader_config;
+    thread_image_loader_t      raw_image_loader;
+    thread_io_t                io;
+
+    // save local references to values used in the main loop:
+    HANDLE         Shutdown    = state->Shutdown;
+    aio_driver_t  *AIODriver   = state->AIODriver;
+    pio_driver_t  *PIODriver   = state->PIODriver;
+    vfs_driver_t  *VFSDriver   = state->VFSDriver;
+    image_cache_t *ImageCache  = state->ImageCache;
+    image_memory_t*ImageMemory = state->ImageMemory;
+
+    // assist event identification in trace output.
+    trace_thread_id("I/O");
+
+    // save the high-resolution clock frequency.
+    LARGE_INTEGER clock_frequency;
+    QueryPerformanceFrequency(&clock_frequency);
+
+    // initialize interfaces used to access the I/O subsystem:
+    io.initialize(VFSDriver);
+
+    // initialize interfaces used to access the imaging subsystem:
+    mpsc_fifo_u_init(&load_error_queue);
+    mpsc_fifo_u_init(&cache_error_queue);
+    raw_loader_config.VFSDriver       = VFSDriver;
+    raw_loader_config.ImageMemory     = ImageMemory;
+    raw_loader_config.DefinitionQueue =&ImageCache->DefinitionQueue;
+    raw_loader_config.PlacementQueue  =&ImageCache->LocationQueue;
+    raw_loader_config.ErrorQueue      =&load_error_queue;
+    raw_loader_config.ImageCapacity   = 1;
+    raw_loader_config.Compression     = IMAGE_COMPRESSION_NONE;
+    raw_loader_config.Encoding        = IMAGE_ENCODING_RAW;
+    image_loader_create(&raw_loader_state, raw_loader_config);
+    raw_image_loader.initialize(&raw_loader_state);
+
+    // save the current timestamp, used to throttle the update loop.
+    int64_t  const time_slice = (16LL * 1000000LL) + (6000000LL); // 16.6ms -> ns
+    uint64_t       prev_time  = nanotime(clock_frequency.QuadPart);
+
+    for ( ; ; )
+    {   // check to see whether the I/O thread is being terminated:
+        if (WaitForSingleObjectEx(Shutdown, 0, FALSE) == WAIT_OBJECT_0)
+        {   // thread termination has been signaled:
+            break;
+        }
+
+        // poll the underlying I/O drivers. the PIO driver generates AIO 
+        // driver events, so execute its update first, followed by AIO.
+        pio_driver_poll(PIODriver);
+        aio_driver_poll(AIODriver);
+
+        // poll the image cache. this may generate load and/or eviction requests.
+        // load requests will be directed to one of the image loaders.
+        // eviction requests are directed to the image memory manager.
+        image_cache_update(ImageCache);
+        
+        // process events generated by the imaging subsystem.
+        image_load_t ld;
+        while (spsc_fifo_u_consume(&ImageCache->LoadQueue, ld))
+        {
+            raw_image_loader.load(ld);
+        }
+        image_location_t ev;
+        while (spsc_fifo_u_consume(&ImageCache->EvictQueue, ev))
+        {
+            image_memory_evict_element(state->ImageMemory, ev.ImageId, ev.FrameIndex);
+        }
+
+        // poll the image loaders. this will produce events in the image cache's 
+        // definition and location queues, and possibly error events in our queue.
+        image_loader_update(&raw_loader_state);
+
+        // process any image load errors generated by the loader update step.
+        image_load_error_t le;
+        while (mpsc_fifo_u_consume(&load_error_queue, le))
+        {
+            dbg_printf("Error loading %s.\n", le.FilePath);
+        }
+
+        // sleep for the remainder of the timeslice.
+        uint64_t curr_time = nanotime(clock_frequency.QuadPart);
+        int64_t  elapsed_t = elapsed_nanos(prev_time, curr_time);
+        prev_time = curr_time; // swap time values
+        if ((time_slice - elapsed_t) >= 1000000)
+        {   // there's at least 1ms remaining in the timeslice. sleep.
+            DWORD sleep_time = (DWORD) ((time_slice - elapsed_t) / 1000000);
+            Sleep(sleep_time);
+        }
+    }
+
+    // cleanup resources and terminate the thread.
+    image_loader_delete(&raw_loader_state);
+    mpsc_fifo_u_delete(&cache_error_queue);
+    mpsc_fifo_u_delete(&load_error_queue);
+    return thread_terminate(0);
+}
+
+/// @summary Launch the background I/O thread.
+/// @param args I/O thread data.
+/// @return The thread handle, or INVALID_HANDLE_VALUE.
+internal_function HANDLE launch_io_thread(io_thread_args_t *args)
+{
+    return (HANDLE) _beginthreadex(NULL, 0, IoDriverThread, args, 0, NULL);
+}
+
+/// @summary Perform any mount-point setup for the I/O system on the main thread.
+/// @param io The I/O system interface for the main thread.
+/// @return true if the I/O system setup completed successfully.
+internal_function bool io_setup(thread_io_t *io)
+{
+    io->mount(VFS_KNOWN_PATH_EXECUTABLE, "/exec", 0, 0);
+    io->mountv("/exec/images", "/images", 0, 1);
+    return true;
+}
+
 /// @summary Implement the Windows message callback for the main application window.
 /// @param hWnd The handle of the main application window.
 /// @param uMsg The identifier of the message being processed.
@@ -189,7 +401,7 @@ internal_function void toggle_fullscreen(HWND window)
 /// @return The return value depends on the message being processed.
 internal_function LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-	display_driver_t *display = (display_driver_t*) GetWindowLongPtr(hWnd, GWLP_USERDATA);
+	uintptr_t display = (uintptr_t) GetWindowLongPtr(hWnd, GWLP_USERDATA);
 
     switch (uMsg)
     {
@@ -203,7 +415,10 @@ internal_function LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wPar
 
     case WM_SIZE:
         {	// we'll receive WM_SIZE messages prior to the display driver being set up.
-            if (display != NULL) display->resize();
+            if (display != 0)
+            {
+                PrDisplayDriverResize(display);
+            }
         }
         break;
 
@@ -247,7 +462,6 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 #endif
 
     file_list_t      image_files;
-	display_driver_t display;
     int result = 0; // return zero if the message loop isn't entered.
     UNREFERENCED_PARAMETER(hPrev);
     UNREFERENCED_PARAMETER(lpCmdLine);
@@ -264,47 +478,46 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     win32_runtime_elevate();
 
     // initialize the I/O subsystem.
-    aio_driver_t aio; aio_driver_open(&aio);
-    pio_driver_t pio; pio_driver_open(&pio, &aio);
-    vfs_driver_t vfs; vfs_driver_open(&vfs, &aio, &pio);
-    thread_io_t   io; io.initialize(&vfs);
-    io.mount(VFS_KNOWN_PATH_EXECUTABLE, "/exec", 0, 0);
-    io.mountv("/exec/images", "/images", 0, 1);
+    aio_driver_t  aio; aio_driver_open(&aio);
+    pio_driver_t  pio; pio_driver_open(&pio, &aio);
+    vfs_driver_t  vfs; vfs_driver_open(&vfs, &aio, &pio);
+    thread_io_t    io; io.initialize(&vfs);
+    if (!io_setup(&io))
+    {
+        OutputDebugString(_T("ERROR: Unable to initialize the I/O system.\n"));
+        return 0;
+    }
 
     // initialize the imaging subsystem.
-    image_cache_t              imc;
-    image_loader_t             imld;
-    image_memory_t             immemory;
-    image_cache_config_t       cache_cfg;
-    image_loader_config_t      loader_cfg;
-    image_cache_error_queue_t  imfail_queue;
-    image_cache_result_queue_t imlock_queue;
-    thread_image_cache_t       imcache;
-    thread_image_loader_t      imloader;
+    image_memory_t       image_memory;
+    image_cache_t        cache_state;
+    image_cache_config_t cache_config;
+    thread_image_cache_t image_cache;
+    image_memory_create(&image_memory, 256);
+    cache_config.Behavior  = IMAGE_CACHE_BEHAVIOR_MANUAL;
+    cache_config.CacheSize = 128 * 1024 * 1024;
+    image_cache_create(&cache_state, 256, cache_config);
+    image_cache.initialize(&cache_state);
+    image_cache.add_source(0, "/images/test.dds");
 
-    image_memory_create(&immemory, 256);
-    
-    cache_cfg.Behavior  = IMAGE_CACHE_BEHAVIOR_MANUAL;
-    cache_cfg.CacheSize = 128 * 1024 * 1024;
-    image_cache_create(&imc, 1, cache_cfg);
-    imcache.initialize(&imc);
-    imcache.add_source(0, "/images/test.dds");
-    mpsc_fifo_u_init(&imfail_queue);
-    mpsc_fifo_u_init(&imlock_queue);
-
-    loader_cfg.VFSDriver       = &vfs;
-    loader_cfg.ImageMemory     = &immemory;
-    loader_cfg.DefinitionQueue = &imc.DefinitionQueue;
-    loader_cfg.PlacementQueue  = &imc.LocationQueue;
-    loader_cfg.ErrorQueue      = NULL;
-    loader_cfg.ImageCapacity   = 1;
-    loader_cfg.Compression     = IMAGE_COMPRESSION_NONE;
-    loader_cfg.Encoding        = IMAGE_ENCODING_RAW;
-    image_loader_create(&imld, loader_cfg);
-    imloader.initialize(&imld);
+    // configure and launch the background I/O thread.
+    io_thread_args_t io_args;
+    HANDLE  shutdown    = CreateEvent(NULL, TRUE, FALSE, NULL);
+    io_args.Shutdown    = shutdown;
+    io_args.AIODriver   = &aio;
+    io_args.PIODriver   = &pio;
+    io_args.VFSDriver   = &vfs;
+    io_args.ImageMemory = &image_memory;
+    io_args.ImageCache  = &cache_state;
+    HANDLE  io_thread   = launch_io_thread(&io_args);
+    if (io_thread == INVALID_HANDLE_VALUE)
+    {
+        OutputDebugString(_T("ERROR: Unable to launch background I/O thread.\n"));
+        return 0;
+    }
     
     // TODO(rlk): perhaps can specify flags like IMAGE_LOCK_NO_NOTIFY to just pre-load.
-    imcache.lock(0, 0, IMAGE_ALL_FRAMES, &imlock_queue, &imfail_queue, 0);
+    //imcache.lock(0, 0, IMAGE_ALL_FRAMES, &imlock_queue, &imfail_queue, 0);
 
     // get a list of all files in the images subdirectory. these files will be 
     // loaded asynchronously and displayed in the main application window.
@@ -355,14 +568,15 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         OutputDebugString(_T("ERROR: Unable to create main application window.\n"));
         return 0;
     }
-    if (!display_driver_create(&display, PRESENTATION_TYPE_GDI, main_window))
+    uintptr_t display = 0;
+    if ((display = PrDisplayDriverOpen(main_window)) == 0)
     {
         OutputDebugString(_T("ERROR: Unable to initialize the display driver.\n"));
         return 0;
     }
 
 	// attach the display driver reference to the window so it can be retrieved in WndProc.
-	SetWindowLongPtr(main_window, GWLP_USERDATA, (LONG_PTR) &display);
+	SetWindowLongPtr(main_window, GWLP_USERDATA, (LONG_PTR) display);
 
     // query the monitor refresh rate and use that as our target frame rate.
     int monitor_refresh_hz =  60;
@@ -405,54 +619,12 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
         // TODO(rlk): perform application update here.
         // this consists primarily of queueing commands to the display driver.
-        pr_command_list_t *cmdlist = display.create_command_list();
+        pr_command_list_t *cmdlist  = PrCreateCommandList(display);
         pr_command_clear_color_buffer(cmdlist, 0.0, 0.0, 1.0, 1.0);
-
-        // pump everything
-        pio_driver_poll(&pio);  // TODO(rlk): move to background thread
-        aio_driver_poll(&aio);  // TODO(rlk): move to background thread
-        image_loader_update(&imld);
-        image_cache_update(&imc);
-        image_load_t ld;
-        while(spsc_fifo_u_consume(&imc.LoadQueue, ld))
-        {
-            dbg_printf("Load : %s [%Iu-%Iu]\n", ld.FilePath, ld.FirstFrame, ld.FinalFrame);
-            imloader.load(ld);
-        }
-        image_location_t ev;
-        while (spsc_fifo_u_consume(&imc.EvictQueue, ev))
-        {
-            dbg_printf("Evict: Frame %Iu of %Iu at %p (%Iu bytes).\n", ev.FrameIndex, ev.ImageId, ev.BaseAddress, ev.BytesReserved);
-            image_memory_evict_element(&immemory, ev.ImageId, ev.FrameIndex);
-        }
-
-        /*image_cache_error_t cache_err;
-        while (mpsc_fifo_u_consume(&imfail_queue, cache_err))
-        {   // TODO(rlk): handle errors.
-            dbg_printf("Error: %08X on image %Iu frames %Iu-%Iu.\n", cache_err.ErrorCode, cache_err.ImageId, cache_err.FirstFrame, cache_err.FinalFrame);
-        }
-
-        image_cache_result_t res;
-        while (mpsc_fifo_u_consume(&imlock_queue, res))
-        {   // TODO(rlk): process the pixel data.
-            dbg_printf("Lock : Frame %Iu of image %Iu at %p (%Iu bytes).\n", res.FrameIndex, res.ImageId, res.BaseAddress, res.BytesReserved);
-            RECT rc; GetWindowRect(main_window, &rc);
-            image_basic_data_t attr;
-            imcache.image_attributes(res.ImageId, attr);
-            //pr_command_draw_image_2d(cmdlist, res.ImageId, res.FrameIndex, attr.ImageFormat, attr.Width, attr.Height, 0, 0, attr.Width, attr.Height, 0, 0, size_t(rc.right-rc.left), size_t(rc.bottom-rc.top), 0.0f, res.BaseAddress, &imc, 0);
-            int64_t nowt = ticktime();
-            if (ticks_to_seconds(nowt-frame_update_time) > 1.0f)
-            {   // time to display the next frame of the image.
-                frame_index=(frame_index+1)%attr.ElementCount;
-                frame_update_time=nowt;
-            }
-            //imcache.unlock(res.ImageId, res.FrameIndex, res.FrameIndex, 0);
-            imcache.lock(0, frame_index, frame_index, &imlock_queue, &imfail_queue, 0);
-        }*/
 
         // ...
         pr_command_end_of_frame(cmdlist);
-        display.submit_command_list(cmdlist, false, 0);
+        PrSubmitCommandList(display, cmdlist, false, 0); // TODO(rlk): specify target HWND
 
         // throttle the application update rate.
         trace_marker_main("tick_throttle");
@@ -481,7 +653,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         // this may take some non-negligible amount of time, as it involves processing
         // queued command buffers to construct the current frame.
         trace_marker_main("tick_present");
-        display.present();
+        PrPresentFrameToWindow(display);
 
         // update timestamps to calculate the total presentation time.
         int64_t present_ticks = elapsed_ticks(flip_clock, ticktime());
@@ -489,6 +661,22 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         flip_clock = ticktime();
     }
 
-    // perform any system-level cleanup, and exit.
+    // signal all threads to exit, and then wait for them:
+    SetEvent(shutdown);
+    HANDLE handle_obj[] = 
+    {
+        io_thread
+    };
+    DWORD  handle_count = (DWORD) (sizeof(handle_obj) / sizeof(handle_obj[0]));
+    WaitForMultipleObjects(handle_count , handle_obj, TRUE, INFINITE);
+
+    // clean up application resources, and exit.
+    CloseHandle(shutdown);
+    PrDisplayDriverClose(display);
+    image_cache_delete(&cache_state);
+    image_memory_delete(&image_memory);
+    vfs_driver_close(&vfs);
+    pio_driver_close(&pio);
+    aio_driver_close(&aio);
     return result;
 }
