@@ -6,7 +6,6 @@
 /*////////////////
 //   Includes   //
 ////////////////*/
-#include <CL/cl.h>
 
 /*////////////////////
 //   Preprocessor   //
@@ -15,6 +14,7 @@
 /*/////////////////
 //   Constants   //
 /////////////////*/
+
 // TODO(rlk): Each compute pipeline has a known ID.
 // Items in the presentation command list reference the pipeline using this ID.
 // As part of the presentation command indicating that the pipeline should be executed, 
@@ -32,10 +32,19 @@
 ///////////////////*/
 /// @summary Define the supported CPU compute context configurations. For layouts 
 /// that don't need to share data, a context-per-device model is most appropriate.
-enum cpu_compute_context_e : int
+enum cl_cpu_compute_context_e         : int
 {
-    CPU_COMPUTE_CONTEXT_SHARED        = 0,            /// A single OpenCL context is shared between all logical devices.
-    CPU_COMPUTE_CONTEXT_PER_DEVICE    = 1,            /// Each logical device maintains its own private OpenCL context.
+    CL_CPU_COMPUTE_CONTEXT_SHARED     = 0,            /// A single OpenCL context is shared between all logical devices.
+    CL_CPU_COMPUTE_CONTEXT_PER_DEVICE = 1,            /// Each logical device maintains its own private OpenCL context.
+};
+
+/// @summary Defines attributes that can be set on a device.
+enum cl_compute_device_flags_e        : uint32_t
+{
+    CL_COMPUTE_DEVICE_FLAGS_NONE      = (0 << 0),     /// No special attributes are set on the device.
+    CL_COMPUTE_DEVICE_FLAGS_DISPLAY   = (1 << 0),     /// The compute device is used for display output. GPU-only.
+    CL_COMPUTE_DEVICE_FLAGS_SHARE_GL  = (1 << 1),     /// The compute device has OpenGL resource sharing enabled. GPU-only.
+    CL_COMPUTE_DEVICE_FLAGS_SHARE_D3D = (1 << 2),     /// The compute device has Direct3D resource sharing enabled. GPU-only.
 };
 
 /// @summary Stores information about the capabilities of a device.
@@ -94,8 +103,9 @@ struct cl_device_rank_t
 
 /// @summary Represents a single platform and all of the physical devices it exposes.
 /// The platform definition does not maintain any OpenCL state (contexts, queues, etc.)
+/// All devices within a platform have the ability to share an OpenCL context.
 /// All strings are NULL-terminated and contain only ASCII characters.
-struct compute_platform_t
+struct cl_platform_t
 {
     cl_platform_id              PlatformId;           /// The OpenCL platform identifier.
     char                       *PlatformName;         /// A string specifying the platform name.
@@ -117,7 +127,7 @@ struct compute_platform_t
 /// to enable or disable certain compute units, configured for either task-parallel or 
 /// data-parallel usage, partitioned by cache configuration, and so on. CPU devices 
 /// only expose compute queues; there is no separate transfer queue.
-struct compute_device_cpu_t
+struct cl_device_cpu_t
 {
     cl_platform_id              PlatformId;           /// The OpenCL platform identifier.
     cl_device_id                MasterDeviceId;       /// The OpenCL device identifier exposed by the platform.
@@ -127,25 +137,25 @@ struct compute_device_cpu_t
     cl_command_queue           *ComputeQueue;         /// The OpenCL compute queue for each device partition.
     cl_device_caps_t           *SubDeviceCaps;        /// The capabilities of each device partition.
 };
-// compute_device_configure_cpu_data_parallel(compute_device_cpu_t *dev, CPU_COMPUTE_CONTEXT_PER_DEVICE)
-// compute_device_configure_cpu_task_parallel(compute_device_cpu_t *dev, CPU_COMPUTE_CONTEXT_SHARED);
-// compute_device_configure_cpu_high_throughput(compute_device_cpu_t *dev); // default CPU_COMPUTE_CONTEXT_PER_DEVICE
-// compute_device_configure_cpu_partition_count(compute_device_cpu_t *dev, int *units_per_device, size_t device_count, CPU_COMPUTE_CONTEXT_SHARED);
-// compute_device_configure_cpu_partition_units(compute_device_cpu_t *dev, int**units_enabled, size_t *unit_counts, size_t device_count, CPU_COMPUTE_CONTEXT_PER_DEVICE);
+// cl_device_configure_cpu_data_parallel(compute_device_cpu_t *dev, CPU_COMPUTE_CONTEXT_PER_DEVICE)
+// cl_device_configure_cpu_task_parallel(compute_device_cpu_t *dev, CPU_COMPUTE_CONTEXT_SHARED);
+// cl_device_configure_cpu_high_throughput(compute_device_cpu_t *dev); // default CPU_COMPUTE_CONTEXT_PER_DEVICE
+// cl_device_configure_cpu_partition_count(compute_device_cpu_t *dev, int *units_per_device, size_t device_count, CPU_COMPUTE_CONTEXT_SHARED);
+// cl_device_configure_cpu_partition_units(compute_device_cpu_t *dev, int**units_enabled, size_t *unit_counts, size_t device_count, CPU_COMPUTE_CONTEXT_PER_DEVICE);
 
 /// @summary Represents the set of all CPU-only compute devices in the system.
-struct compute_group_cpu_t
+struct cl_device_group_cpu_t
 {
     size_t                      DeviceCount;          /// The number of CPU-only OpenCL compute devices.
     cl_device_id               *DeviceIds;            /// The OpenCL device identifier for each master device.
     cl_device_rank_t           *DeviceRank;           /// The data used for ranking devices by capability.
-    compute_device_cpu_t       *Devices;              /// The set of configurable CPU-only OpenCL compute devices.
+    cl_device_cpu_t            *Devices;              /// The set of configurable CPU-only OpenCL compute devices.
 };
 
 /// @summary Represents a GPU-only compute device. Data must be transferred over the 
 /// PCIe bus. Each GPU-only device maintains separate queues for compute and transfer.
 /// GPU-only devices do not support partitioning.
-struct compute_device_gpu_t
+struct cl_device_gpu_t
 {
     cl_platform_id              PlatformId;           /// The OpenCL platform identifier.
     cl_device_id                DeviceId;             /// The OpenCL device identifier exposed by the platform.
@@ -153,47 +163,23 @@ struct compute_device_gpu_t
     cl_command_queue            ComputeQueue;         /// The OpenCL command queue for compute-only commands.
     cl_command_queue            TransferQueue;        /// The OpenCL command queue for data transfer commands.
     cl_device_caps_t const     *Capabilities;         /// The OpenCL device capabilities.
+    uint32_t                    DeviceFlags;          /// A combination of cl_compute_device_flags_e values.
+    uint32_t                    DisplayOrdinal;       /// The ordinal value of the attached display, or DISPLAY_ORDINAL_NONE.
 };
 
 /// @summary Represents the set of all GPU-only compute devices in the system.
-struct compute_group_gpu_t
+struct cl_device_group_gpu_t
 {
     size_t                      DeviceCount;          /// The number of GPU-only OpenCL compute devices.
     cl_device_id               *DeviceIds;            /// The OpenCL device identifier for each master device.
     cl_device_rank_t           *DeviceRank;           /// The data used for ranking devices by capability.
-    compute_device_gpu_t       *Devices;              /// The set of GPU-only OpenCL compute devices.
-};
-
-/// @summary Represents a CPU device with integrated/on-die GPU. The CPU and GPU share 
-/// the same address space, and so data may be shared between them without copying.
-struct compute_device_apu_t
-{
-    cl_platform_id              PlatformId;           /// The OpenCL platform identifier.
-    cl_context                  SharedContext;        /// The OpenCL context used for resources shared between CPU and GPU.
-    compute_device_cpu_t        CPU;                  /// The interface to the CPU portion of the compute device.
-    compute_device_gpu_t        GPU;                  /// The interface to the GPU portion of the compute device.
-};
-// compute_device_configure_apu_data_parallel(compute_device_apu_t *dev) // CPU and GPU share everything, always
-// compute_device_configure_apu_task_parallel(compute_device_apu_t *dev);
-// compute_device_configure_apu_high_throughput(compute_device_apu_t *dev);
-// compute_device_configure_apu_partition_count(compute_device_apu_t *dev, int *units_per_device, size_t device_count);
-// compute_device_configure_apu_partition_units(compute_device_apu_t *dev, int**units_enabled, size_t *unit_counts, size_t device_count);
-
-/// @summary Represents the set of all hybrid CPU/GPU compute devices in the system.
-struct compute_group_apu_t
-{
-    size_t                      DeviceCount;          /// The number of OpenCL APU compute devices.
-    cl_device_id               *CPUDeviceIds;         /// The OpenCL device identifier for each master CPU device.
-    cl_device_id               *GPUDeviceIds;         /// The OpenCL device identifier for each master GPU device.
-    cl_device_rank_t           *CPUDeviceRank;        /// The data used for ranking CPU devices by capability.
-    cl_device_rank_t           *GPUDeviceRank;        /// The data used for ranking GPU devices by capability.
-    compute_device_apu_t       *Devices;              /// The set of hybrid OpenCL compute devices.
+    cl_device_gpu_t            *Devices;              /// The set of GPU-only OpenCL compute devices.
 };
 
 /// @summary Represents a logical compute device. Instances of this structure can be 
 /// created from a CPU-only device, a GPU-only device, or an APU hybrid device. This
 /// structure is used for storing external device references and command submission.
-struct compute_device_t
+struct cl_device_t
 {
     cl_platform_id              PlatformId;           /// The OpenCL platform identifier of the device.
     cl_device_id                MasterDeviceId;       /// The OpenCL device ID of the master device. Used for device identification only.
@@ -203,25 +189,26 @@ struct compute_device_t
     cl_command_queue            ComputeQueue;         /// The OpenCL command queue for compute commands.
     cl_command_queue            TransferQueue;        /// The OpenCL command queue for data transfer commands.
     cl_device_caps_t const     *Capabilities;         /// The OpenCL logical device capabilities. This is a reference only.
+    uint32_t                    DeviceFlags;          /// A combination of cl_compute_device_flags_e values.
+    uint32_t                    DisplayOrdinal;       /// The ordinal value of the attached display, or DISPLAY_ORDINAL_NONE.
 };
-// compute_device_from_cpu(compute_device_t *dev, compute_device_cpu_t *cpu_device);
-// compute_device_from_gpu(compute_device_t *dev, compute_device_gpu_t *gpu_device);
+// cl_device_from_cpu(cl_device_t *dev, cl_device_cpu_t *cpu_device);
+// cl_device_from_gpu(cl_device_t *dev, cl_device_gpu_t *gpu_device);
 
 /// @summary Defines the state associated with the OpenCL compute driver, which maintains 
 /// metadata, OpenCL contexts and command queues for all compute devices in the system.
-struct compute_driver_t
+struct cl_driver_t
 {
     size_t                      PlatformCount;        /// The number of OpenCL-capable platforms defined in the system.
     cl_platform_id             *PlatformIds;          /// The unique OpenCL platform identifier.
-    compute_platform_t         *Platforms;            /// The set of platform metadata.
+    cl_platform_t              *Platforms;            /// The set of platform metadata.
 
     size_t                      PipelineCount;        /// The number of compute pipelines defined.
     uintptr_t                  *PipelineIds;          /// The unique ID of each registered compute pipeline.
     void                       *PipelineData;         /// Opaque data associated with each compute pipeline.
 
-    compute_group_cpu_t         CPU;                  /// The set of all CPU-only OpenCL compute devices.
-    compute_group_gpu_t         GPU;                  /// The set of all GPU-only OpenCL compute devices.
-    compute_group_apu_t         APU;                  /// The set of all hybrid OpenCL compute devices.
+    cl_device_group_cpu_t       CPU;                  /// The set of all CPU-only OpenCL compute devices.
+    cl_device_group_gpu_t       GPU;                  /// The set of all GPU-only OpenCL compute devices.
 };
 
 // Enumerate platforms and devices, store data in global lists
@@ -233,7 +220,7 @@ struct compute_driver_t
 //   Globals   //
 ///////////////*/
 /// @summary A special identifier indicating 'all compute platforms'.
-static cl_uint   const MAX_COMPUTE_PLATFORM_COUNT_ID = (cl_uint) -1;
+static cl_uint const MAX_COMPUTE_PLATFORM_COUNT_ID = (cl_uint) -1;
 
 /*///////////////////////
 //   Local Functions   //
@@ -356,9 +343,9 @@ internal_function void cl_device_capabilities(cl_device_caps_t *caps, cl_device_
 /// @summary Allocates and populates an OpenCL compute platform description.
 /// @param desc The OpenCL compute platform description to populate.
 /// @param platform The identifier of the OpenCL platform to query.
-internal_function void compute_platform_describe(compute_platform_t *desc, cl_platform_id platform)
+internal_function void cl_platform_describe(cl_platform_t *desc, cl_platform_id platform)
 {   // initialize the platform definition to empty:
-    memset(desc, 0, sizeof(compute_platform_t));
+    memset(desc, 0, sizeof(cl_platform_t));
 
     // query platform attributes and populate the description:
     desc->PlatformId         = platform;
@@ -407,7 +394,7 @@ internal_function void compute_platform_describe(compute_platform_t *desc, cl_pl
 
 /// @summary Releases all resources associated with an OpenCL compute platform description.
 /// @param desc The OpenCL compute platform description to delete.
-internal_function void compute_platform_delete(compute_platform_t *desc)
+internal_function void cl_platform_delete(cl_platform_t *desc)
 {
     for (size_t i = 0, n = desc->DeviceCount; i < n; ++i)
     {
@@ -429,14 +416,14 @@ internal_function void compute_platform_delete(compute_platform_t *desc)
     free(desc->PlatformVersion);
     free(desc->PlatformVendor);
     free(desc->PlatformName);
-    memset(desc, 0, sizeof(compute_platform_t));
+    memset(desc, 0, sizeof(cl_platform_t));
 }
 
 /// @summary Check a device to determine whether it supports at least OpenCL 1.2.
 /// @param platform The OpenCL platform that defines the device.
 /// @param device_index The zero-based index of the OpenCL device to check.
 /// @return true if the device supports OpenCL 1.2 or later.
-internal_function bool compute_device_supported(compute_platform_t *platform, size_t device_index)
+internal_function bool cl_device_supported(cl_platform_t *platform, size_t device_index)
 {
     int major_ver = 0;
     int minor_ver = 0;
@@ -451,32 +438,22 @@ internal_function bool compute_device_supported(compute_platform_t *platform, si
     return true;
 }
 
-/// @summary Queries the number of OpenCL platforms on the system.
-/// @return The number of OpenCL platforms on the system.
-internal_function cl_uint compute_platform_count(void)
-{
-    cl_uint n = 0;
-    clGetPlatformIDs(cl_uint(-1), NULL, &n);
-    return n;
-}
-
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
 /// @summary Open the compute driver by enumerating all OpenCL-capable devices in the system. 
 /// @param driver The compute driver to initialize.
 /// @return 0 if the driver is opened successfully, or -1 if an error has occurred.
-public_function int compute_driver_open(compute_driver_t *driver)
+public_function int cl_driver_open(cl_driver_t *driver)
 {   
-    size_t              cpu_device_count  = 0;
-    size_t              gpu_device_count  = 0;
-    size_t              apu_device_count  = 0;
-    cl_uint             platform_count    = 0;
-    cl_platform_id     *platform_ids      = NULL;
-    compute_platform_t *platform_desc     = NULL;
+    size_t          cpu_device_count  = 0;
+    size_t          gpu_device_count  = 0;
+    cl_uint         platform_count    = 0;
+    cl_platform_id *platform_ids      = NULL;
+    cl_platform_t  *platform_desc     = NULL;
 
     // zero out all fields of the driver structure:
-    memset(driver, 0, sizeof(compute_driver_t));
+    memset(driver, 0, sizeof(cl_driver_t));
 
     // query the number of OpenCL-capable platforms in the system.
     clGetPlatformIDs(cl_uint(-1), NULL, &platform_count);
@@ -485,17 +462,17 @@ public_function int compute_driver_open(compute_driver_t *driver)
         OutputDebugStringA("ERROR: No OpenCL-capable platforms are installed.\n");
         return -1;
     }
-    platform_ids  = (cl_platform_id    *) malloc(platform_count * sizeof(cl_platform_id));
-    platform_desc = (compute_platform_t*) malloc(platform_count * sizeof(compute_platform_t));
+    platform_ids  = (cl_platform_id*)malloc(platform_count * sizeof(cl_platform_id));
+    platform_desc = (cl_platform_t *)malloc(platform_count * sizeof(cl_platform_t ));
     clGetPlatformIDs(platform_count, platform_ids, NULL);
 
     // describe each platform in the system. this doesn't create any execution resources, 
     // but it does build a list of devices and query all device properties and capabilities.
     for (cl_uint platform_index = 0; platform_index < platform_count; ++platform_index)
     {   // describe the platform, and then update total device-type counts.
-        cl_platform_id      platform =  platform_ids [platform_index];
-        compute_platform_t *desc     = &platform_desc[platform_index];
-        compute_platform_describe(desc, platform);
+        cl_platform_id platform =  platform_ids [platform_index];
+        cl_platform_t *desc     = &platform_desc[platform_index];
+        cl_platform_describe(desc, platform);
 
         size_t  cpu_count = 0;
         size_t  gpu_count = 0;
@@ -523,17 +500,8 @@ public_function int compute_driver_open(compute_driver_t *driver)
             if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU) ++cpu_count;
             if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_GPU) ++gpu_count;
         }
-        if ((cpu_count == gpu_count) && (cpu_count > 0))
-        {   // CPUs and GPUs are paired, so these are all APU devices.
-            // TODO(rlk): is there a more robust way to detect this?
-            // it looks like maybe the device IDs will be the same?
-            apu_device_count += cpu_count;
-        }
-        else
-        {   // CPUs and GPUs are not paired. treat them individually.
-            cpu_device_count += cpu_count;
-            gpu_device_count += gpu_count;
-        }
+        cpu_device_count += cpu_count;
+        gpu_device_count += gpu_count;
     }
 
     // store all of the resulting data on the driver structure.
@@ -541,121 +509,60 @@ public_function int compute_driver_open(compute_driver_t *driver)
     driver->PlatformIds       = platform_ids;
     driver->Platforms         = platform_desc;
 
-    // reserve storage for the compute groups:
+    // reserve storage for the compute device groups:
     driver->CPU.DeviceCount   =  0;
-    driver->CPU.DeviceIds     = (cl_device_id        *) malloc(cpu_device_count * sizeof(cl_device_id));
-    driver->CPU.DeviceRank    = (cl_device_rank_t    *) malloc(cpu_device_count * sizeof(cl_device_rank_t));
-    driver->CPU.Devices       = (compute_device_cpu_t*) malloc(cpu_device_count * sizeof(compute_device_cpu_t));
+    driver->CPU.DeviceIds     = (cl_device_id    *) malloc(cpu_device_count * sizeof(cl_device_id));
+    driver->CPU.DeviceRank    = (cl_device_rank_t*) malloc(cpu_device_count * sizeof(cl_device_rank_t));
+    driver->CPU.Devices       = (cl_device_cpu_t *) malloc(cpu_device_count * sizeof(cl_device_cpu_t));
     driver->GPU.DeviceCount   =  0;
-    driver->GPU.DeviceIds     = (cl_device_id        *) malloc(gpu_device_count * sizeof(cl_device_id));
-    driver->GPU.DeviceRank    = (cl_device_rank_t    *) malloc(gpu_device_count * sizeof(cl_device_rank_t));
-    driver->GPU.Devices       = (compute_device_gpu_t*) malloc(gpu_device_count * sizeof(compute_device_gpu_t));
-    driver->APU.DeviceCount   =  0;
-    driver->APU.CPUDeviceIds  = (cl_device_id        *) malloc(apu_device_count * sizeof(cl_device_id));
-    driver->APU.CPUDeviceRank = (cl_device_rank_t    *) malloc(apu_device_count * sizeof(cl_device_rank_t));
-    driver->APU.GPUDeviceIds  = (cl_device_id        *) malloc(apu_device_count * sizeof(cl_device_id));
-    driver->APU.GPUDeviceRank = (cl_device_rank_t    *) malloc(apu_device_count * sizeof(cl_device_rank_t));
-    driver->APU.Devices       = (compute_device_apu_t*) malloc(apu_device_count * sizeof(compute_device_apu_t));
+    driver->GPU.DeviceIds     = (cl_device_id    *) malloc(gpu_device_count * sizeof(cl_device_id));
+    driver->GPU.DeviceRank    = (cl_device_rank_t*) malloc(gpu_device_count * sizeof(cl_device_rank_t));
+    driver->GPU.Devices       = (cl_device_gpu_t *) malloc(gpu_device_count * sizeof(cl_device_gpu_t));
 
     // populate the compute groups:
-    for (cl_uint platform_index = 0; platform_index < platform_count; ++platform_index)
+    for (cl_uint platform_index  = 0; platform_index < platform_count; ++platform_index)
     {   // describe the platform, and then update total device-type counts.
-        cl_platform_id      platform =  platform_ids [platform_index];
-        compute_platform_t *desc     = &platform_desc[platform_index];
-
-        size_t  cpu_count = 0;
-        size_t  gpu_count = 0;
+        cl_platform_id platform  =  platform_ids [platform_index];
+        cl_platform_t *desc      = &platform_desc[platform_index];
         for (size_t device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
         {
-            if (compute_device_supported(desc, device_index))
-            {   // only include devices meeting our OpenCL requirements.
-                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU) ++cpu_count;
-                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_GPU) ++gpu_count;
+            if (cl_device_supported(desc, device_index) == false)
+            {   // skip unsupported devices.
+                continue;
             }
-        }
-        if ((cpu_count == gpu_count) && (cpu_count > 0))
-        {   // CPUs and GPUs are paired, so these are all APU devices.
-            for (size_t device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
-            {
-                if (compute_device_supported(desc, device_index) == false)
-                {   // skip unsupported devices.
-                    continue;
-                }
-                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU)
-                {   // find the matching GPU device, which will have the same device ID.
-                    for (size_t i = 0, n = desc->DeviceCount; i < n; ++i)
-                    {
-                        if (desc->DeviceTypes[i] == CL_DEVICE_TYPE_GPU && desc->DeviceIds[i] == desc->DeviceIds[device_index])
-                        {   // we've located the corresponding GPU device.
-                            // the device ranks, caps, contexts and queues are set on APU configuration.
-                            size_t  apu_index = driver->APU.DeviceCount++;
-                            driver->APU.CPUDeviceIds[apu_index] = desc->DeviceIds[device_index];
-                            driver->APU.GPUDeviceIds[apu_index] = desc->DeviceIds[i];
-                            driver->APU.Devices     [apu_index].PlatformId         = platform;
-                            driver->APU.Devices     [apu_index].SharedContext      = NULL;
-                            driver->APU.Devices     [apu_index].CPU.PlatformId     = platform;
-                            driver->APU.Devices     [apu_index].CPU.MasterDeviceId = desc->DeviceIds[device_index];
-                            driver->APU.Devices     [apu_index].CPU.SubDeviceCount = 0;
-                            driver->APU.Devices     [apu_index].CPU.SubDeviceId    = NULL;
-                            driver->APU.Devices     [apu_index].CPU.SubDeviceCaps  = NULL;
-                            driver->APU.Devices     [apu_index].CPU.ComputeContext = NULL;
-                            driver->APU.Devices     [apu_index].CPU.ComputeQueue   = NULL;
-                            driver->APU.Devices     [apu_index].GPU.PlatformId     = platform;
-                            driver->APU.Devices     [apu_index].GPU.DeviceId       = desc->DeviceIds[i];
-                            driver->APU.Devices     [apu_index].GPU.ComputeContext = NULL;
-                            driver->APU.Devices     [apu_index].GPU.ComputeQueue   = NULL;
-                            driver->APU.Devices     [apu_index].GPU.TransferQueue  = NULL;
-                            driver->APU.Devices     [apu_index].GPU.Capabilities   =&desc->DeviceCaps[i];
-                            break;
-                        }
-                    }
-                }
+            if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU)
+            {   // the device ranks, caps, contexts and queues are set on CPU configuration.
+                size_t  cpu_index = driver->CPU.DeviceCount++;
+                driver->CPU.DeviceIds[cpu_index] = desc->DeviceIds[device_index];
+                driver->CPU.Devices  [cpu_index].PlatformId     = platform;
+                driver->CPU.Devices  [cpu_index].MasterDeviceId = desc->DeviceIds[device_index];
+                driver->CPU.Devices  [cpu_index].ComputeQueue   = NULL;
+                driver->CPU.Devices  [cpu_index].ComputeContext = NULL;
+                driver->CPU.Devices  [cpu_index].SubDeviceCount = 0;
+                driver->CPU.Devices  [cpu_index].SubDeviceId    = NULL;
+                driver->CPU.Devices  [cpu_index].SubDeviceCaps  = NULL;
             }
-        }
-        else
-        {   // CPUs and GPUs are not paired. treat them individually.
-            for (size_t device_index = 0, device_count = desc->DeviceCount; device_index < device_count; ++device_index)
-            {
-                if (compute_device_supported(desc, device_index) == false)
-                {   // skip unsupported devices.
-                    continue;
-                }
-                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_CPU)
-                {   // the device ranks, caps, contexts and queues are set on CPU configuration.
-                    size_t  cpu_index = driver->CPU.DeviceCount++;
-                    driver->CPU.DeviceIds[cpu_index] = desc->DeviceIds[device_index];
-                    driver->CPU.Devices  [cpu_index].PlatformId     = platform;
-                    driver->CPU.Devices  [cpu_index].MasterDeviceId = desc->DeviceIds[device_index];
-                    driver->CPU.Devices  [cpu_index].ComputeQueue   = NULL;
-                    driver->CPU.Devices  [cpu_index].ComputeContext = NULL;
-                    driver->CPU.Devices  [cpu_index].SubDeviceCount = 0;
-                    driver->CPU.Devices  [cpu_index].SubDeviceId    = NULL;
-                    driver->CPU.Devices  [cpu_index].SubDeviceCaps  = NULL;
-                }
-                if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_GPU)
-                {   // GPU devices can't be sub-divided, so set caps, etc.
-                    size_t  gpu_index = driver->GPU.DeviceCount++;
-                    driver->GPU.DeviceIds[gpu_index] = desc->DeviceIds[device_index];
-                    driver->GPU.Devices  [gpu_index].PlatformId     = platform;
-                    driver->GPU.Devices  [gpu_index].DeviceId       = desc->DeviceIds[device_index];
-                    driver->GPU.Devices  [gpu_index].ComputeContext = NULL;
-                    driver->GPU.Devices  [gpu_index].ComputeQueue   = NULL;
-                    driver->GPU.Devices  [gpu_index].TransferQueue  = NULL;
-                    driver->GPU.Devices  [gpu_index].Capabilities   =&desc->DeviceCaps[device_index];
-                }
+            if (desc->DeviceTypes[device_index] == CL_DEVICE_TYPE_GPU)
+            {   // GPU devices can't be sub-divided, so set caps, etc.
+                size_t  gpu_index = driver->GPU.DeviceCount++;
+                driver->GPU.DeviceIds[gpu_index] = desc->DeviceIds[device_index];
+                driver->GPU.Devices  [gpu_index].PlatformId     = platform;
+                driver->GPU.Devices  [gpu_index].DeviceId       = desc->DeviceIds[device_index];
+                driver->GPU.Devices  [gpu_index].ComputeContext = NULL;
+                driver->GPU.Devices  [gpu_index].ComputeQueue   = NULL;
+                driver->GPU.Devices  [gpu_index].TransferQueue  = NULL;
+                driver->GPU.Devices  [gpu_index].Capabilities   =&desc->DeviceCaps[device_index];
+                driver->GPU.Devices  [gpu_index].DeviceFlags    = CL_COMPUTE_DEVICE_FLAGS_NONE;
+                driver->GPU.Devices  [gpu_index].DisplayOrdinal = DISPLAY_ORDINAL_NONE;
             }
         }
     }
-    // TODO(rlk): configure devices.
-    // TODO(rlk): during configuration, if a command queue or context is shared between multiple devices, be sure to increase its reference count
-    //            for each device that shares it.
-    // TODO(rlk): initialize pipelines.
     return 0;
 }
 
 /// @summary Releases all resources associated with an OpenCL compute driver.
 /// @param driver The compute driver to delete.
-public_function void compute_driver_close(compute_driver_t *driver)
+public_function void cl_driver_close(cl_driver_t *driver)
 {   // release any resources associated with compute pipelines:
     for (size_t i = 0, n = driver->PipelineCount; i < n; ++i)
     {   // TODO(rlk): pipeline cleanup...
@@ -684,28 +591,6 @@ public_function void compute_driver_close(compute_driver_t *driver)
         clReleaseCommandQueue(driver->GPU.Devices[i].ComputeQueue);
         clReleaseContext(driver->GPU.Devices[i].ComputeContext);
     }
-    for (size_t i = 0, n = driver->APU.DeviceCount; i < n; ++i)
-    {
-        for (size_t j = 0, m = driver->APU.Devices[i].CPU.SubDeviceCount; j < m; ++j)
-        {
-            clReleaseCommandQueue(driver->APU.Devices[i].CPU.ComputeQueue[j]);
-            clReleaseContext(driver->APU.Devices[i].CPU.ComputeContext[j]);
-        }
-        clReleaseCommandQueue(driver->APU.Devices[i].GPU.TransferQueue);
-        clReleaseCommandQueue(driver->APU.Devices[i].GPU.ComputeQueue);
-        clReleaseContext(driver->APU.Devices[i].GPU.ComputeContext);
-        clReleaseContext(driver->APU.Devices[i].SharedContext);
-        free(driver->APU.Devices[i].CPU.ComputeContext);
-        free(driver->APU.Devices[i].CPU.ComputeQueue);
-        free(driver->APU.Devices[i].CPU.SubDeviceCaps);
-        free(driver->APU.Devices[i].CPU.SubDeviceId);
-        driver->APU.Devices[i].CPU.SubDeviceCount = 0;
-    }
-    free(driver->APU.Devices);
-    free(driver->APU.GPUDeviceRank);
-    free(driver->APU.GPUDeviceIds);
-    free(driver->APU.CPUDeviceRank);
-    free(driver->APU.CPUDeviceIds);
     free(driver->GPU.Devices);
     free(driver->GPU.DeviceRank);
     free(driver->GPU.DeviceIds);
@@ -714,12 +599,11 @@ public_function void compute_driver_close(compute_driver_t *driver)
     free(driver->CPU.DeviceIds);
     driver->CPU.DeviceCount = 0;
     driver->GPU.DeviceCount = 0;
-    driver->APU.DeviceCount = 0;
 
     // release resources associated with platform definitions.
-    for (size_t i = 0, n = driver->PlatformCount; i < n; ++i)
+    for (size_t i = 0, n  = driver->PlatformCount; i < n; ++i)
     {
-        compute_platform_delete(&driver->Platforms[i]);
+        cl_platform_delete(&driver->Platforms[i]);
     }
     free(driver->Platforms);
     free(driver->PlatformIds);
