@@ -20,16 +20,16 @@
 #include <crtdbg.h>
 #endif
 
-#ifndef  PRESENT_DRIVER_GDI
-#define  PRESENT_DRIVER_GDI   1
+#ifndef DISPLAY_BACKEND_GDI
+#define DISPLAY_BACKEND_GDI       0
 #endif
 
-#ifndef  PRESENT_DRIVER_D2D
-#define  PRESENT_DRIVER_D2D   0
+#ifndef DISPLAY_BACKEND_OPENGL
+#define DISPLAY_BACKEND_OPENGL    1
 #endif
 
-#ifndef  PRESENT_DRIVER_GL3
-#define  PRESENT_DRIVER_GL3   0
+#ifndef DISPLAY_BACKEND_DIRECTX
+#define DISPLAY_BACKEND_DIRECTX   0
 #endif
 
 /*////////////////
@@ -41,27 +41,42 @@
 #include <ShlObj.h>
 #include <tchar.h>
 
-#if PRESENT_DRIVER_D2D
+#if DISPLAY_BACKEND_DIRECTX
 #include <d2d1_1.h>
 #include <d3d11_1.h>
 #include <dwrite_1.h>
+
+// OpenCL headers must be included after Direct3D.
+#include "CL/cl.h"
+#include "CL/cl_d3d11.h"
+#include "icd.c"
+#include "icd_dispatch.c"
+#include "icd_windows.c"
 #endif
 
-#if PRESENT_DRIVER_GL3
+#if DISPLAY_BACKEND_OPENGL
 // GLEW configuration - the GLEW implementation is built directly into the 
 // presentation library. build with support for multiple contexts since 
 // we may have multiple windows that produce output. any place that makes 
 // a call into OpenGL or WGL must have a local variable driver that points
-// to the present_driver_gl3_t instance.
+// to a gl_display_t instance.
 #define  GLEW_MX
 #define  GLEW_STATIC
 #include "GL/glew.h"
 #include "GL/wglew.h"
 #include "glew.c"
 #undef   glewGetContext
-#define  glewGetContext()    (&driver->GLEW)
+#define  glewGetContext()    (&display->GLEW)
 #undef   wglewGetContext
-#define  wglewGetContext()   (&driver->WGLEW)
+#define  wglewGetContext()   (&display->WGLEW)
+
+// OpenCL headers must be included after GLEW.
+#include "CL/cl.h"
+#include "CL/cl_gl.h"
+#include "CL/cl_gl_ext.h"
+#include "icd.c"
+#include "icd_dispatch.c"
+#include "icd_windows.c"
 #endif
 
 #include <assert.h>
@@ -95,21 +110,22 @@
 #include "imloader.cc"
 #include "imcache.cc"
 
+#include "ocldriver.cc"
+
 #include "prcmdlist.cc"
 
-#if PRESENT_DRIVER_GL3
+#if DISPLAY_BACKEND_OPENGL
+#include "gldisplay.cc"
 #include "gl3driver.cc"
 #endif
 
-#if PRESENT_DRIVER_D2D
+#if DISPLAY_BACKEND_DIRECTX
 #include "d2ddriver.cc"
 #endif
 
-#if PRESENT_DRIVER_GDI
+#if DISPLAY_BACKEND_GDI
 #include "gdidriver.cc"
 #endif
-
-#include "ocldriver.cc"
 
 /*/////////////////
 //   Constants   //
