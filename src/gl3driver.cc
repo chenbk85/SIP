@@ -1,17 +1,8 @@
 /*/////////////////////////////////////////////////////////////////////////////
-/// @summary Defines the exported presentation DLL entry points for the OpenGL
-/// 2.1 presentation library implementation.
+/// @summary Implements display enumeration and OpenGL 3.2 rendering context 
+/// initialization. Additionally, OpenCL interop can be set up for attached 
+/// devices supporting OpenCL 1.2 or later and cl_khr_gl_sharing.
 ///////////////////////////////////////////////////////////////////////////80*/
-
-#pragma warning (disable:4505) // unreferenced local function was removed
-
-#ifndef _CRT_SECURE_NO_DEPRECATE
-#define _CRT_SECURE_NO_DEPRECATE
-#endif
-
-#ifndef _CRT_SECURE_NO_WARNINGS
-#define _CRT_SECURE_NO_WARNINGS
-#endif
 
 /*////////////////
 //   Includes   //
@@ -20,31 +11,60 @@
 /*/////////////////
 //   Constants   //
 /////////////////*/
-#define GL2_HIDDEN_WNDCLASS_NAME             _T("GL2_Hidden_WndClass")
+/// @summary Define the registered name of the WNDCLASS used for hidden windows.
+#define GLRC_HIDDEN_WNDCLASS_NAME       _T("GLRC_Hidden_WndClass")
+
+/// @summary Define the maximum number of in-flight frames per-driver.
+static uint32_t const GLRC_MAX_FRAMES   = 4;
 
 /*///////////////////
 //   Local Types   //
 ///////////////////*/
-/// @summary Defines the data required to uniquely identify an image.
-struct image_id_t
+/// @summary Define the possible states of an in-flight frame.
+enum gl_frame_state_e : int
 {
-    uintptr_t              ImageId;          /// The application-defined image identifier.
-    size_t                 FrameIndex;       /// The zero-based index of the frame of the image.
+    GLRC_FRAME_STATE_WAIT_FOR_IMAGES    = 0,   /// The frame is waiting for images to be locked in host memory.
+    GLRC_FRAME_STATE_WAIT_FOR_COMPUTE   = 1,   /// The frame is waiting for compute jobs to complete.
+    GLRC_FRAME_STATE_WAIT_FOR_DISPLAY   = 2,   /// The frame is waiting for display jobs to complete.
+    GLRC_FRAME_STATE_COMPLETE           = 3,   /// The frame has completed.
+    GLRC_FRAME_STATE_ERROR              = 4,   /// The frame encountered one or more errors.
 };
 
-/// @summary Defines the data required to access an image.
-struct image_data_t
+/// @summary Represents a unique identifier for a locked image.
+struct gdi_image_id_t
 {
-    void                  *ImageData;        /// Pointer to the locked image data.
-    size_t                 BytesLocked;      /// The number of bytes locked in memory.
-    size_t                 FirstLevel;       /// The zero-based index of the first locked mipmap level.
-    size_t                 LevelCount;       /// The number of locked mipmap levels.
-    size_t                 Width;            /// The width of the first locked mipmap level, in pixels.
-    size_t                 Height;           /// The height of the first locked mipmap level, in pixels.
-    size_t                 Slices;           /// The number of slices in the first locked mipmap level.
-    uint32_t               Format;           /// The underlying storage format (one of dxgi_format_e).
-    int                    Compression;      /// The storage compression format (one of image_compression_e).
-    int                    Encoding;         /// The storage encoding format (one of image_encoding_e).
+    uintptr_t               ImageId;           /// The application-defined image identifier.
+    size_t                  FrameIndex;        /// The zero-based index of the frame.
+};
+
+/// @summary Defines the data stored for a locked image.
+struct gdi_image_data_t
+{
+    DWORD                   ErrorCode;         /// ERROR_SUCCESS or a system error code.
+    uint32_t                SourceFormat;      /// One of dxgi_format_e defining the source data storage format.
+    uint32_t                SourceCompression; /// One of image_compression_e defining the source data storage compression.
+    uint32_t                SourceEncoding;    /// One of image_encoding_e defining the source data storage encoding.
+    thread_image_cache_t   *SourceCache;       /// The image cache that manages the source image data.
+    size_t                  SourceWidth;       /// The width of the source image, in pixels.
+    size_t                  SourceHeight;      /// The height of the source image, in pixels.
+    size_t                  SourcePitch;       /// The number of bytes per-row in the source image data.
+    uint8_t                *SourceData;        /// Pointer to the start of the locked image data on the host.
+    size_t                  SourceSize;        /// The number of bytes of source data.
+};
+
+/// @summary Defines the data associated with a single in-flight frame.
+struct gdi_frame_t
+{
+    int                     FrameState;        /// One of gdi_frame_state_e indicating the current state of the frame.
+
+    pr_command_list_t      *CommandList;       /// The command list that generated this frame.
+
+    size_t                  ImageCount;        /// The number of images referenced in this frame.
+    size_t                  ImageCapacity;     /// The capacity of the frame image list.
+    gdi_image_id_t         *ImageIds;          /// The unique identifiers of the referenced images.
+};
+struct gl3_display_t
+{
 };
 
 /// @summary Defines the state data associated with a single in-flight frame. 
