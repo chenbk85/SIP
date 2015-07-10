@@ -173,7 +173,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
         wndclass.hInstance      = (HINSTANCE)&__ImageBase;
         wndclass.lpszClassName  = GL_HIDDEN_WNDCLASS_NAME;
         wndclass.lpszMenuName   = NULL;
-        wndclass.lpfnWndProc    = HiddenWndProc;
+        wndclass.lpfnWndProc    = DefWindowProc;
         wndclass.hIcon          = LoadIcon  (0, IDI_APPLICATION);
         wndclass.hIconSm        = LoadIcon  (0, IDI_APPLICATION);
         wndclass.hCursor        = LoadCursor(0, IDC_ARROW);
@@ -678,22 +678,6 @@ public_function bool move_window_to_display(gl_display_t *display, HWND src_wind
 }
 
 /// @summary Sets the target drawable for a display. Subsequent rendering commands will update the drawable.
-/// @param display_list The display list to search.
-/// @param ordinal The ordinal number of the display to target.
-/// @param target_dc The device context to bind as the drawable. If this value is NULL, the display DC is used.
-public_function void target_drawable(gl_display_list_t *display_list, DWORD ordinal, HDC target_dc)
-{
-    for (size_t i = 0, n = display_list->DisplayCount; i < n; ++i)
-    {
-        if (display_list->DisplayOrdinal[i] == ordinal)
-        {   // located the matching display object.
-            target_drawable(&display_list->Displays[i], target_dc);
-            return;
-        }
-    }
-}
-
-/// @summary Sets the target drawable for a display. Subsequent rendering commands will update the drawable.
 /// @param display The target display. If this value is NULL, the current rendering context is unbound.
 /// @param target_dc The device context to bind as the drawable. If this value is NULL, the display DC is used.
 public_function void target_drawable(gl_display_t *display, HDC target_dc)
@@ -706,6 +690,22 @@ public_function void target_drawable(gl_display_t *display, HDC target_dc)
     else
     {   // deactivate the current drawable and rendering context.
         wglMakeCurrent(NULL, NULL);
+    }
+}
+
+/// @summary Sets the target drawable for a display. Subsequent rendering commands will update the drawable.
+/// @param display_list The display list to search.
+/// @param ordinal The ordinal number of the display to target.
+/// @param target_dc The device context to bind as the drawable. If this value is NULL, the display DC is used.
+public_function void target_drawable(gl_display_list_t *display_list, DWORD ordinal, HDC target_dc)
+{
+    for (size_t i = 0, n = display_list->DisplayCount; i < n; ++i)
+    {
+        if (display_list->DisplayOrdinal[i] == ordinal)
+        {   // located the matching display object.
+            target_drawable(&display_list->Displays[i], target_dc);
+            return;
+        }
     }
 }
 
@@ -725,7 +725,7 @@ public_function void synchronize_display(gl_display_t *display)
 
 /// @summary Flushes all rendering commands targeting the specified drawable, and updates the pixel data.
 /// @param dc The drawable to present.
-public_function void present_drawable(HDC dc)
+public_function void swap_buffers(HDC dc)
 {
     SwapBuffers(dc);
 }
