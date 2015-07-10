@@ -54,12 +54,6 @@ struct gl_display_list_t
 /// See: http://blogs.msdn.com/b/oldnewthing/archive/2004/10/25/247180.aspx
 EXTERN_C IMAGE_DOS_HEADER  __ImageBase;
 
-/// @summary The window class for hidden windows used for image streaming and context creation.
-global_variable WNDCLASSEX GLHiddenWndClass = {};
-
-/// @summary Global indicating whether the hidden window class needs to be registered.
-global_variable bool       GLCreateWndClass = true;
-
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
