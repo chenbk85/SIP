@@ -31,14 +31,14 @@ enum gl_frame_state_e : int
 };
 
 /// @summary Represents a unique identifier for a locked image.
-struct gdi_image_id_t
+struct gl_image_id_t
 {
     uintptr_t               ImageId;           /// The application-defined image identifier.
     size_t                  FrameIndex;        /// The zero-based index of the frame.
 };
 
 /// @summary Defines the data stored for a locked image.
-struct gdi_image_data_t
+struct gl_image_data_t
 {
     DWORD                   ErrorCode;         /// ERROR_SUCCESS or a system error code.
     uint32_t                SourceFormat;      /// One of dxgi_format_e defining the source data storage format.
@@ -53,7 +53,7 @@ struct gdi_image_data_t
 };
 
 /// @summary Defines the data associated with a single in-flight frame.
-struct gdi_frame_t
+struct gl_frame_t
 {
     int                     FrameState;        /// One of gdi_frame_state_e indicating the current state of the frame.
 
@@ -61,60 +61,44 @@ struct gdi_frame_t
 
     size_t                  ImageCount;        /// The number of images referenced in this frame.
     size_t                  ImageCapacity;     /// The capacity of the frame image list.
-    gdi_image_id_t         *ImageIds;          /// The unique identifiers of the referenced images.
-};
-struct gl3_display_t
-{
+    gl_image_id_t          *ImageIds;          /// The unique identifiers of the referenced images.
 };
 
-/// @summary Defines the state data associated with a single in-flight frame. 
-/// Each frame needs to perform several asynchronous operations, such as locking 
-/// images, copying data to GPU memory, and executing compute pipelines. Once 
-/// all asynchronous operations have completed, the frame can be submitted to the GPU.
-struct display_frame_t
-{
-    pr_command_list_t     *CommandList;      /// Pointer to the command list for the frame.
+struct gl3_renderer_t
+{   typedef image_cache_result_queue_t             image_lock_queue_t;
+    typedef image_cache_error_queue_t              image_error_queue_t;
 
-    size_t                 ImageCount;       /// The number of images referenced by the frame.
-    size_t                 ImageCapacity;    /// The current capacity of the image list for the frame.
-    image_id_t            *ImageIds;         /// The set of image identifiers.
-    image_data_t          *ImageData;        /// The set of image data, valid after the corresponding lock has completed.
-};
+    size_t                  Width;             /// The current viewport width.
+    size_t                  Height;            /// The current viewport height.
+    HDC                     Drawable;          /// The target drawable, which may reference the display's hidden drawable.
+    HWND                    Window;            /// The target window, which may reference the display's hidden window.
+    gl_display_t           *Display;           /// The display on which the drawable or window resides.
+    pr_command_queue_t      CommandQueue;      /// The presentation command queue to which command lists are submitted.
 
-/// @summary Define all of the state associated with an OpenGL 2.1 display driver. This 
-/// display driver is designed for compatibility across a wide range of hardware, from 
-/// integrated GPUs up, and on both native OS and virtual machines.
-struct present_driver_gl2_t
-{
-    size_t                 Width;            /// The width of the window, in pixels.
-    size_t                 Height;           /// The height of the window, in pixels.
-    HDC                    WndDC;            /// The window device context used for rendering operations.
-    HGLRC                  WndRC;            /// The OpenGL rendering context for the window.
-    HWND                   Window;           /// The handle of the target window.
+    size_t                  CacheCount;        /// The number of thread-local cache writers.
+    size_t                  CacheCapacity;     /// The maximum capacity of the presentation thread image cache list.
+    thread_image_cache_t   *CacheList;         /// The list of interfaces used to access image caches from the presentation thread.
 
-    size_t                 FrameCount;       /// The number of in-flight frames.
-    size_t                 FrameCapacity;    /// The current capacity of the frame list.
-    display_frame_t       *FrameList;        /// The list of in-flight frames.
+    size_t                  ImageCount;        /// The number of locked images.
+    size_t                  ImageCapacity;     /// The maximum capacity of the locked image list.
+    gl_image_id_t          *ImageIds;          /// The list of locked image identifiers.
+    gl_image_data_t        *ImageData;         /// The list of locked image data descriptors.
+    size_t                 *ImageRefs;         /// The list of reference counts for each locked image.
 
-    pr_command_queue_t     CommandQueue;     /// The driver's command list submission queue.
-    GLEWContext            GLEW;             /// The set of GLEW function pointers for this rendering context.
-    WGLEWContext           WGLEW;            /// The set of WGL GLEW function pointers for this rendering context.
+    image_lock_queue_t      ImageLockQueue;    /// The MPSC unbounded FIFO where completed image lock requests are stored.
+    image_error_queue_t     ImageErrorQueue;   /// The MPSC unbounded FIFO where failed image lock requests are stored.
+
+    #define MAXF            GLRC_MAX_FRAMES
+    uint32_t                FrameHead;         /// The zero-based index of the oldest in-flight frame.
+    uint32_t                FrameTail;         /// The zero-based index of the newest in-flight frame.
+    uint32_t                FrameMask;         /// The bitmask used to map an index into the frame array.
+    gl_frame_t              FrameQueue[MAXF];  /// Storage for in-flight frame data.
+    #undef  MAXF
 };
 
 /*///////////////
 //   Globals   //
 ///////////////*/
-/// @summary When using the Microsoft Linker, __ImageBase is set to the base address of the DLL.
-/// This is the same as the HINSTANCE/HMODULE of the DLL passed to DllMain.
-/// See: http://blogs.msdn.com/b/oldnewthing/archive/2004/10/25/247180.aspx
-EXTERN_C IMAGE_DOS_HEADER  __ImageBase;
-
-/// @summary The window class for hidden windows used for image streaming and context creation.
-global_variable WNDCLASSEX HiddenWndClass;
-
-/// @summary Global indicating whether the hidden window class needs to be registered.
-global_variable bool       CreateWndClass = true;
-
 // presentation command list is dequeued
 // - create a new local list entry
 // - read all commands, generate list of compute jobs
@@ -135,437 +119,279 @@ global_variable bool       CreateWndClass = true;
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
-/// @summary Implement the Windows message callback for the main application window.
-/// @param hWnd The handle of the main application window.
-/// @param uMsg The identifier of the message being processed.
-/// @param wParam An unsigned pointer-size value specifying data associated with the message.
-/// @param lParam A signed pointer-size value specifying data associated with the message.
-/// @return The return value depends on the message being processed.
-internal_function LRESULT CALLBACK HiddenWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+/// @summary Calculate the number of in-flight frames.
+/// @param gl The render state to query.
+/// @return The number of in-flight frames.
+internal_function inline size_t frame_count(gl3_renderer_t *gl)
 {
-    return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    return size_t(gl->FrameTail - gl->FrameHead);
 }
 
-/// @summary Initialize Windows GLEW and resolve WGL extension entry points.
-/// @param driver The presentation driver performing the initialization.
-/// @param real_wnd The handle of the window that is the target of rendering operations.
-/// @param active_dc The device context associated with the current OpenGL rendering context.
-/// @param active_rc The OpenGL rendering context active on the current thread.
-/// @return true if WGLEW is initialized successfully.
-internal_function bool initialize_wglew(present_driver_gl2_t *driver, HWND real_wnd, HDC active_dc, HGLRC active_rc)
-{   
-    PIXELFORMATDESCRIPTOR pfd;
-    RECT   window_rect;
-    GLenum e = GLEW_OK;
-    HWND wnd = NULL;
-    HDC   dc = NULL;
-    HGLRC rc = NULL;
-    bool res = true;
-    int  fmt = 0;
-
-    // if necessary, register the window class used for hidden windows.
-    if (CreateWndClass)
-    {   // the window class is only registered once per-process.
-        CreateWndClass                = false;
-        HiddenWndClass.cbSize         = sizeof(WNDCLASSEX);
-        HiddenWndClass.cbClsExtra     = 0;
-        HiddenWndClass.cbWndExtra     = sizeof(void*);
-        HiddenWndClass.hInstance      = (HINSTANCE)&__ImageBase;
-        HiddenWndClass.lpszClassName  = GL2_HIDDEN_WNDCLASS_NAME;
-        HiddenWndClass.lpszMenuName   = NULL;
-        HiddenWndClass.lpfnWndProc    = HiddenWndProc;
-        HiddenWndClass.hIcon          = LoadIcon  (0, IDI_APPLICATION);
-        HiddenWndClass.hIconSm        = LoadIcon  (0, IDI_APPLICATION);
-        HiddenWndClass.hCursor        = LoadCursor(0, IDC_ARROW);
-        HiddenWndClass.style          = CS_HREDRAW | CS_VREDRAW ;
-        HiddenWndClass.hbrBackground  = NULL;
-        if (!RegisterClassEx(&HiddenWndClass))
-        {   CreateWndClass = true;
-            return false;
+/// @summary Prepare an image for use by locking its data in host memory. The lock request completes asynchronously.
+/// @param gl The render state processing the request.
+/// @param frame The in-flight frame state requiring the image data.
+/// @param image A description of the portion of the image required for use.
+internal_function void prepare_image(gl3_renderer_t *gl, gl_frame_t *frame, pr_image_subresource_t *image)
+{
+    uintptr_t const image_id     = image->ImageId;
+    size_t    const frame_index  = image->FrameIndex;
+    size_t          local_index  = 0;
+    size_t          global_index = 0;
+    bool            found_image  = false;
+    // check the frame-local list first. if we find the image here, we know 
+    // that the frame has already been requested, and we don't need to lock it.
+    for (size_t i = 0, n = frame->ImageCount; i < n; ++i)
+    {
+        if (frame->ImageIds[i].ImageId    == image_id && 
+            frame->ImageIds[i].FrameIndex == frame_index)
+        {
+            local_index = i;
+            found_image = true;
+            break;
         }
     }
+    if (!found_image)
+    {   // add this image/frame to the local frame list.
+        if (frame->ImageCount == frame->ImageCapacity)
+        {   // increase the capacity of the local image list.
+            size_t old_amount  = frame->ImageCapacity;
+            size_t new_amount  = calculate_capacity(old_amount, old_amount+1, 1024, 1024);
+            gl_image_id_t *il  =(gl_image_id_t*)realloc(frame->ImageIds , new_amount * sizeof(gl_image_id_t));
+            if (il != NULL)
+            {
+                frame->ImageIds      = il;
+                frame->ImageCapacity = new_amount;
+            }
+        }
+        local_index   = frame->ImageCount++;
+        frame->ImageIds[local_index].ImageId     = image_id;
+        frame->ImageIds[local_index].FrameIndex  = frame_index;
+        // attempt to locate the image in the global image list.
+        for (size_t gi = 0, gn = gl->ImageCount; gi < gn; ++gi)
+        {
+            if (gl->ImageIds[gi].ImageId    == image_id && 
+                gl->ImageIds[gi].FrameIndex == frame_index)
+            {   // this image already exists in the global image list.
+                // there's no need to lock it; just increment the reference count.
+                gl->ImageRefs[gi]++;
+                found_image = true;
+                break;
+            }
+        }
+        // if the image wasn't in the global list, add it.
+        if (!found_image)
+        {
+            if (gl->ImageCount == gl->ImageCapacity)
+            {   // increase the capacity of the global image list.
+                size_t old_amount   = gl->ImageCapacity;
+                size_t new_amount   = calculate_capacity(old_amount, old_amount+1, 1024 , 1024);
+                gl_image_id_t   *il = (gl_image_id_t  *) realloc(gl->ImageIds , new_amount * sizeof(gl_image_id_t));
+                gl_image_data_t *dl = (gl_image_data_t*) realloc(gl->ImageData, new_amount * sizeof(gl_image_data_t));
+                size_t          *rl = (size_t         *) realloc(gl->ImageRefs, new_amount * sizeof(size_t));
+                if (il != NULL)  gl->ImageIds  = il;
+                if (dl != NULL)  gl->ImageData = dl;
+                if (rl != NULL)  gl->ImageRefs = rl;
+                if (il != NULL && dl != NULL  && rl != NULL) gl->ImageCapacity = new_amount;
+            }
+            global_index = gl->ImageCount++;
+            gl->ImageRefs[global_index]                   = 1;
+            gl->ImageIds [global_index].ImageId           = image_id;
+            gl->ImageIds [global_index].FrameIndex        = frame_index;
+            gl->ImageData[global_index].ErrorCode         = ERROR_SUCCESS;
+            gl->ImageData[global_index].SourceFormat      = DXGI_FORMAT_UNKNOWN;
+            gl->ImageData[global_index].SourceCompression = IMAGE_COMPRESSION_NONE;
+            gl->ImageData[global_index].SourceEncoding    = IMAGE_ENCODING_RAW;
+            gl->ImageData[global_index].SourceCache       = NULL;
+            gl->ImageData[global_index].SourceWidth       = 0;
+            gl->ImageData[global_index].SourceHeight      = 0;
+            gl->ImageData[global_index].SourcePitch       = 0;
+            gl->ImageData[global_index].SourceData        = NULL;
+            gl->ImageData[global_index].SourceSize        = 0;
+            // locate the presentation thread cache interface for the source data:
+            bool found_cache = false;
+            for (size_t ci = 0, cn = gl->CacheCount; ci < cn; ++ci)
+            {
+                if (gl->CacheList[ci].Cache == image->ImageSource)
+                {
+                    gl->ImageData[global_index].SourceCache = &gl->CacheList[ci];
+                    found_cache = true;
+                    break;
+                }
+            }
+            if (!found_cache)
+            {   // create a new interface to write to this image cache.
+                if (gl->CacheCount == gl->CacheCapacity)
+                {   // increase the capacity of the image cache list.
+                    size_t old_amount   = gl->CacheCapacity;
+                    size_t new_amount   = calculate_capacity(old_amount, old_amount+1, 16, 16);
+                    thread_image_cache_t *cl = (thread_image_cache_t*)   realloc(gl->CacheList, new_amount * sizeof(thread_image_cache_t));
+                    if (cl != NULL)
+                    {
+                        gl->CacheList     = cl;
+                        gl->CacheCapacity = new_amount;
+                    }
+                }
+                thread_image_cache_t *cache = &gl->CacheList[gl->CacheCount++];
+                gl->ImageData[global_index].SourceCache = cache;
+                cache->initialize(image->ImageSource);
+            }
+            // finally, submit a lock request for the frame.
+            gl->ImageData[global_index].SourceCache->lock(image_id, frame_index, frame_index, &gl->ImageLockQueue, &gl->ImageErrorQueue, 0);
+        }
+    }
+}
 
-    // retrieve the window bounds to position and size the dummy window.
-    GetWindowRect(real_wnd, &window_rect);
+/// @summary Attempt to start a new in-flight frame.
+/// @param gl The renderer state managing the frame.
+/// @param cmdlist The presentation command list defining the frame.
+/// @return true if the frame was launched, or false if too many frames are in-flight.
+internal_function bool launch_frame(gl3_renderer_t *gl, pr_command_list_t *cmdlist)
+{   // insert a new frame at the tail of the queue.
+    if (frame_count(gl) == GLRC_MAX_FRAMES)
+    {   // there are too many frames in-flight.
+        return false;
+    }
+    uint32_t     id    = gl->FrameTail;
+    size_t       index = size_t(id & gl->FrameMask); 
+    gl_frame_t  *frame =&gl->FrameQueue[index];
+    frame->FrameState  = GLRC_FRAME_STATE_WAIT_FOR_IMAGES;
+    frame->CommandList = cmdlist;
+    frame->ImageCount  = 0;
 
-    // now that we've saved the current DC and rendering context, we need
-    // to create a dummy window, pixel format and rendering context and 
-    // make them current so we can retrieve the wgl extension entry points.
-    // in order to create a rendering context, the pixel format must be set
-    // on a window, and Windows only allows the pixel format to be set once.
-    if ((wnd = CreateWindow(GL2_HIDDEN_WNDCLASS_NAME, _T("WGLEW_InitWnd"), WS_POPUP, window_rect.left, window_rect.top, window_rect.right - window_rect.left, window_rect.bottom - window_rect.top, NULL, NULL, (HINSTANCE)&__ImageBase, driver)) == NULL)
-    {   // unable to create the hidden window - can't create an OpenGL rendering context.
-        res  = false; goto cleanup;
+    // iterate through the command list and locate all PREPARE_IMAGE commands.
+    // for each of these, update the frame-local image list as well as the 
+    // the driver-global image list. eventually, we'll also use this to initialize
+    // any compute and display jobs as well.
+    bool       end_of_frame = false;
+    uint8_t const *read_ptr = cmdlist->CommandData;
+    uint8_t const *end_ptr  = cmdlist->CommandData + cmdlist->BytesUsed;
+    while (read_ptr < end_ptr && !end_of_frame)
+    {
+        pr_command_t *cmd_info = (pr_command_t*) read_ptr;
+        size_t        cmd_size =  PR_COMMAND_SIZE_BASE + cmd_info->DataSize;
+        switch (cmd_info->CommandId)
+        {
+        case PR_COMMAND_END_OF_FRAME:
+            {   // break out of the command processing loop.
+                end_of_frame = true;
+                gl->FrameTail++;
+            }
+            break;
+        case PR_COMMAND_PREPARE_IMAGE:
+            {   // lock the source data in host memory.
+                prepare_image(gl, frame, (pr_image_subresource_t*) cmd_info->Data);
+            }
+            break;
+        // TODO(rlk): case PR_COMMAND_compute_x: init compute job record, but don't start
+        // TODO(rlk): case PR_COMMAND_display_x: init display job record, but don't start
+        default:
+            break;
+        }
+        // advance to the start of the next buffered command.
+        read_ptr += cmd_size;
     }
-    if ((dc  = GetDC(wnd)) == NULL)
-    {   // unable to retrieve the window device context - can't create an OpenGL rendering context.
-        res  = false; goto cleanup;
-    }
-    // fill out a PIXELFORMATDESCRIPTOR using common pixel format attributes.
-    memset(&pfd,   0, sizeof(PIXELFORMATDESCRIPTOR)); 
-    pfd.nSize       = sizeof(PIXELFORMATDESCRIPTOR); 
-    pfd.nVersion    = 1; 
-    pfd.dwFlags     = PFD_DOUBLEBUFFER | PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW; 
-    pfd.iPixelType  = PFD_TYPE_RGBA; 
-    pfd.cColorBits  = 32; 
-    pfd.cDepthBits  = 24; 
-    pfd.cStencilBits=  8;
-    pfd.iLayerType  = PFD_MAIN_PLANE; 
-    if ((fmt = ChoosePixelFormat(dc, &pfd)) == 0)
-    {   // unable to find a matching pixel format - can't create an OpenGL rendering context.
-        res  = false; goto cleanup;
-    }
-    if (SetPixelFormat(dc, fmt, &pfd) != TRUE)
-    {   // unable to set the dummy window pixel format - can't create an OpenGL rendering context.
-        res  = false; goto cleanup;
-    }
-    if ((rc  = wglCreateContext(dc))  == NULL)
-    {   // unable to create the dummy OpenGL rendering context.
-        res  = false; goto cleanup;
-    }
-    if (wglMakeCurrent(dc, rc) != TRUE)
-    {   // unable to make the OpenGL rednering context current.
-        res  = false; goto cleanup;
-    }
-    // finally, we can initialize GLEW and get the function entry points.
-    // this populates the function pointers in the driver->WGLEW field.
-    if ((e   = wglewInit())  != GLEW_OK)
-    {   // unable to initialize GLEW - WGLEW extensions are unavailable.
-        res  = false; goto cleanup;
-    }
-    // initialization completed successfully. fallthrough to cleanup.
-    res = true;
+    return true;
+}
 
-cleanup:
-    wglMakeCurrent(NULL, NULL);
-    wglMakeCurrent(active_dc , active_rc);
-    if (rc  != NULL) wglDeleteContext(rc);
-    if (dc  != NULL) ReleaseDC(wnd, dc);
-    if (wnd != NULL) DestroyWindow(wnd);
-    return res;
+/// @summary Perform cleanup operations when the display commands for the oldest in-flight frame have completed.
+/// @param gl The renderer state managing the frame.
+internal_function void retire_frame(gl3_renderer_t *gl)
+{   // retire the frame at the head of the queue.
+    uint32_t          id = gl->FrameHead++;
+    size_t         index = size_t(id & gl->FrameMask);
+    gl_frame_t    *frame =&gl->FrameQueue[index];
+    gl_image_id_t *local_ids  = frame->ImageIds;
+    gl_image_id_t *global_ids = gl->ImageIds;
+    for (size_t local_index = 0, local_count = frame->ImageCount; local_index < local_count; ++local_index)
+    {   // locate the corresponding entry in the global list.
+        gl_image_id_t const &local_id = local_ids[local_index];
+        for (size_t global_index = 0; global_index < gl->ImageCount; ++global_index)
+        {   
+            gl_image_id_t const &global_id  = global_ids[global_index];
+            if (local_id.ImageId == global_id.ImageId && local_id.FrameIndex == global_id.FrameIndex)
+            {   // found a match. decrement the reference count.
+                if (gl->ImageRefs[global_index]-- == 1)
+                {   // the image reference count has dropped to zero.
+                    // unlock the image data, and delete the entry from the global list.
+                    size_t frame_index = global_id.FrameIndex;
+                    size_t  last_index = gl->ImageCount - 1;
+                    gl->ImageData[global_index].SourceCache->unlock(global_id.ImageId, frame_index, frame_index);
+                    gl->ImageIds [global_index] = gl->ImageIds [last_index];
+                    gl->ImageData[global_index] = gl->ImageData[last_index];
+                    gl->ImageRefs[global_index] = gl->ImageRefs[last_index];
+                    gl->ImageCount--;
+                }
+                break;
+            }
+        }
+    }
+    // TODO(rlk): cleanup compute jobs
+    // TODO(rlk): cleanup display state
+    pr_command_queue_return(&gl->CommandQueue, frame->CommandList);
+    frame->ImageCount = 0;
 }
 
 /*///////////////////////
 //  Public Functions   //
 ///////////////////////*/
-/// @summary Perform the initialization necessary to set up both Direct3D and Direct2D 
-/// and their associated swap chain, and attach the interfaces to a given window. Each
-/// window maintains its own device (generally just a command queue and some state.)
-/// @param window The window to which the display driver instance is attached.
-/// @return A handle to the display driver used to render to the given window.
-uintptr_t __cdecl PrDisplayDriverOpen(HWND window)
+/// @summary Creates a new renderer attached to a window.
+public_function uintptr_t create_renderer_window(gl_display_t *display, HWND window)
 {
-    present_driver_gl2_t *driver = (present_driver_gl2_t*) malloc(sizeof(present_driver_gl2_t));
-    if (driver == NULL)   return 0;
-
-    // initialize the fields of the driver structure to be invalid.
-    driver->WndDC    = NULL;
-    driver->WndRC    = NULL; 
-    driver->Window   = NULL;
-
-    // save the current device and GL rendering context.
-    HDC   current_dc = wglGetCurrentDC();
-    HGLRC current_rc = wglGetCurrentContext();
-
-    // retrieve the current dimensions of the client area of the window.
-    RECT  rc;
-    GetClientRect(window, &rc);
-    int   width  = (int)  (rc.right  - rc.left);
-    int   height = (int)  (rc.bottom - rc.top);
-
-    // initialize WGLEW - lets us proceed with 'modern' style initialization.
-    if (initialize_wglew(driver, window, current_dc, current_rc) == false)
-    {   // no worthwhile OpenGL implementation is available.
-        return (uintptr_t) 0;
-    }
-    
-    // save off the window device context:
-    PIXELFORMATDESCRIPTOR pfd;
-    HDC  win_dc = GetDC(window);
-    HGLRC gl_rc = NULL;
-    GLenum  err = GLEW_OK;
-    int     fmt = 0;
-    memset(&pfd , 0, sizeof(PIXELFORMATDESCRIPTOR));
-    pfd.nSize   =    sizeof(PIXELFORMATDESCRIPTOR);
-    pfd.nVersion= 1;
-
-    // for creating a rendering context and pixel format, we can either use
-    // the new method, or if that's not available, fall back to the old way.
-    if (WGLEW_ARB_pixel_format)
-    {   // use the more recent method to find a pixel format.
-        UINT fmt_count     = 0;
-        int  fmt_attribs[] = 
-        {
-            WGL_SUPPORT_OPENGL_ARB,                      GL_TRUE, 
-            WGL_DRAW_TO_WINDOW_ARB,                      GL_TRUE, 
-            WGL_DEPTH_BITS_ARB    ,                           24, 
-            WGL_STENCIL_BITS_ARB  ,                            8,
-            WGL_RED_BITS_ARB      ,                            8, 
-            WGL_GREEN_BITS_ARB    ,                            8,
-            WGL_BLUE_BITS_ARB     ,                            8,
-            WGL_PIXEL_TYPE_ARB    ,            WGL_TYPE_RGBA_ARB,
-            WGL_ACCELERATION_ARB  ,    WGL_FULL_ACCELERATION_ARB, 
-            WGL_SAMPLE_BUFFERS_ARB,                     GL_FALSE, /* GL_TRUE to enable MSAA */
-            WGL_SAMPLES_ARB       ,                            1, /* ex. 4 = 4x MSAA        */
-            0
-        };
-        if (wglChoosePixelFormatARB(win_dc, fmt_attribs, NULL, 1, &fmt, &fmt_count) == FALSE)
-        {   // unable to find a matching pixel format - can't create an OpenGL rendering context.
-            ReleaseDC(window, win_dc);
-            return (uintptr_t) 0;
-        }
-    }
-    else
-    {   // use the legacy method to find the pixel format.
-        pfd.dwFlags     = PFD_DOUBLEBUFFER | PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW; 
-        pfd.iPixelType  = PFD_TYPE_RGBA; 
-        pfd.cColorBits  = 32; 
-        pfd.cDepthBits  = 24; 
-        pfd.cStencilBits=  8;
-        pfd.iLayerType  = PFD_MAIN_PLANE; 
-        if ((fmt = ChoosePixelFormat(win_dc, &pfd)) == 0)
-        {   // unable to find a matching pixel format - can't create an OpenGL rendering context.
-            ReleaseDC(window, win_dc);
-            return (uintptr_t) 0;
-        }
-    }
-    if (SetPixelFormat(win_dc, fmt, &pfd)  != TRUE)
-    {   // unable to assign the pixel format to the window.
-        ReleaseDC(window, win_dc);
-        return (uintptr_t)0;
-    }
-    if (WGLEW_ARB_create_context)
-    {
-        if (WGLEW_ARB_create_context_profile)
-        {
-            int  rc_attribs[] = 
-            {
-                WGL_CONTEXT_MAJOR_VERSION_ARB,    2, 
-                WGL_CONTEXT_MINOR_VERSION_ARB,    1, 
-                WGL_CONTEXT_PROFILE_MASK_ARB ,    WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB,
-#ifdef _DEBUG
-                WGL_CONTEXT_FLAGS_ARB        ,    WGL_CONTEXT_DEBUG_BIT_ARB,
-#endif
-                0
-            };
-            if ((gl_rc = wglCreateContextAttribsARB(win_dc, current_rc, rc_attribs)) == NULL)
-            {   // unable to create the OpenGL rendering context.
-                ReleaseDC(window, win_dc);
-                return (uintptr_t)0;
-            }
-        }
-        else
-        {
-            int  rc_attribs[] = 
-            {
-                WGL_CONTEXT_MAJOR_VERSION_ARB,    2,
-                WGL_CONTEXT_MINOR_VERSION_ARB,    1,
-#ifdef _DEBUG
-                WGL_CONTEXT_FLAGS_ARB        ,    WGL_CONTEXT_DEBUG_BIT_ARB,
-#endif
-                0
-            };
-            if ((gl_rc = wglCreateContextAttribsARB(win_dc, current_rc, rc_attribs)) == NULL)
-            {   // unable to create the OpenGL rendering context.
-                ReleaseDC(window, win_dc);
-                return (uintptr_t)0;
-            }
-        }
-    }
-    else
-    {   // use the legacy method to create the OpenGL rendering context.
-        if ((gl_rc = wglCreateContext(win_dc)) == NULL)
-        {   // unable to create the OpenGL rendering context.
-            ReleaseDC(window, win_dc);
-            return (uintptr_t)0;
-        }
-        if (current_rc != NULL)
-        {   // share textures, shaders, programs, etc. between the rendering contexts.
-            wglShareLists(gl_rc, current_rc);
-        }
-    }
-    if (wglMakeCurrent(win_dc, gl_rc) != TRUE)
-    {   // unable to activate the OpenGL rendering context on the current thread.
-        wglMakeCurrent(current_dc, current_rc);
-        ReleaseDC(window, win_dc);
-        return (uintptr_t)0;
-    }
-    if ((err = glewInit()) != GLEW_OK)
-    {   // unable to initialize GLEW - OpenGL entry points are not available.
-        wglMakeCurrent(current_dc, current_rc);
-        ReleaseDC(window, win_dc);
-        return (uintptr_t)0;
-    }
-    if (GLEW_VERSION_2_1 == GL_FALSE)
-    {   // OpenGL 2.1 is not supported by the driver.
-        wglMakeCurrent(current_dc, current_rc);
-        ReleaseDC(window, win_dc);
-        return (uintptr_t) 0;
-    }
-
-    // optionally, enable synchronization with vertical retrace.
-    if (WGLEW_EXT_swap_control)
-    {
-        if (WGLEW_EXT_swap_control_tear)
-        {   // SwapBuffers synchronizes with the vertical retrace interval, 
-            // except when the interval is missed, in which case the swap 
-            // is performed immediately.
-            wglSwapIntervalEXT(-1);
-        }
-        else
-        {   // SwapBuffers synchronizes with the vertical retrace interval.
-            wglSwapIntervalEXT(+1);
-        }
-    }
-
-    // finally, select the master rendering context. 
-    // the window rendering context is only active when submitting a command list.
-    wglMakeCurrent(current_dc, current_rc);
-
-    // initialize the fields of the driver structure.
-    driver->Width   = size_t(width);
-    driver->Height  = size_t(height);
-    driver->WndDC   = win_dc;
-    driver->WndRC   = gl_rc;
-    driver->Window  = window;
-    pr_command_queue_init(&driver->CommandQueue);
-    return (uintptr_t)driver;
 }
 
-/// @summary Performs an explicit reinitialization of the display driver used to render 
-/// content into a given window. This function is primarily used internally to handle 
-/// detected device removal conditions, but may be called by the application as well.
-/// @param drv The display driver handle returned by PrDisplayDriverOpen().
-void __cdecl PrDisplayDriverReset(uintptr_t drv)
+public_function uintptr_t create_renderer_headless(gl_display_t *display, size_t target_width, size_t target_height)
 {
-    present_driver_gl2_t   *driver = (present_driver_gl2_t*) drv;
-    pr_command_queue_clear(&driver->CommandQueue);
+    // TODO(rlk): needs to create a FBO, etc.
 }
 
-/// @summary Handles the case where the window associated with a display driver is resized.
-/// This function should be called in response to a WM_SIZE or WM_DISPLAYCHANGE event.
-/// @param drv The display driver handle returned by PrDisplayDriverResize().
-void __cdecl PrDisplayDriverResize(uintptr_t drv)
+public_function void reset_renderer(uintptr_t handle)
 {
-    present_driver_gl2_t *driver = (present_driver_gl2_t*) drv;
-    if (driver == NULL)   return;
-
-    // retrieve the current dimensions of the client area of the window.
-    RECT rc;
-    GetClientRect(driver->Window, &rc);
-    int width  = (int)    (rc.right  - rc.left);
-    int height = (int)    (rc.bottom - rc.top);
-    
-    // glViewport, etc.
-    driver->Width  = size_t(width);
-    driver->Height = size_t(height);
+    gl3_renderer_t *gl = (gl3_renderer_t*) handle;
+    // TODO(rlk): clear image lists, in-flight frames, etc.
+    pr_command_queue_clear(&gl->CommandQueue);
 }
 
-/// @summary Allocates a new command list for use by the application. The 
-/// application should write display commands to the command list and then 
-/// submit the list for processing by the presentation driver.
-/// @param drv The display driver handle returned by PrDisplayDriverOpen().
+public_function void reset_renderer(uintptr_t handle, gl_display_t *display, HWND window)
+{
+    // TODO(rlk): called when a window changes displays.
+}
+
+/// @summary Allocates a new command list for use by the application. The application should write display commands to the command list and then submit the list for processing by the presentation driver.
+/// @param handle The renderer handle returned by one of the create_renderer functions.
 /// @return An empty command list, or NULL if no command lists are available.
-pr_command_list_t* __cdecl PrCreateCommandList(uintptr_t drv)
+public_function pr_command_list_t* renderer_command_list(uintptr_t handle)
 {
-    present_driver_gl2_t *driver = (present_driver_gl2_t*) drv;
-    if (driver == NULL)   return NULL;
-    return pr_command_queue_next_available(&driver->CommandQueue);
+    return pr_command_queue_next_available(&((gl3_renderer_t*)handle)->CommandQueue);
 }
 
-/// @summary Submits a list of buffered display commands for processing.
-/// @param drv The display driver handle returned by PrDisplayDriverOpen().
-/// @param cmdlist The list of buffered display commands being submitted.
-/// @param wait Specify true to block the calling thread until the command list is processed by the driver.
-/// @param wait_timeout The maximum amount of time to wait, in milliseconds, if wait is also true.
-void __cdecl PrSubmitCommandList(uintptr_t drv, pr_command_list_t *cmdlist, bool wait, uint32_t wait_timeout)
+/// @summary Submits a command list, representing a single frame, to the renderer.
+/// @param handle The renderer handle, returned by one of the create_renderer functions.
+/// @param cmdlist The command list to submit to the renderer. The end-of-frame command is automatically appended.
+/// @return A wait handle that can be used to wait for the renderer to process the command list.
+public_function HANDLE renderer_submit(uintptr_t handle, pr_command_list_t *cmdlist)
 {
-    present_driver_gl2_t *driver = (present_driver_gl2_t*) drv;
-    if (driver == NULL)   return;
-    HANDLE sync = cmdlist->SyncHandle;
-    pr_command_queue_submit(&driver->CommandQueue, cmdlist);
-    if (wait) safe_wait(sync, wait_timeout);
+    gl3_renderer_t   *gl = (gl3_renderer_t*) handle;
+    HANDLE          sync =  cmdlist->SyncHandle;
+    pr_command_end_of_frame(cmdlist);
+    pr_command_queue_submit(&gl->CommandQueue, cmdlist);
+    return sync;
 }
 
-/// @summary Copies the current frame to the application window.
-/// @param drv The display driver handle returned by PrDisplayDriverOpen().
-void __cdecl PrPresentFrameToWindow(uintptr_t drv)
+/// @summary Processes command lists representing the next frame and submits commands to the GPU.
+/// @param handle The renderer handle, returned by one of the create_renderer functions.
+public_function void update_drawable(uintptr_t handle)
 {
-    present_driver_gl2_t *driver = (present_driver_gl2_t*) drv;
-    if (driver == NULL)   return;
-
-    wglMakeCurrent(driver->WndDC, driver->WndRC);
-
-    pr_command_list_t *cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
-    while (cmdlist != NULL)
-    {
-        bool       end_of_frame = false;
-        uint8_t const *read_ptr = cmdlist->CommandData;
-        uint8_t const *end_ptr  = cmdlist->CommandData + cmdlist->BytesUsed;
-        while (read_ptr < end_ptr)
-        {
-            pr_command_t *cmd_info = (pr_command_t*) read_ptr;
-            size_t        cmd_size =  PR_COMMAND_SIZE_BASE + cmd_info->DataSize;
-            switch (cmd_info->CommandId)
-            {
-            case PR_COMMAND_NO_OP:
-                break;
-            case PR_COMMAND_END_OF_FRAME:
-                {   // break out of the command processing loop and submit
-                    // submit the translated command list to the system driver.
-                    end_of_frame = true;
-                }
-                break;
-            case PR_COMMAND_CLEAR_COLOR_BUFFER:
-                {
-                    pr_clear_color_buffer_data_t *data = (pr_clear_color_buffer_data_t*) cmd_info->Data;
-                    glClearColor(data->Red, data->Green, data->Blue, data->Alpha);
-                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-                }
-                break;
-            }
-            // advance to the start of the next buffered command.
-            read_ptr += cmd_size;
-        }
-        // signal to any waiters that processing of the command list has finished.
-        SetEvent(cmdlist->SyncHandle);
-        // return the current command list to the driver's free list
-        // and determine whether to continue submitting commands.
-        pr_command_queue_return(&driver->CommandQueue, cmdlist);
-        if (end_of_frame)
-        {   // finished with command submission for this frame.
-            break;
-        }
-        else
-        {   // advance to the next queued command list.
-            cmdlist = pr_command_queue_next_submitted(&driver->CommandQueue);
-        }
-    }
-
-    // swap buffers to submit the command list to the OpenGL driver.
-    SwapBuffers(driver->WndDC);
-    wglMakeCurrent(NULL, NULL);
+    // TODO(rlk): set the viewport to the entire renderable (window or FBO) bounds.
+    // will need to GetClientRect() for the window.
 }
 
-/// @summary Closes a display driver instance and releases all associated resources.
-/// @param drv The display driver handle returned by PrDisplayDriverOpen().
-void __cdecl PrDisplayDriverClose(uintptr_t drv)
+/// @summary Frees resources associated with a renderer and detaches it from its drawable.
+/// @param handle The renderer handle, returned by one of the create_renderer functions.
+public_function void delete_renderer(uintptr_t handle)
 {
-    present_driver_gl2_t *driver = (present_driver_gl2_t*) drv;
-    if (driver == NULL)   return;
-    if (driver->WndRC != NULL)
-    {
-        wglMakeCurrent(NULL, NULL);
-        wglDeleteContext(driver->WndRC);
-    }
-    if (driver->WndDC != NULL)
-    {
-        ReleaseDC(driver->Window, driver->WndDC);
-    }
-    driver->WndDC  = NULL;
-    driver->WndRC  = NULL;
-    driver->Window = NULL;
-    pr_command_queue_delete(&driver->CommandQueue);
-    free(driver);
+    gl3_renderer_t *gl = (gl3_renderer_t*) handle;
+    // TODO(rlk): The display manages all of the shared resources.
+    // If this is a headless renderer, the FBOs etc. are private.
+    pr_command_queue_delete(&gl->CommandQueue);
+    free(gl);
 }
-
