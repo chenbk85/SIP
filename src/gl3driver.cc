@@ -842,7 +842,7 @@ public_function void delete_renderer(uintptr_t handle)
     free(gl->ImageIds);
 
     // free resources associated with the image cache list:
-    for (size_t i = 0, n = gl->CacheCapacity; i < n; ++i)
+    for (size_t i = 0, n = gl->CacheCount; i < n; ++i)
     {
         gl->CacheList[i].dispose();
     }

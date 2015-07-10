@@ -650,6 +650,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
         // ...
         renderer_submit(renderer, cmdlist); // TODO(rlk): specify target HWND
+        update_drawable(renderer);
 
         // throttle the application update rate.
         trace_marker_main("tick_throttle");

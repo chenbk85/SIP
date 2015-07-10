@@ -155,8 +155,13 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
     dd.cb = sizeof(DISPLAY_DEVICE);
     for (DWORD ordinal = 0; EnumDisplayDevices(NULL, ordinal, &dd, 0); ++ordinal)
     {   // ignore pseudo-displays.
-        if ((dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) == 0)
-            display_count++;
+        if ((dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ACTIVE) == 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
+            continue;
+        display_count++;
     }
     if (display_count == 0)
     {
@@ -199,14 +204,16 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
     // enumerate all displays and retrieve their properties.
     // reset the display count to only track displays for which an OpenGL 3.2 
     // context can be successfully created - hide displays that fail.
-    for (DWORD ordinal = 0; EnumDisplayDevices(NULL, ordinal, &dd, 0); ordinal)
+    for (DWORD ordinal = 0; EnumDisplayDevices(NULL, ordinal, &dd, 0); ++ordinal)
     {   
-        gl_display_t             *display = &displays[display_count];
-        cl_device_id              preferred_cl_device   = NULL;
-        clGetGLContextInfoKHR_fn  clGetGLContextInfoKHR = NULL;
+        gl_display_t *display = &displays[display_count];
 
         // ignore pseudo-displays.
-        if (dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER)
+        if ((dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ACTIVE) == 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
             continue;
 
         // retrieve the current display settings and extract the 
@@ -235,7 +242,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
         else continue;
 
         // create a hidden window on the display.
-        HWND window  = CreateWindowEx(WS_EX_NOREDIRECTIONBITMAP, GL_HIDDEN_WNDCLASS_NAME, dd.DeviceName, WS_POPUP, x, y, w, h, NULL, NULL, instance, NULL);
+        HWND window  = CreateWindowEx(0, GL_HIDDEN_WNDCLASS_NAME, dd.DeviceName, WS_POPUP, x, y, w, h, NULL, NULL, instance, NULL);
         if  (window == NULL)
         {
             OutputDebugString(_T("ERROR: Unable to create hidden window on display: "));
@@ -280,11 +287,11 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
                 WGL_BLUE_BITS_ARB     ,                            8,
                 WGL_PIXEL_TYPE_ARB    ,            WGL_TYPE_RGBA_ARB,
                 WGL_ACCELERATION_ARB  ,    WGL_FULL_ACCELERATION_ARB, 
-                WGL_SAMPLE_BUFFERS_ARB,                     GL_FALSE, /* GL_TRUE to enable MSAA */
-                WGL_SAMPLES_ARB       ,                            1, /* ex. 4 = 4x MSAA        */
+                //WGL_SAMPLE_BUFFERS_ARB,                     GL_FALSE, /* GL_TRUE to enable MSAA */
+                //WGL_SAMPLES_ARB       ,                            1, /* ex. 4 = 4x MSAA        */
                 0
             };
-            if (wglChoosePixelFormatARB(win_dc, fmt_attribs, NULL, 1, &fmt, &fmt_count) == FALSE)
+            if (wglChoosePixelFormatARB(win_dc, fmt_attribs, NULL, 1, &fmt, &fmt_count) != TRUE)
             {   // unable to find a matching pixel format - can't create an OpenGL rendering context.
                 OutputDebugString(_T("ERROR: wglChoosePixelFormatARB failed on display: "));
                 OutputDebugString(dd.DeviceName);
@@ -388,6 +395,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
             DestroyWindow(window);
             continue;
         }
+        glewExperimental = GL_TRUE; // else we crash - see: http://www.opengl.org/wiki/OpenGL_Loading_Library
         if ((err = glewInit()) != GLEW_OK)
         {   // unable to initialize GLEW - OpenGL entry points are not available.
             OutputDebugString(_T("ERROR: glewInit() failed on display: "));
