@@ -559,6 +559,13 @@ public_function HWND make_window_on_display(gl_display_t *display, TCHAR const *
     if (w == 0) w = (int)(display->DisplayWidth  - (display_rect.right  - x));
     if (h == 0) h = (int)(display->DisplayHeight - (display_rect.bottom - y));
 
+    // CW_USEDEFAULT x, y => (0, 0)
+    // CW_USEDEFAULT w, h => (width, height)
+    if (x == CW_USEDEFAULT) x = (int) display->DisplayX;
+    if (y == CW_USEDEFAULT) y = (int) display->DisplayY;
+    if (w == CW_USEDEFAULT) w = (int) display->DisplayWidth;
+    if (h == CW_USEDEFAULT) h = (int) display->DisplayHeight;
+
     // clip the window bounds to the display bounds.
     if (x + w <= display_rect.left || x >= display_rect.right)   x = display_rect.left;
     if (x + w >  display_rect.right ) w  = display_rect.right  - x;
