@@ -43,6 +43,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _MSC_VER
+#pragma warning (push)
+#pragma warning (disable:4127) // conditional expression is constant
+#pragma warning (disable:4996) // clCreateFromGLTextureND was declared deprecated
+#endif
+
 // Platform APIs
 CL_API_ENTRY cl_int CL_API_CALL
 clGetPlatformIDs(cl_uint          num_entries,
@@ -2184,3 +2190,7 @@ clSetUserEventStatus(
         execution_status);
 }
 
+
+#ifdef _MSC_VER
+#pragma warning (pop)
+#endif
