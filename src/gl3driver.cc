@@ -14,6 +14,19 @@
 /// @summary Define the registered name of the WNDCLASS used for hidden windows.
 #define GLRC_HIDDEN_WNDCLASS_NAME       _T("GLRC_Hidden_WndClass")
 
+/// @summary Defines the maximum number of shader stages. Currently, we have
+/// stages GL_VERTEX_SHADER, GL_GEOMETRY_SHADER and GL_FRAGMENT_SHADER.
+#ifndef GL_MAX_SHADER_STAGES
+#define GL_MAX_SHADER_STAGES            (3U)
+#endif
+
+/// @summary Macro to convert a byte offset into a pointer.
+/// @param x The byte offset value.
+/// @return The offset value, as a pointer.
+#ifndef GL_BUFFER_OFFSET
+#define GL_BUFFER_OFFSET(x)             ((GLvoid*)(((uint8_t*)NULL)+(x)))
+#endif
+
 /// @summary Define the maximum number of in-flight frames per-driver.
 static uint32_t const GLRC_MAX_FRAMES   = 4;
 
@@ -36,6 +49,144 @@ enum gl_renderer_flags_e                : uint32_t
     GLRC_RENDER_FLAGS_NONE              = (0 << 0),
     GLRC_RENDER_FLAGS_WINDOW            = (1 << 0),
     GLRC_RENDER_FLAGS_HEADLESS          = (1 << 1),
+};
+
+/// @summary Describes an active GLSL attribute.
+struct glsl_attribute_desc_t
+{
+    GLenum                  DataType;          /// The data type, ex. GL_FLOAT.
+    GLint                   Location;          /// The assigned location within the program.
+    size_t                  DataSize;          /// The size of the attribute data, in bytes.
+    size_t                  DataOffset;        /// The offset of the attribute data, in bytes.
+    GLsizei                 Dimension;         /// The data dimension, for array types.
+};
+
+/// @summary Describes an active GLSL sampler.
+struct glsl_sampler_desc_t
+{
+    GLenum                  SamplerType;       /// The sampler type, ex. GL_SAMPLER_2D.
+    GLenum                  BindTarget;        /// The texture bind target, ex. GL_TEXTURE_2D.
+    GLint                   Location;          /// The assigned location within the program.
+    GLint                   ImageUnit;         /// The assigned texture image unit, ex. GL_TEXTURE0.
+};
+
+/// @summary Describes an active GLSL uniform.
+struct glsl_uniform_desc_t
+{
+    GLenum                  DataType;          /// The data type, ex. GL_FLOAT.
+    GLint                   Location;          /// The assigned location within the program.
+    size_t                  DataSize;          /// The size of the uniform data, in bytes.
+    size_t                  DataOffset;        /// The offset of the uniform data, in bytes.
+    GLsizei                 Dimension;         /// The data dimension, for array types.
+};
+
+/// @summary Describes a successfully compiled and linked GLSL shader program.
+struct glsl_shader_desc_t
+{
+    size_t                  UniformCount;      /// Number of active uniforms.
+    uint32_t               *UniformNames;      /// Hashed names of active uniforms.
+    glsl_uniform_desc_t    *Uniforms;          /// Information about active uniforms.
+    size_t                  AttributeCount;    /// Number of active inputs.
+    uint32_t               *AttributeNames;    /// Hashed names of active inputs.
+    glsl_attribute_desc_t  *Attributes;        /// Information about active inputs.
+    size_t                  SamplerCount;      /// Number of active samplers.
+    uint32_t               *SamplerNames;      /// Hashed names of samplers.
+    glsl_sampler_desc_t    *Samplers;          /// Information about active samplers.
+    void                   *Metadata;          /// Pointer to the raw memory.
+};
+
+/// @summary Describes the source code input to the shader compiler and linker.
+struct glsl_shader_source_t
+{
+    #define N               GL_MAX_SHADER_STAGES
+    size_t                  StageCount;        /// Number of valid stages.
+    GLenum                  StageNames [N];    /// GL_VERTEX_SHADER, etc.
+    GLsizei                 StringCount[N];    /// Number of strings per-stage.
+    char                  **SourceCode [N];    /// NULL-terminated ASCII strings.
+    #undef  N
+};
+
+/// @summary Describes a single level of an image in a mipmap chain. Essentially the same as dds_level_desc_t, but adds GL-specific type fields.
+struct gl_level_desc_t
+{
+    size_t                  Index;             /// The mipmap level index (0=highest resolution).
+    size_t                  Width;             /// The width of the level, in pixels.
+    size_t                  Height;            /// The height of the level, in pixels.
+    size_t                  Slices;            /// The number of slices in the level.
+    size_t                  BytesPerElement;   /// The number of bytes per-channel or pixel.
+    size_t                  BytesPerRow;       /// The number of bytes per-row.
+    size_t                  BytesPerSlice;     /// The number of bytes per-slice.
+    GLenum                  Layout;            /// The OpenGL base format.
+    GLenum                  Format;            /// The OpenGL internal format.
+    GLenum                  DataType;          /// The OpenGL element data type.
+};
+
+/// @summary Describes a transfer of pixel data from the device (GPU) to the host (CPU), using glReadPixels, glGetTexImage or glGetCompressedTexImage.
+/// The Target[X/Y/Z] fields can be specified to have the call calculate the offset from the TransferBuffer pointer, or can be set to 0 if the TransferBuffer is pointing to the start of the target data. 
+/// Note that for texture images, the entire mip level is transferred, and so the TransferX, TransferY, TransferWidth and TransferHeight fields are ignored. 
+/// The fields Target[Width/Height] describe dimensions of the target image, which may be different than the dimensions of the region being transferred. 
+/// The Format and DataType fields describe the target image.
+struct gl_pixel_transfer_d2h_t
+{
+    GLenum                  Target;            /// The image source, ex. GL_READ_FRAMEBUFFER or GL_TEXTURE_2D.
+    GLenum                  Layout;            /// The desired pixel data layout, ex. GL_BGRA.
+    GLenum                  Format;            /// The internal format of the target, ex. GL_RGBA8.
+    GLenum                  DataType;          /// The desired pixel data type, ex. GL_UNSIGNED_INT_8_8_8_8_REV.
+    GLuint                  PackBuffer;        /// The PBO to use as the pack target, or 0.
+    size_t                  SourceIndex;       /// The source mip level or array index, 0 for framebuffer.
+    size_t                  TargetX;           /// The upper-left-front corner on the target image.
+    size_t                  TargetY;           /// The upper-left-front corner on the target image.
+    size_t                  TargetZ;           /// The upper-left-front corner on the target image.
+    size_t                  TargetWidth;       /// The width of the full target image, in pixels.
+    size_t                  TargetHeight;      /// The height of the full target image, in pixels.
+    size_t                  TransferX;         /// The upper-left corner of the region to transfer.
+    size_t                  TransferY;         /// The upper-left corner of the region to transfer.
+    size_t                  TransferWidth;     /// The width of the region to transfer, in pixels.
+    size_t                  TransferHeight;    /// The height of the region to transfer, in pixels.
+    void                   *TransferBuffer;    /// Pointer to target image data, or PBO byte offset.
+};
+
+/// @summary Describes a transfer of pixel data from the host (CPU) to the device (GPU), using glTexSubImage or glCompressedTexSubImage. 
+/// The fields Target[X/Y/Z] indicate where to place the data on the target texture. The Source[X/Y/Z] fields can be specified to have the call calculate the offset from the TransferBuffer pointer, or can be set to 0 if TransferBuffer is pointing to the start of the source data. 
+/// The Source[Width/Height] describe the dimensions of the entire source image, which may be different than the dimensions of the region being transferred. 
+/// The source of the transfer may be either a Pixel Buffer Object, in which case the UnpackBuffer should be set to the handle of the PBO, and TransferBuffer is an offset, or an application memory buffer, in which case UnpackBuffer should be set to 0 and TransferBuffer should point to the source image data. 
+/// A host to device transfer can be used to upload a source image, or a portion thereof, to a texture object on the GPU. 
+/// The Format and DataType fields describe the source image, and not the texture object.
+struct gl_pixel_transfer_h2d_t
+{
+    GLenum                  Target;            /// The image target, ex. GL_TEXTURE_2D.
+    GLenum                  Format;            /// The internal format of your pixel data, ex. GL_RGBA8.
+    GLenum                  DataType;          /// The data type of your pixel data, ex. GL_UNSIGNED_INT_8_8_8_8_REV.
+    GLuint                  UnpackBuffer;      /// The PBO to use as the unpack source, or 0.
+    size_t                  TargetIndex;       /// The target mip level or array index.
+    size_t                  TargetX;           /// The upper-left-front corner on the target texture.
+    size_t                  TargetY;           /// The upper-left-front corner on the target texture.
+    size_t                  TargetZ;           /// The upper-left-front corner on the target texture.
+    size_t                  SourceX;           /// The upper-left-front corner on the source image.
+    size_t                  SourceY;           /// The upper-left-front corner on the source image.
+    size_t                  SourceZ;           /// The upper-left-front corner on the source image.
+    size_t                  SourceWidth;       /// The width of the full source image, in pixels.
+    size_t                  SourceHeight;      /// The height of the full source image, in pixels.
+    size_t                  TransferWidth;     /// The width of the region to transfer, in pixels.
+    size_t                  TransferHeight;    /// The height of the region to transfer, in pixels.
+    size_t                  TransferSlices;    /// The number of slices to transfer.
+    size_t                  TransferSize;      /// The total number of bytes to transfer.
+    void                   *TransferBuffer;    /// Pointer to source image data, or PBO byte offset.
+};
+
+/// @summary Describes a buffer used to stream data from the host (CPU) to the device (GPU) using a GPU-asynchronous buffer transfer. 
+/// The buffer usage is always GL_STREAM_DRAW, and the target is always GL_PIXEL_UNPACK_BUFFER.
+/// The buffer is allocated in memory accessible to both the CPU and the driver.
+/// Buffer regions are reserved, data copied into the buffer by the CPU, and then the reservation is committed. 
+/// The transfer is then performed using the gl_pixel_transfer_h2d function. 
+/// A single pixel streaming buffer can be used to target multiple texture objects.
+struct gl_pixel_stream_h2d_t
+{
+    GLuint                  Pbo;               /// The pixel buffer object used for streaming.
+    size_t                  Alignment;         /// The alignment for any buffer reservations.
+    size_t                  BufferSize;        /// The size of the transfer buffer, in bytes.
+    size_t                  ReserveOffset;     /// The byte offset of the active reservation.
+    size_t                  ReserveSize;       /// The size of the active reservation, in bytes.
 };
 
 /// @summary Represents a unique identifier for a locked image.
@@ -342,6 +493,1811 @@ internal_function void retire_frame(gl3_renderer_t *gl)
     // TODO(rlk): cleanup display state
     pr_command_queue_return(&gl->CommandQueue, frame->CommandList);
     frame->ImageCount = 0;
+}
+
+/// @summary Given an OpenGL data type value, calculates the corresponding size.
+/// @param data_type The OpenGL data type value, for example, GL_UNSIGNED_BYTE.
+/// @return The size of a single element of the specified type, in bytes.
+internal_function size_t gl_data_size(GLenum data_type)
+{
+    switch (data_type)
+    {
+    case GL_UNSIGNED_BYTE:               return sizeof(GLubyte);
+    case GL_FLOAT:                       return sizeof(GLfloat);
+    case GL_FLOAT_VEC2:                  return sizeof(GLfloat) *  2;
+    case GL_FLOAT_VEC3:                  return sizeof(GLfloat) *  3;
+    case GL_FLOAT_VEC4:                  return sizeof(GLfloat) *  4;
+    case GL_INT:                         return sizeof(GLint);
+    case GL_INT_VEC2:                    return sizeof(GLint)   *  2;
+    case GL_INT_VEC3:                    return sizeof(GLint)   *  3;
+    case GL_INT_VEC4:                    return sizeof(GLint)   *  4;
+    case GL_BOOL:                        return sizeof(GLint);
+    case GL_BOOL_VEC2:                   return sizeof(GLint)   *  2;
+    case GL_BOOL_VEC3:                   return sizeof(GLint)   *  3;
+    case GL_BOOL_VEC4:                   return sizeof(GLint)   *  4;
+    case GL_FLOAT_MAT2:                  return sizeof(GLfloat) *  4;
+    case GL_FLOAT_MAT3:                  return sizeof(GLfloat) *  9;
+    case GL_FLOAT_MAT4:                  return sizeof(GLfloat) * 16;
+    case GL_FLOAT_MAT2x3:                return sizeof(GLfloat) *  6;
+    case GL_FLOAT_MAT2x4:                return sizeof(GLfloat) *  8;
+    case GL_FLOAT_MAT3x2:                return sizeof(GLfloat) *  6;
+    case GL_FLOAT_MAT3x4:                return sizeof(GLfloat) * 12;
+    case GL_FLOAT_MAT4x2:                return sizeof(GLfloat) *  8;
+    case GL_FLOAT_MAT4x3:                return sizeof(GLfloat) * 12;
+    case GL_BYTE:                        return sizeof(GLbyte);
+    case GL_UNSIGNED_SHORT:              return sizeof(GLushort);
+    case GL_SHORT:                       return sizeof(GLshort);
+    case GL_UNSIGNED_INT:                return sizeof(GLuint);
+    case GL_UNSIGNED_SHORT_5_6_5:        return sizeof(GLushort);
+    case GL_UNSIGNED_SHORT_5_6_5_REV:    return sizeof(GLushort);
+    case GL_UNSIGNED_SHORT_4_4_4_4:      return sizeof(GLushort);
+    case GL_UNSIGNED_SHORT_4_4_4_4_REV:  return sizeof(GLushort);
+    case GL_UNSIGNED_SHORT_5_5_5_1:      return sizeof(GLushort);
+    case GL_UNSIGNED_SHORT_1_5_5_5_REV:  return sizeof(GLushort);
+    case GL_UNSIGNED_INT_8_8_8_8:        return sizeof(GLubyte);
+    case GL_UNSIGNED_INT_8_8_8_8_REV:    return sizeof(GLubyte);
+    case GL_UNSIGNED_INT_10_10_10_2:     return sizeof(GLuint);
+    case GL_UNSIGNED_INT_2_10_10_10_REV: return sizeof(GLuint);
+    case GL_UNSIGNED_BYTE_3_3_2:         return sizeof(GLubyte);
+    case GL_UNSIGNED_BYTE_2_3_3_REV:     return sizeof(GLubyte);
+    default:                             break;
+    }
+    return 0;
+}
+
+/// @summary Given an OpenGL block-compressed internal format identifier, determine the size of each compressed block, in pixels. For non block-compressed formats, the block size is defined to be 1.
+/// @param internal_format The OpenGL internal format value.
+/// @return The dimension of a block, in pixels.
+internal_function size_t gl_block_dimension(GLenum internal_format)
+{
+    switch (internal_format)
+    {
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:        return 4;
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:       return 4;
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:       return 4;
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:       return 4;
+        case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:       return 4;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT: return 4;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT: return 4;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT: return 4;
+        default:
+            break;
+    }
+    return 1;
+}
+
+/// @summary Given an OpenGL block-compressed internal format identifier, determine the size of each compressed block of pixels.
+/// @param internal_format The OpenGL internal format value. RGB/RGBA/SRGB and SRGBA S3TC/DXT format identifiers are the only values currently accepted.
+/// @return The number of bytes per compressed block of pixels, or zero.
+internal_function size_t gl_bytes_per_block(GLenum internal_format)
+{
+    switch (internal_format)
+    {
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:        return 8;
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:       return 8;
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:       return 16;
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:       return 16;
+        case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:       return 8;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT: return 8;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT: return 16;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT: return 16;
+        default:
+            break;
+    }
+    return 0;
+}
+
+/// @summary Given an OpenGL internal format value, calculates the number of
+/// bytes per-element (or per-block, for block-compressed formats).
+/// @param internal_format The OpenGL internal format, for example, GL_RGBA.
+/// @param data_type The OpenGL data type, for example, GL_UNSIGNED_BYTE.
+/// @return The number of bytes per element (pixel or block), or zero.
+internal_function size_t gl_bytes_per_element(GLenum internal_format, GLenum data_type)
+{
+    switch (internal_format)
+    {
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_STENCIL:
+        case GL_RED:
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_R16F:
+        case GL_R32F:
+        case GL_R8I:
+        case GL_R8UI:
+        case GL_R16I:
+        case GL_R16UI:
+        case GL_R32I:
+        case GL_R32UI:
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB10:
+        case GL_RGB12:
+        case GL_RGBA2:
+        case GL_RGBA4:
+        case GL_RGB9_E5:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB5_A1:
+        case GL_RGB10_A2:
+        case GL_RGB10_A2UI:
+            return (gl_data_size(data_type) * 1);
+
+        case GL_RG:
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RG16F:
+        case GL_RG32F:
+        case GL_RG8I:
+        case GL_RG8UI:
+        case GL_RG16I:
+        case GL_RG16UI:
+        case GL_RG32I:
+        case GL_RG32UI:
+            return (gl_data_size(data_type) * 2);
+
+        case GL_RGB:
+        case GL_RGB8:
+        case GL_RGB8_SNORM:
+        case GL_RGB16_SNORM:
+        case GL_SRGB8:
+        case GL_RGB16F:
+        case GL_RGB32F:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        case GL_RGB16I:
+        case GL_RGB16UI:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+            return (gl_data_size(data_type) * 3);
+
+        case GL_RGBA:
+        case GL_RGBA8:
+        case GL_RGBA8_SNORM:
+        case GL_SRGB8_ALPHA8:
+        case GL_RGBA16F:
+        case GL_RGBA32F:
+        case GL_RGBA8I:
+        case GL_RGBA8UI:
+        case GL_RGBA16I:
+        case GL_RGBA16UI:
+        case GL_RGBA32I:
+        case GL_RGBA32UI:
+            return (gl_data_size(data_type) * 4);
+
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+        case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
+            return gl_bytes_per_block(internal_format);
+
+        default:
+            break;
+    }
+    return 0;
+}
+
+/// @summary Given an OpenGL internal_format value and a width, calculates the number of bytes between rows in a 2D image slice.
+/// @param internal_format The OpenGL internal format, for example, GL_RGBA.
+/// @param data_type The OpenGL data type, for example, GL_UNSIGNED_BYTE.
+/// @param width The row width, in pixels.
+/// @param alignment The alignment requirement of the OpenGL implementation, corresponding to the pname of GL_PACK_ALIGNMENT or GL_UNPACK_ALIGNMENT for the glPixelStorei function. The specification default is 4.
+/// @return The number of bytes per-row, or zero.
+internal_function size_t gl_bytes_per_row(GLenum internal_format, GLenum data_type, size_t width, size_t alignment)
+{
+    if (width == 0)  width = 1;
+    switch (internal_format)
+    {
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_STENCIL:
+        case GL_RED:
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_R16F:
+        case GL_R32F:
+        case GL_R8I:
+        case GL_R8UI:
+        case GL_R16I:
+        case GL_R16UI:
+        case GL_R32I:
+        case GL_R32UI:
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB10:
+        case GL_RGB12:
+        case GL_RGBA2:
+        case GL_RGBA4:
+        case GL_RGB9_E5:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB5_A1:
+        case GL_RGB10_A2:
+        case GL_RGB10_A2UI:
+            return align_up(width * gl_data_size(data_type), alignment);
+
+        case GL_RG:
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RG16F:
+        case GL_RG32F:
+        case GL_RG8I:
+        case GL_RG8UI:
+        case GL_RG16I:
+        case GL_RG16UI:
+        case GL_RG32I:
+        case GL_RG32UI:
+            return align_up(width * gl_data_size(data_type) * 2, alignment);
+
+        case GL_RGB:
+        case GL_RGB8:
+        case GL_RGB8_SNORM:
+        case GL_RGB16_SNORM:
+        case GL_SRGB8:
+        case GL_RGB16F:
+        case GL_RGB32F:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        case GL_RGB16I:
+        case GL_RGB16UI:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+            return align_up(width * gl_data_size(data_type) * 3, alignment);
+
+        case GL_RGBA:
+        case GL_RGBA8:
+        case GL_RGBA8_SNORM:
+        case GL_SRGB8_ALPHA8:
+        case GL_RGBA16F:
+        case GL_RGBA32F:
+        case GL_RGBA8I:
+        case GL_RGBA8UI:
+        case GL_RGBA16I:
+        case GL_RGBA16UI:
+        case GL_RGBA32I:
+        case GL_RGBA32UI:
+            return align_up(width * gl_data_size(data_type) * 4, alignment);
+
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+        case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
+            return align_up(((width + 3) >> 2) * gl_bytes_per_block(internal_format), alignment);
+
+        default:
+            break;
+    }
+    return 0;
+}
+
+/// @summary Calculates the size of the buffer required to store an image with the specified attributes.
+/// @param internal_format The OpenGL internal format value, for example, GL_RGBA. The most common compressed formats are supported (DXT/S3TC).
+/// @param data_type The data type identifier, for example, GL_UNSIGNED_BYTE.
+/// @param width The width of the image, in pixels.
+/// @param height The height of the image, in pixels.
+/// @param alignment The alignment requirement of the OpenGL implementation, corresponding to the pname of GL_PACK_ALIGNMENT or GL_UNPACK_ALIGNMENT for the glPixelStorei function. The specification default is 4.
+/// @return The number of bytes required to store the image data.
+internal_function size_t gl_bytes_per_slice(GLenum internal_format, GLenum data_type, size_t width, size_t height, size_t alignment)
+{
+    if (width  == 0) width  = 1;
+    if (height == 0) height = 1;
+    switch (internal_format)
+    {
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_STENCIL:
+        case GL_RED:
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_R16F:
+        case GL_R32F:
+        case GL_R8I:
+        case GL_R8UI:
+        case GL_R16I:
+        case GL_R16UI:
+        case GL_R32I:
+        case GL_R32UI:
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB10:
+        case GL_RGB12:
+        case GL_RGBA2:
+        case GL_RGBA4:
+        case GL_RGB9_E5:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB5_A1:
+        case GL_RGB10_A2:
+        case GL_RGB10_A2UI:
+            return align_up(width * gl_data_size(data_type), alignment) * height;
+
+        case GL_RG:
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RG16F:
+        case GL_RG32F:
+        case GL_RG8I:
+        case GL_RG8UI:
+        case GL_RG16I:
+        case GL_RG16UI:
+        case GL_RG32I:
+        case GL_RG32UI:
+            return align_up(width * gl_data_size(data_type) * 2, alignment) * height;
+
+        case GL_RGB:
+        case GL_RGB8:
+        case GL_RGB8_SNORM:
+        case GL_RGB16_SNORM:
+        case GL_SRGB8:
+        case GL_RGB16F:
+        case GL_RGB32F:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        case GL_RGB16I:
+        case GL_RGB16UI:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+            return align_up(width * gl_data_size(data_type) * 3, alignment) * height;
+
+        case GL_RGBA:
+        case GL_RGBA8:
+        case GL_RGBA8_SNORM:
+        case GL_SRGB8_ALPHA8:
+        case GL_RGBA16F:
+        case GL_RGBA32F:
+        case GL_RGBA8I:
+        case GL_RGBA8UI:
+        case GL_RGBA16I:
+        case GL_RGBA16UI:
+        case GL_RGBA32I:
+        case GL_RGBA32UI:
+            return align_up(width * gl_data_size(data_type) * 4, alignment) * height;
+
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+        case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
+            // these formats operate on 4x4 blocks of pixels, so if a dimension
+            // is not evenly divisible by four, it needs to be rounded up.
+            return align_up(((width + 3) >> 2) * gl_bytes_per_block(internal_format), alignment) * ((height + 3) >> 2);
+
+        default:
+            break;
+    }
+    return 0;
+}
+
+/// @summary Calculates the dimension of an image (width, height, etc.) rounded up to the next alignment boundary based on the internal format.
+/// @summary internal_format The OpenGL internal format value, for example, GL_RGBA. The most common compressed formats are supported (DXT/S3TC).
+/// @param dimension The dimension value (width, height, etc.), in pixels.
+/// @return The dimension value padded up to the next alignment boundary. The returned value is always specified in pixels.
+internal_function size_t gl_image_dimension(GLenum internal_format, size_t dimension)
+{
+    switch (internal_format)
+    {
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+        case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
+            // these formats operate on 4x4 blocks of pixels, so if a dimension
+            // is not evenly divisible by four, it needs to be rounded up.
+            return (((dimension + 3) >> 2) * gl_block_dimension(internal_format));
+
+        default:
+            break;
+    }
+    return dimension;
+}
+
+/// @summary Given an OpenGL internal format type value, determines the corresponding pixel layout.
+/// @param internal_format The OpenGL internal format value. See the documentation for glTexImage2D(), internalFormat argument.
+/// @return The OpenGL base internal format values. See the documentation for glTexImage2D(), format argument.
+internal_function GLenum gl_pixel_layout(GLenum internal_format)
+{
+    switch (internal_format)
+    {
+        case GL_DEPTH_COMPONENT:                     return GL_DEPTH_COMPONENT;
+        case GL_DEPTH_STENCIL:                       return GL_DEPTH_STENCIL;
+        case GL_RED:                                 return GL_RED;
+        case GL_RG:                                  return GL_RG;
+        case GL_RGB:                                 return GL_RGB;
+        case GL_RGBA:                                return GL_BGRA;
+        case GL_R8:                                  return GL_RED;
+        case GL_R8_SNORM:                            return GL_RED;
+        case GL_R16:                                 return GL_RED;
+        case GL_R16_SNORM:                           return GL_RED;
+        case GL_RG8:                                 return GL_RG;
+        case GL_RG8_SNORM:                           return GL_RG;
+        case GL_RG16:                                return GL_RG;
+        case GL_RG16_SNORM:                          return GL_RG;
+        case GL_R3_G3_B2:                            return GL_RGB;
+        case GL_RGB4:                                return GL_RGB;
+        case GL_RGB5:                                return GL_RGB;
+        case GL_RGB8:                                return GL_RGB;
+        case GL_RGB8_SNORM:                          return GL_RGB;
+        case GL_RGB10:                               return GL_RGB;
+        case GL_RGB12:                               return GL_RGB;
+        case GL_RGB16_SNORM:                         return GL_RGB;
+        case GL_RGBA2:                               return GL_RGB;
+        case GL_RGBA4:                               return GL_RGB;
+        case GL_RGB5_A1:                             return GL_RGBA;
+        case GL_RGBA8:                               return GL_BGRA;
+        case GL_RGBA8_SNORM:                         return GL_BGRA;
+        case GL_RGB10_A2:                            return GL_RGBA;
+        case GL_RGB10_A2UI:                          return GL_RGBA;
+        case GL_RGBA12:                              return GL_RGBA;
+        case GL_RGBA16:                              return GL_BGRA;
+        case GL_SRGB8:                               return GL_RGB;
+        case GL_SRGB8_ALPHA8:                        return GL_BGRA;
+        case GL_R16F:                                return GL_RED;
+        case GL_RG16F:                               return GL_RG;
+        case GL_RGB16F:                              return GL_RGB;
+        case GL_RGBA16F:                             return GL_BGRA;
+        case GL_R32F:                                return GL_RED;
+        case GL_RG32F:                               return GL_RG;
+        case GL_RGB32F:                              return GL_RGB;
+        case GL_RGBA32F:                             return GL_BGRA;
+        case GL_R11F_G11F_B10F:                      return GL_RGB;
+        case GL_RGB9_E5:                             return GL_RGB;
+        case GL_R8I:                                 return GL_RED;
+        case GL_R8UI:                                return GL_RED;
+        case GL_R16I:                                return GL_RED;
+        case GL_R16UI:                               return GL_RED;
+        case GL_R32I:                                return GL_RED;
+        case GL_R32UI:                               return GL_RED;
+        case GL_RG8I:                                return GL_RG;
+        case GL_RG8UI:                               return GL_RG;
+        case GL_RG16I:                               return GL_RG;
+        case GL_RG16UI:                              return GL_RG;
+        case GL_RG32I:                               return GL_RG;
+        case GL_RG32UI:                              return GL_RG;
+        case GL_RGB8I:                               return GL_RGB;
+        case GL_RGB8UI:                              return GL_RGB;
+        case GL_RGB16I:                              return GL_RGB;
+        case GL_RGB16UI:                             return GL_RGB;
+        case GL_RGB32I:                              return GL_RGB;
+        case GL_RGB32UI:                             return GL_RGB;
+        case GL_RGBA8I:                              return GL_BGRA;
+        case GL_RGBA8UI:                             return GL_BGRA;
+        case GL_RGBA16I:                             return GL_BGRA;
+        case GL_RGBA16UI:                            return GL_BGRA;
+        case GL_RGBA32I:                             return GL_BGRA;
+        case GL_RGBA32UI:                            return GL_BGRA;
+        case GL_COMPRESSED_RED:                      return GL_RED;
+        case GL_COMPRESSED_RG:                       return GL_RG;
+        case GL_COMPRESSED_RGB:                      return GL_RGB;
+        case GL_COMPRESSED_RGBA:                     return GL_RGBA;
+        case GL_COMPRESSED_SRGB:                     return GL_RGB;
+        case GL_COMPRESSED_SRGB_ALPHA:               return GL_RGBA;
+        case GL_COMPRESSED_RED_RGTC1:                return GL_RED;
+        case GL_COMPRESSED_SIGNED_RED_RGTC1:         return GL_RED;
+        case GL_COMPRESSED_RG_RGTC2:                 return GL_RG;
+        case GL_COMPRESSED_SIGNED_RG_RGTC2:          return GL_RG;
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:        return GL_RGB;
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:       return GL_RGBA;
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:       return GL_RGBA;
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:       return GL_RGBA;
+        case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:       return GL_RGB;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT: return GL_RGBA;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT: return GL_RGBA;
+        case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT: return GL_RGBA;
+        default:
+            break;
+    }
+    return GL_NONE;
+}
+
+/// @summary Given an OpenGL sampler type value, determines the corresponding texture bind target identifier.
+/// @param sampler_type The OpenGL sampler type, for example, GL_SAMPLER_2D.
+/// @return The corresponding bind target, for example, GL_TEXTURE_2D.
+internal_function GLenum gl_texture_target(GLenum sampler_type)
+{
+    switch (sampler_type)
+    {
+        case GL_SAMPLER_1D:
+        case GL_INT_SAMPLER_1D:
+        case GL_UNSIGNED_INT_SAMPLER_1D:
+        case GL_SAMPLER_1D_SHADOW:
+            return GL_TEXTURE_1D;
+
+        case GL_SAMPLER_2D:
+        case GL_INT_SAMPLER_2D:
+        case GL_UNSIGNED_INT_SAMPLER_2D:
+        case GL_SAMPLER_2D_SHADOW:
+            return GL_TEXTURE_2D;
+
+        case GL_SAMPLER_3D:
+        case GL_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_3D:
+            return GL_TEXTURE_3D;
+
+        case GL_SAMPLER_CUBE:
+        case GL_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE:
+        case GL_SAMPLER_CUBE_SHADOW:
+            return GL_TEXTURE_CUBE_MAP;
+
+        case GL_SAMPLER_1D_ARRAY:
+        case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+            return GL_TEXTURE_1D_ARRAY;
+
+        case GL_SAMPLER_2D_ARRAY:
+        case GL_SAMPLER_2D_ARRAY_SHADOW:
+        case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+            return GL_TEXTURE_2D_ARRAY;
+
+        case GL_SAMPLER_BUFFER:
+        case GL_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+            return GL_TEXTURE_BUFFER;
+
+        case GL_SAMPLER_2D_RECT:
+        case GL_SAMPLER_2D_RECT_SHADOW:
+        case GL_INT_SAMPLER_2D_RECT:
+        case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+            return GL_TEXTURE_RECTANGLE;
+
+        case GL_SAMPLER_2D_MULTISAMPLE:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+            return GL_TEXTURE_2D_MULTISAMPLE;
+
+        case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            return GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+
+        default:
+            break;
+    }
+    return GL_TEXTURE_1D;
+}
+
+/// @summary Computes the number of levels in a mipmap chain given the dimensions of the highest resolution level.
+/// @param width The width of the highest resolution level, in pixels.
+/// @param height The height of the highest resolution level, in pixels.
+/// @param slice_count The number of slices of the highest resolution level. For everything except a 3D image, this value should be specified as 1.
+/// @param max_levels The maximum number of levels in the mipmap chain. If there is no limit, this value should be specified as 0.
+internal_function size_t gl_level_count(size_t width, size_t height, size_t slice_count, size_t max_levels)
+{
+    size_t levels = 0;
+    size_t major  = 0;
+
+    // select the largest of (width, height, slice_count):
+    major = (width > height)      ? width : height;
+    major = (major > slice_count) ? major : slice_count;
+    // calculate the number of levels down to 1 in the largest dimension.
+    while (major > 0)
+    {
+        major >>= 1;
+        levels += 1;
+    }
+    if (max_levels == 0) return levels;
+    else return (max_levels < levels) ? max_levels : levels;
+}
+
+/// @summary Computes the dimension (width, height or number of slices) of a particular level in a mipmap chain given the dimension for the highest resolution image.
+/// @param dimension The dimension in the highest resolution image.
+/// @param level_index The index of the target mip-level, with index 0 representing the highest resolution image.
+/// @return The dimension in the specified mip level.
+internal_function size_t gl_level_dimension(size_t dimension, size_t level_index)
+{
+    size_t  l_dimension  = dimension >> level_index;
+    return (l_dimension == 0) ? 1 : l_dimension;
+}
+
+/// @summary Given basic image attributes, builds a complete description of the levels in a mipmap chain.
+/// @param internal_format The OpenGL internal format, for example GL_RGBA. See the documentation for glTexImage2D(), internalFormat argument.
+/// @param data_type The OpenGL data type, for example, GL_UNSIGNED_BYTE.
+/// @param width The width of the highest resolution image, in pixels.
+/// @param height The height of the highest resolution image, in pixels.
+/// @param slice_count The number of slices in the highest resolution image. For all image types other than 3D images, specify 1 for this value.
+/// @param alignment The alignment requirement of the OpenGL implementation, corresponding to the pname of GL_PACK_ALIGNMENT or GL_UNPACK_ALIGNMENT for the glPixelStorei function. The specification default is 4.
+/// @param max_levels The maximum number of levels in the mipmap chain. To describe all possible levels, specify 0 for this value.
+/// @param level_desc The array of level descriptors to populate.
+internal_function void gl_describe_mipmaps(GLenum internal_format, GLenum data_type, size_t width, size_t height, size_t slice_count, size_t alignment, size_t max_levels, gl_level_desc_t *level_desc)
+{
+    size_t slices      = slice_count;
+    GLenum type        = data_type;
+    GLenum format      = internal_format;
+    GLenum layout      = gl_pixel_layout(format);
+    size_t bytes_per_e = gl_bytes_per_element(format, type);
+    size_t num_levels  = gl_level_count(width, height, slices, max_levels);
+    for (size_t i = 0; i < num_levels; ++i)
+    {
+        size_t lw = gl_level_dimension(width,  i);
+        size_t lh = gl_level_dimension(height, i);
+        size_t ls = gl_level_dimension(slices, i);
+        level_desc[i].Index           = i;
+        level_desc[i].Width           = gl_image_dimension(format, lw);
+        level_desc[i].Height          = gl_image_dimension(format, lh);
+        level_desc[i].Slices          = ls;
+        level_desc[i].BytesPerElement = bytes_per_e;
+        level_desc[i].BytesPerRow     = gl_bytes_per_row(format, type, level_desc[i].Width, alignment);
+        level_desc[i].BytesPerSlice   = level_desc[i].BytesPerRow * level_desc[i].Height;
+        level_desc[i].Layout          = layout;
+        level_desc[i].Format          = internal_format;
+        level_desc[i].DataType        = data_type;
+    }
+}
+
+/// @summary Fills a memory buffer with a checkerboard pattern. This is useful for indicating uninitialized textures and for testing. The image internal format is expected to be GL_RGBA, data type GL_UNSIGNED_INT_8_8_8_8_REV, and the data is written using the native system byte ordering (GL_BGRA).
+/// @param width The image width, in pixels.
+/// @param height The image height, in pixels.
+/// @param alpha The value to write to the alpha channel, in [0, 1].
+/// @param buffer The buffer to which image data will be written.
+internal_function void gl_checker_image(size_t width, size_t height, float alpha, void *buffer)
+{
+    uint8_t  a = (uint8_t)((alpha - 0.5f) * 255.0f);
+    uint8_t *p = (uint8_t*) buffer;
+    for (size_t i = 0;  i < height; ++i)
+    {
+        for (size_t j = 0; j < width; ++j)
+        {
+            uint8_t v = ((((i & 0x8) == 0)) ^ ((j & 0x8) == 0)) ? 1 : 0;
+            *p++  = v * 0xFF;
+            *p++  = v ? 0x00 : 0xFF;
+            *p++  = v * 0xFF;
+            *p++  = a;
+        }
+    }
+}
+
+/// @summary Given basic texture attributes, allocates storage for all levels of a texture, such that the texture is said to be complete. This should only be performed once per-texture. After calling this function, the texture object attributes should be considered immutable. Transfer data to the texture using the gl_transfer_pixels_h2d() function. The wrapping modes are always set to GL_CLAMP_TO_EDGE. The caller is responsible for creating and binding the texture object prior to calling this function.
+/// @param display The display managing the rendering context.
+/// @param target The OpenGL texture target, defining the texture type.
+/// @param internal_format The OpenGL internal format, for example GL_RGBA8.
+/// @param data_type The OpenGL data type, for example, GL_UNSIGNED_INT_8_8_8_8_REV.
+/// @param min_filter The minification filter to use.
+/// @param mag_filter The magnification filter to use.
+/// @param width The width of the highest resolution image, in pixels.
+/// @param height The height of the highest resolution image, in pixels.
+/// @param slice_count The number of slices in the highest resolution image. If the @a target argument specifies an array target, this represents the number of items in the texture array. For 3D textures, it represents the number of slices in the image. For all other types, this value must be 1.
+/// @param max_levels The maximum number of levels in the mipmap chain. To define all possible levels, specify 0 for this value.
+internal_function void gl_texture_storage(gl_display_t *display, GLenum target, GLenum internal_format, GLenum data_type, GLenum min_filter, GLenum mag_filter, size_t width, size_t height, size_t slice_count, size_t max_levels)
+{
+    GLenum layout = gl_pixel_layout(internal_format);
+
+    if (max_levels == 0)
+    {
+        // specify mipmaps all the way down to 1x1x1.
+        max_levels  = gl_level_count(width, height, slice_count, max_levels);
+    }
+
+    // make sure that no PBO is bound as the unpack target.
+    // we don't want to copy data to the texture now.
+    glBindBuffer (GL_PIXEL_UNPACK_BUFFER, 0);
+
+    // specify the maximum number of mipmap levels.
+    if (target != GL_TEXTURE_RECTANGLE)
+    {
+        glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(target, GL_TEXTURE_MAX_LEVEL,  GLint(max_levels - 1));
+    }
+    else
+    {
+        // rectangle textures don't support mipmaps.
+        glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(target, GL_TEXTURE_MAX_LEVEL,  0);
+    }
+
+    // specify the filtering and wrapping modes.
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, min_filter);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, mag_filter);
+    glTexParameteri(target, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_WRAP_R,     GL_CLAMP_TO_EDGE);
+
+    // use glTexImage to allocate storage for each mip-level of the texture.
+    switch (target)
+    {
+            case GL_TEXTURE_1D:
+                {
+                    for (size_t lod = 0; lod < max_levels; ++lod)
+                    {
+                        size_t lw = gl_level_dimension(width, lod);
+                        glTexImage1D(target, GLint(lod), internal_format, GLsizei(lw), 0, layout, data_type, NULL);
+                    }
+                }
+                break;
+
+            case GL_TEXTURE_1D_ARRAY:
+                {
+                    // 1D array textures specify slice_count for height.
+                    for (size_t lod = 0; lod < max_levels; ++lod)
+                    {
+                        size_t lw = gl_level_dimension(width, lod);
+                        glTexImage2D(target, GLint(lod), internal_format, GLsizei(lw), GLsizei(slice_count), 0, layout, data_type, NULL);
+                    }
+                }
+                break;
+
+            case GL_TEXTURE_RECTANGLE:
+                {
+                    // rectangle textures don't support mipmaps.
+                    glTexImage2D(target, 0, internal_format, GLsizei(width), GLsizei(height), 0, layout, data_type, NULL);
+                }
+                break;
+
+            case GL_TEXTURE_2D:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+                {
+                    for (size_t lod = 0; lod < max_levels; ++lod)
+                    {
+                        size_t lw = gl_level_dimension(width,  lod);
+                        size_t lh = gl_level_dimension(height, lod);
+                        glTexImage2D(target, GLint(lod), internal_format, GLsizei(lw), GLsizei(lh), 0, layout, data_type, NULL);
+                    }
+                }
+                break;
+
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                {
+                    // 2D array texture specify slice_count as the number of
+                    // items; the number of items is not decreased with LOD.
+                    for (size_t lod = 0; lod < max_levels; ++lod)
+                    {
+                        size_t lw = gl_level_dimension(width,  lod);
+                        size_t lh = gl_level_dimension(height, lod);
+                        glTexImage3D(target, GLint(lod), internal_format, GLsizei(lw), GLsizei(lh), GLsizei(slice_count), 0, layout, data_type, NULL);
+                    }
+                }
+                break;
+
+            case GL_TEXTURE_3D:
+                {
+                    for (size_t lod = 0; lod < max_levels; ++lod)
+                    {
+                        size_t lw = gl_level_dimension(width,       lod);
+                        size_t lh = gl_level_dimension(height,      lod);
+                        size_t ls = gl_level_dimension(slice_count, lod);
+                        glTexImage3D(target, GLint(lod), internal_format, GLsizei(lw), GLsizei(lh), GLsizei(ls), 0, layout, data_type, NULL);
+                    }
+                }
+                break;
+    }
+}
+
+/// @summary Copies pixel data from the device (GPU) to the host (CPU). The pixel data consists of the framebuffer contents, or the contents of a single mip-level of a texture image.
+/// @param display The display managing the rendering context.
+/// @param transfer An object describing the transfer operation to execute.
+internal_function void gl_transfer_pixels_d2h(gl_display_t *display, gl_pixel_transfer_d2h_t *transfer)
+{
+    if (transfer->PackBuffer != 0)
+    {
+        // select the PBO as the target of the pack operation.
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, transfer->PackBuffer);
+    }
+    else
+    {
+        // select the client memory as the target of the pack operation.
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    }
+    if (transfer->TargetWidth != transfer->TransferWidth)
+    {
+        // transferring into a sub-rectangle of the image; tell GL how
+        // many pixels are in a single row of the target image.
+        glPixelStorei(GL_PACK_ROW_LENGTH,   GLint(transfer->TargetWidth));
+        glPixelStorei(GL_PACK_IMAGE_HEIGHT, GLint(transfer->TargetHeight));
+    }
+
+    // perform the setup necessary to have GL calculate any byte offsets.
+    if (transfer->TargetX != 0) glPixelStorei(GL_PACK_SKIP_PIXELS, GLint(transfer->TargetX));
+    if (transfer->TargetY != 0) glPixelStorei(GL_PACK_SKIP_ROWS,   GLint(transfer->TargetY));
+    if (transfer->TargetZ != 0) glPixelStorei(GL_PACK_SKIP_IMAGES, GLint(transfer->TargetZ));
+
+    if (gl_bytes_per_block(transfer->Format) > 0)
+    {
+        // the texture image is compressed; use glGetCompressedTexImage.
+        switch (transfer->Target)
+        {
+            case GL_TEXTURE_1D:
+            case GL_TEXTURE_2D:
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+                {
+                    glGetCompressedTexImage(transfer->Target, GLint(transfer->SourceIndex), transfer->TransferBuffer);
+                }
+                break;
+        }
+    }
+    else
+    {
+        // the image is not compressed; read the framebuffer with
+        // glReadPixels or the texture image using glGetTexImage.
+        switch (transfer->Target)
+        {
+            case GL_READ_FRAMEBUFFER:
+                {
+                    // remember, x and y identify the lower-left corner.
+                    glReadPixels(GLint(transfer->TransferX), GLint(transfer->TransferY), GLint(transfer->TransferWidth), GLint(transfer->TransferHeight), transfer->Layout, transfer->DataType, transfer->TransferBuffer);
+                }
+                break;
+
+            case GL_TEXTURE_1D:
+            case GL_TEXTURE_2D:
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_1D_ARRAY:
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_RECTANGLE:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+                {
+                    glGetTexImage(transfer->Target, GLint(transfer->SourceIndex), transfer->Layout, transfer->DataType, transfer->TransferBuffer);
+                }
+                break;
+        }
+    }
+
+    // restore the pack state values to their defaults.
+    if (transfer->PackBuffer  != 0)
+        glBindBuffer(GL_PIXEL_PACK_BUFFER,  0);
+    if (transfer->TargetWidth != transfer->TransferWidth)
+    {
+        glPixelStorei(GL_PACK_ROW_LENGTH,   0);
+        glPixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
+    }
+    if (transfer->TargetX != 0) glPixelStorei(GL_PACK_SKIP_PIXELS,  0);
+    if (transfer->TargetY != 0) glPixelStorei(GL_PACK_SKIP_ROWS,    0);
+    if (transfer->TargetZ != 0) glPixelStorei(GL_PACK_SKIP_IMAGES,  0);
+}
+
+/// @summary Allocates a buffer for streaming pixel data from the host (CPU) to the device (GPU). The buffer exists in driver-accessable memory.
+/// @param display The display managing the rendering context.
+/// @param stream The stream to initialize.
+/// @param alignment The alignment required for mapped buffers. Specify zero to use the default alignment.
+/// @param size The desired size of the buffer, in bytes.
+/// @return true if the stream is initialized successfully.
+internal_function bool gl_create_pixel_stream_h2d(gl_display_t *display, gl_pixel_stream_h2d_t *stream, size_t alignment, size_t buffer_size)
+{
+    if (stream != NULL)
+    {
+        // ensure the alignment is a power-of-two.
+        assert((alignment & (alignment-1)) == 0);
+
+        // create the pixel buffer object.
+        GLuint pbo = 0;
+        glGenBuffers(1, &pbo);
+        if (pbo == 0)
+        {   // failed to allocate the buffer object.
+            stream->Pbo           = 0;
+            stream->Alignment     = 0;
+            stream->BufferSize    = 0;
+            stream->ReserveOffset = 0;
+            stream->ReserveSize   = 0;
+            return false;
+        }
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+
+        // determine the reservation alignment.
+        GLint   align  = GLint(alignment);
+        if (alignment == 0)
+        {   // query for the default buffer alignment.
+            glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+        }
+
+        // round the buffer size up to a multiple of the alignment.
+        // then allocate storage for the buffer within the driver.
+        GLsizei size   = (buffer_size + (align - 1)) & ~(align - 1);
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, size, NULL, GL_STREAM_DRAW);
+
+        // fill out the buffer descriptor; we're done:
+        stream->Pbo           = pbo;
+        stream->Alignment     = size_t(align);
+        stream->BufferSize    = size_t(size);
+        stream->ReserveOffset = 0;
+        stream->ReserveSize   = 0;
+        return true;
+    }
+    else return false;
+}
+
+/// @summary Deletes a host-to-device pixel stream.
+/// @param display The display managing the rendering context.
+/// @param stream The pixel stream to delete.
+internal_function void gl_delete_pixel_stream_h2d(gl_display_t *display, gl_pixel_stream_h2d_t *stream)
+{
+    if (stream != NULL)
+    {
+        if (stream->Pbo != 0)
+        {
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            glDeleteBuffers(1, &stream->Pbo);
+        }
+        stream->Pbo           = 0;
+        stream->Alignment     = 0;
+        stream->BufferSize    = 0;
+        stream->ReserveOffset = 0;
+        stream->ReserveSize   = 0;
+    }
+}
+
+/// @summary Reserves a portion of the pixel streaming buffer for use by the application. Note that only one buffer reservation may be active at any given time.
+/// @param display The display managing the rendering context.
+/// @param stream The pixel stream to allocate from.
+/// @param size The number of bytes to allocate.
+/// @return A pointer to the start of the reserved region, or NULL.
+internal_function void* gl_pixel_stream_h2d_reserve(gl_display_t *display, gl_pixel_stream_h2d_t *stream, size_t amount)
+{
+    assert(stream->ReserveSize == 0);       // no existing reservation
+    assert(amount <= stream->BufferSize);   // requested amount is less than the buffer size
+
+    GLsizei    align  = stream->Alignment;
+    GLsizei    size   = (amount + (align - 1)) & ~(align - 1);
+    GLintptr   offset = GLintptr(stream->ReserveOffset);
+    GLbitfield access = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT;
+
+    if (offset + size > stream->BufferSize)
+    {   // orphan the existing buffer and reserve a new buffer.
+        access |= GL_MAP_INVALIDATE_BUFFER_BIT;
+        offset  = 0;
+    }
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, stream->Pbo);
+    GLvoid  *b = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, offset, size, access);
+    if (b != NULL)
+    {   // store a description of the reserved range.
+        stream->ReserveOffset = offset;
+        stream->ReserveSize   = size;
+    }
+    return b;
+}
+
+/// @summary Commits the reserved region of the buffer, indicating that the application has finished accessing the buffer directly. The reserved portion of the buffer may now be used as a transfer source.
+/// @param display The display managing the rendering context.
+/// @param stream The stream to commit.
+/// @param transfer The transfer object to populate. The UnpackBuffer, TransferSize and TransferBuffer fields will be modified.
+/// @return true if the transfer was successfully committed.
+internal_function bool gl_pixel_stream_h2d_commit(gl_display_t *display, gl_pixel_stream_h2d_t *stream, gl_pixel_transfer_h2d_t *transfer)
+{
+    if (stream->ReserveSize > 0)
+    {
+        if (transfer != NULL)
+        {
+            transfer->UnpackBuffer   = stream->Pbo;
+            transfer->TransferSize   = stream->ReserveSize;
+            transfer->TransferBuffer = GL_BUFFER_OFFSET(stream->ReserveOffset);
+        }
+        glBindBuffer (GL_PIXEL_UNPACK_BUFFER, stream->Pbo);
+        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+        stream->ReserveOffset += stream->ReserveSize;
+        stream->ReserveSize    = 0;
+        return true;
+    }
+    else if (transfer != NULL)
+    {   // there is no active reservation, so invalidate the transfer structure.
+        transfer->UnpackBuffer   = 0;
+        transfer->TransferSize   = 0;
+        transfer->TransferBuffer = NULL;
+        return false;
+    }
+    else return false;
+}
+
+/// @summary Cancels the reserved region of the buffer, indicating that the application has finished accessing the buffer directly. The reserved portion of the buffer will be rolled back, anc cannot be used as a transfer source.
+/// @param display The display managing the rendering context.
+/// @param stream The stream to roll back.
+internal_function void gl_pixel_stream_h2d_cancel(gl_display_t *display, gl_pixel_stream_h2d_t *stream)
+{
+    if (stream->ReserveSize > 0)
+    {
+        glBindBuffer (GL_PIXEL_UNPACK_BUFFER, stream->Pbo);
+        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+        stream->ReserveSize = 0;
+    }
+}
+
+/// @summary Copies pixel data from the host (CPU) to the device (GPU). The pixel data is copied to a single mip-level of a texture image.
+/// @param display The display managing the rendering context.
+/// @param transfer An object describing the transfer operation to execute.
+internal_function void gl_transfer_pixels_h2d(gl_display_t *display, gl_pixel_transfer_h2d_t *transfer)
+{
+    if (transfer->UnpackBuffer != 0)
+    {
+        // select the PBO as the source of the unpack operation.
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, transfer->UnpackBuffer);
+    }
+    else
+    {
+        // select the client memory as the source of the unpack operation.
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    }
+    if (transfer->SourceWidth != transfer->TransferWidth)
+    {
+        // transferring a sub-rectangle of the image; tell GL how many
+        // pixels are in a single row of the source image.
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, GLint(transfer->SourceWidth));
+    }
+    if (transfer->TransferSlices > 1)
+    {
+        // transferring an image volume; tell GL how many rows per-slice
+        // in the source image, since we may only be transferring a sub-volume.
+        glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, GLint(transfer->SourceHeight));
+    }
+
+    // perform the setup necessary to have GL calculate any byte offsets.
+    if (transfer->SourceX != 0) glPixelStorei(GL_UNPACK_SKIP_PIXELS, GLint(transfer->SourceX));
+    if (transfer->SourceY != 0) glPixelStorei(GL_UNPACK_SKIP_ROWS,   GLint(transfer->SourceY));
+    if (transfer->SourceZ != 0) glPixelStorei(GL_UNPACK_SKIP_IMAGES, GLint(transfer->SourceZ));
+
+    if (gl_bytes_per_block(transfer->Format) > 0)
+    {
+        // the image is compressed; use glCompressedTexSubImage to transfer.
+        switch (transfer->Target)
+        {
+            case GL_TEXTURE_1D:
+                {
+                    glCompressedTexSubImage1D(transfer->Target, GLint(transfer->TargetIndex), GLint(transfer->TargetX), GLsizei(transfer->TransferWidth), transfer->Format, GLsizei(transfer->TransferSize), transfer->TransferBuffer);
+                }
+                break;
+
+            case GL_TEXTURE_2D:
+            case GL_TEXTURE_1D_ARRAY:
+            case GL_TEXTURE_RECTANGLE:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+                {
+                    glCompressedTexSubImage2D(transfer->Target, GLint(transfer->TargetIndex), GLint(transfer->TargetX), GLint(transfer->TargetY), GLsizei(transfer->TransferWidth), GLsizei(transfer->TransferHeight), transfer->Format, GLsizei(transfer->TransferSize), transfer->TransferBuffer);
+                }
+                break;
+
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                {
+                    glCompressedTexSubImage3D(transfer->Target, GLint(transfer->TargetIndex), GLint(transfer->TargetX), GLint(transfer->TargetY), GLint(transfer->TargetZ), GLsizei(transfer->TransferWidth), GLsizei(transfer->TransferHeight), GLsizei(transfer->TransferSlices), transfer->Format, GLsizei(transfer->TransferSize), transfer->TransferBuffer);
+                }
+                break;
+        }
+    }
+    else
+    {
+        // the image is not compressed, use glTexSubImage to transfer data.
+        switch (transfer->Target)
+        {
+            case GL_TEXTURE_1D:
+                {
+                    glTexSubImage1D(transfer->Target, GLint(transfer->TargetIndex), GLint(transfer->TargetX), GLsizei(transfer->TransferWidth), transfer->Format, transfer->DataType, transfer->TransferBuffer);
+                }
+                break;
+
+            case GL_TEXTURE_2D:
+            case GL_TEXTURE_1D_ARRAY:
+            case GL_TEXTURE_RECTANGLE:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+                {
+                    glTexSubImage2D(transfer->Target, GLint(transfer->TargetIndex), GLint(transfer->TargetX), GLint(transfer->TargetY), GLsizei(transfer->TransferWidth), GLsizei(transfer->TransferHeight), transfer->Format, transfer->DataType, transfer->TransferBuffer);
+                }
+                break;
+
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                {
+                    glTexSubImage3D(transfer->Target, GLint(transfer->TargetIndex), GLint(transfer->TargetX), GLint(transfer->TargetY), GLint(transfer->TargetZ), GLsizei(transfer->TransferWidth), GLsizei(transfer->TransferHeight), GLsizei(transfer->TransferSlices), transfer->Format, transfer->DataType, transfer->TransferBuffer);
+                }
+                break;
+        }
+    }
+
+    // restore the unpack state values to their defaults.
+    if (transfer->UnpackBuffer  != 0)
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER,  0);
+    if (transfer->SourceWidth   != transfer->TransferWidth)
+        glPixelStorei(GL_UNPACK_ROW_LENGTH,   0);
+    if (transfer->TransferSlices > 1)
+        glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+    if (transfer->SourceX != 0)
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS,  0);
+    if (transfer->SourceY != 0)
+        glPixelStorei(GL_UNPACK_SKIP_ROWS,    0);
+    if (transfer->SourceZ != 0)
+        glPixelStorei(GL_UNPACK_SKIP_IMAGES,  0);
+}
+
+/// @summary Given an ASCII string name, calculates a 32-bit hash value. This function is used for generating names for shader attributes, uniforms and samplers, allowing for more efficient look-up by name.
+/// @param name A NULL-terminated ASCII string identifier.
+/// @return A 32-bit unsigned integer hash of the name.
+internal_function uint32_t glsl_shader_name(char const *name)
+{
+    #define HAS_NULL_BYTE(x) (((x) - 0x01010101) & (~(x) & 0x80808080))
+    #define ROTL32(x, y)     _rotl((x), (y))
+
+    uint32_t hash = 0;
+    if (name != NULL)
+    {
+        // hash the majority of the data in 4-byte chunks.
+        while (!HAS_NULL_BYTE(*((uint32_t*)name)))
+        {
+            hash  = ROTL32(hash, 7) + name[0];
+            hash  = ROTL32(hash, 7) + name[1];
+            hash  = ROTL32(hash, 7) + name[2];
+            hash  = ROTL32(hash, 7) + name[3];
+            name += 4;
+        }
+        // hash the remaining 0-3 bytes.
+        while (*name) hash = ROTL32(hash, 7) + *name++;
+    }
+    #undef HAS_NULL_BYTE
+    #undef ROTL32
+    return hash;
+}
+
+/// @summary Determines whether an identifier would be considered a GLSL built- in value; that is, whether the identifier starts with 'gl_'.
+/// @param name A NULL-terminated ASCII string identifier.
+/// @return true if @a name starts with 'gl_'.
+internal_function bool glsl_builtin(char const *name)
+{
+    char prefix[4] = {'g','l','_','\0'};
+    return (strncmp(name, prefix, 3) == 0);
+}
+
+/// @summary Creates an OpenGL shader object and compiles shader source code.
+/// @param display The display managing the rendering context.
+/// @param shader_type The shader type, for example GL_VERTEX_SHADER.
+/// @param shader_source An array of NULL-terminated ASCII strings representing the source code of the shader program.
+/// @param string_count The number of strings in the @a shader_source array.
+/// @param out_shader On return, this address stores the OpenGL shader object.
+/// @param out_log_size On return, this address stores the number of bytes in the shader compile log. Retrieve log content with glsl_compile_log().
+/// @return true if shader compilation was successful.
+internal_function bool glsl_compile_shader(gl_display_t *display, GLenum shader_type, char **shader_source, size_t string_count, GLuint *out_shader, size_t *out_log_size)
+{
+    GLuint  shader   = 0;
+    GLsizei log_size = 0;
+    GLint   result   = GL_FALSE;
+
+    shader = glCreateShader(shader_type);
+    if (0 == shader)
+    {
+        if (out_shader)   *out_shader   = 0;
+        if (out_log_size) *out_log_size = 1;
+        return false;
+    }
+    glShaderSource (shader, GLsizei(string_count), (GLchar const**) shader_source, NULL);
+    glCompileShader(shader);
+    glGetShaderiv  (shader, GL_COMPILE_STATUS,  &result);
+    glGetShaderiv  (shader, GL_INFO_LOG_LENGTH, &log_size);
+    glGetError();
+
+    if (out_shader)   *out_shader   = shader;
+    if (out_log_size) *out_log_size = log_size + 1;
+    return (result == GL_TRUE);
+}
+
+/// @summary Retrieves the log for the most recent shader compilation.
+/// @param display The display managing the rendering context.
+/// @param shader The OpenGL shader object.
+/// @param buffer The destination buffer.
+/// @param buffer_size The maximum number of bytes to write to @a buffer.
+internal_function void glsl_copy_compile_log(gl_display_t *display, GLuint shader, char *buffer, size_t buffer_size)
+{
+    GLsizei len = 0;
+    glGetShaderInfoLog(shader, (GLsizei) buffer_size, &len, buffer);
+    buffer[len] = '\0';
+}
+
+/// @summary Creates an OpenGL program object and attaches, but does not link, associated shader fragments. Prior to linking, vertex attribute and fragment output bindings should be specified by the application using glsl_assign_vertex_attributes() and glsl_assign_fragment_outputs().
+/// @param display The display managing the rendering context.
+/// @param shader_list The list of shader object to attach.
+/// @param shader_count The number of shader objects in the shader list.
+/// @param out_program On return, this address stores the program object.
+/// @return true if the shader objects were attached successfully.
+internal_function bool glsl_attach_shaders(gl_display_t *display, GLuint *shader_list, size_t shader_count, GLuint *out_program)
+{
+    GLuint  program = 0;
+    program = glCreateProgram();
+    if (0  == program)
+    {
+        if (out_program) *out_program = 0;
+        return false;
+    }
+
+    for (size_t i = 0; i < shader_count;  ++i)
+    {
+        glAttachShader(program, shader_list[i]);
+        if (glGetError() != GL_NO_ERROR)
+        {
+            glDeleteProgram(program);
+            if (out_program) *out_program = 0;
+            return false;
+        }
+    }
+    if (out_program) *out_program = program;
+    return true;
+}
+
+/// @summary Sets the mapping of vertex attribute names to zero-based indices of the vertex attributes within the vertex format definition. See the glEnableVertexAttribArray and glVertexAttribPointer documentation. The vertex attribute bindings should be set before linking the shader program.
+/// @param display The display managing the rendering context.
+/// @param program The OpenGL program object being modified.
+/// @param attrib_names An array of NULL-terminated ASCII strings specifying the vertex attribute names.
+/// @param attrib_locations An array of zero-based integers specifying the vertex attribute location assignments, such that attrib_names[i] is bound to attrib_locations[i].
+/// @param attrib_count The number of elements in the name and location arrays.
+/// @return true if the bindings were assigned without error.
+internal_function bool glsl_assign_vertex_attributes(gl_display_t *display, GLuint program, char const **attrib_names, GLuint *attrib_locations, size_t attrib_count)
+{
+    bool result   = true;
+    for (size_t i = 0; i < attrib_count; ++i)
+    {
+        glBindAttribLocation(program, attrib_locations[i], attrib_names[i]);
+        if (glGetError() != GL_NO_ERROR)
+            result = false;
+    }
+    return result;
+}
+
+/// @summary Sets the mapping of fragment shader outputs to draw buffer indices. See the documentation for glBindFragDataLocation and glDrawBuffers for more information. The fragment shader output bindings should be set before linking the shader program.
+/// @param display The display managing the rendering context.
+/// @param program The OpenGL program object being modified.
+/// @param output_names An array of NULL-terminated ASCII strings specifying the fragment shader output names.
+/// @param output_locations An array of zero-based integers specifying the draw buffer index assignments, such that output_names[i] is bound to draw buffer output_locations[i].
+/// @param output_count The number of elements in the name and location arrays.
+/// @return true if the bindings were assigned without error.
+internal_function bool glsl_assign_fragment_outputs(gl_display_t *display, GLuint program, char const **output_names, GLuint *output_locations, size_t output_count)
+{
+    bool result   = true;
+    for (size_t i = 0; i < output_count; ++i)
+    {
+        glBindFragDataLocation(program, output_locations[i], output_names[i]);
+        if (glGetError() != GL_NO_ERROR)
+            result = false;
+    }
+    return result;
+}
+
+/// @summary Links and validates shader fragments and assigns any automatic vertex attribute, fragment shader output and uniform locations.
+/// @param display The display managing the rendering context.
+/// @param program The OpenGL program object to link.
+/// @param out_max_name On return, this address is updated with number of bytes required to store the longest name string of a vertex attribute, uniform, texture sampler or fragment shader output, including the terminating NULL.
+/// @param out_log_size On return, this address is updated with the number of bytes in the shader linker log. Retrieve log content with the function glsl_linker_log().
+/// @return true if shader linking was successful.
+internal_function bool glsl_link_program(gl_display_t *display, GLuint program, size_t *out_max_name, size_t *out_log_size)
+{
+    GLsizei log_size = 0;
+    GLint   result   = GL_FALSE;
+
+    glLinkProgram (program);
+    glGetProgramiv(program, GL_LINK_STATUS, &result);
+    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_size);
+    if (out_log_size) *out_log_size = log_size;
+
+    if (result == GL_TRUE)
+    {
+        GLint a_max = 0;
+        GLint u_max = 0;
+        GLint n_max = 0;
+        glGetProgramiv(program, GL_ACTIVE_UNIFORM_MAX_LENGTH, &u_max);
+        glGetProgramiv(program, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, &a_max);
+        n_max = u_max > a_max ? u_max : a_max;
+        if (out_max_name)  *out_max_name = (size_t)(n_max + 1);
+    }
+    else if (out_max_name) *out_max_name = 1;
+    return  (result == GL_TRUE);
+}
+
+/// @summary Retrieves the log for the most recent shader program linking.
+/// @param display The display managing the rendering context.
+/// @param program The OpenGL program object.
+/// @param buffer The destination buffer.
+/// @param buffer_size The maximum number of bytes to write to @a buffer.
+internal_function void glsl_copy_linker_log(gl_display_t *display, GLuint program, char *buffer, size_t buffer_size)
+{
+    GLsizei len = 0;
+    glGetProgramInfoLog(program, (GLsizei) buffer_size, &len, buffer);
+    buffer[len] = '\0';
+}
+
+/// @summary Allocates memory for a glsl_shader_desc_t structure using the standard C library malloc() function. The various counts can be obtained from the values returned by glsl_reflect_program_counts().
+/// @param desc The shader description to initialize.
+/// @param num_attribs The number of active attributes for the program.
+/// @param num_samplers The number of active texture samplers for the program.
+/// @param num_uniforms The number of active uniforms for the program.
+/// @return true if memory was allocated successfully.
+internal_function bool glsl_shader_desc_alloc(glsl_shader_desc_t *desc, size_t num_attribs, size_t num_samplers, size_t num_uniforms)
+{
+    glsl_attribute_desc_t  *attribs       = NULL;
+    glsl_sampler_desc_t    *samplers      = NULL;
+    glsl_uniform_desc_t    *uniforms      = NULL;
+    uint32_t               *attrib_names  = NULL;
+    uint32_t               *sampler_names = NULL;
+    uint32_t               *uniform_names = NULL;
+    uint8_t                *memory_block  = NULL;
+    uint8_t                *memory_ptr    = NULL;
+    size_t                  aname_size    = 0;
+    size_t                  sname_size    = 0;
+    size_t                  uname_size    = 0;
+    size_t                  attrib_size   = 0;
+    size_t                  sampler_size  = 0;
+    size_t                  uniform_size  = 0;
+    size_t                  total_size    = 0;
+
+    // calculate the total size of all shader program metadata.
+    aname_size    = sizeof(uint32_t)              * num_attribs;
+    sname_size    = sizeof(uint32_t)              * num_samplers;
+    uname_size    = sizeof(uint32_t)              * num_uniforms;
+    attrib_size   = sizeof(glsl_attribute_desc_t) * num_attribs;
+    sampler_size  = sizeof(glsl_sampler_desc_t)   * num_samplers;
+    uniform_size  = sizeof(glsl_uniform_desc_t)   * num_uniforms;
+    total_size    = aname_size  + sname_size      + uname_size +
+                    attrib_size + sampler_size    + uniform_size;
+
+    // perform a single large memory allocation for the metadata.
+    memory_block  = (uint8_t*) malloc(total_size);
+    memory_ptr    = memory_block;
+    if (memory_block == NULL)
+        return false;
+
+    // assign pointers to various sub-blocks within the larger memory block.
+    attrib_names  = (uint32_t*) memory_ptr;
+    memory_ptr   +=  aname_size;
+    attribs       = (glsl_attribute_desc_t*) memory_ptr;
+    memory_ptr   +=  attrib_size;
+
+    sampler_names = (uint32_t*) memory_ptr;
+    memory_ptr   +=  sname_size;
+    samplers      = (glsl_sampler_desc_t  *) memory_ptr;
+    memory_ptr   +=  sampler_size;
+
+    uniform_names = (uint32_t*) memory_ptr;
+    memory_ptr   +=  uname_size;
+    uniforms      = (glsl_uniform_desc_t  *) memory_ptr;
+    memory_ptr   +=  uniform_size;
+
+    // set all of the fields on the shader_desc_t structure.
+    desc->UniformCount   = num_uniforms;
+    desc->UniformNames   = uniform_names;
+    desc->Uniforms       = uniforms;
+    desc->AttributeCount = num_attribs;
+    desc->AttributeNames = attrib_names;
+    desc->Attributes     = attribs;
+    desc->SamplerCount   = num_samplers;
+    desc->SamplerNames   = sampler_names;
+    desc->Samplers       = samplers;
+    desc->Metadata       = memory_block;
+    return true;
+}
+
+/// @summary Releases memory for a glsl_shader_desc_t structure using the standard C library free() function.
+/// @param desc The shader description to delete.
+internal_function void glsl_shader_desc_free(glsl_shader_desc_t *desc)
+{
+    if (desc->Metadata != NULL)
+    {
+        free(desc->Metadata);
+        desc->Metadata       = NULL;
+        desc->UniformCount   = 0;
+        desc->UniformNames   = NULL;
+        desc->Uniforms       = NULL;
+        desc->AttributeCount = 0;
+        desc->AttributeNames = NULL;
+        desc->Attributes     = NULL;
+        desc->SamplerCount   = 0;
+        desc->SamplerNames   = NULL;
+        desc->Samplers       = NULL;
+    }
+}
+
+/// @summary Counts the number of active vertex attribues, texture samplers and uniform values defined in a shader program.
+/// @param display The display managing the rendering context.
+/// @param program The OpenGL program object to query.
+/// @param buffer A temporary buffer used to hold attribute and uniform names.
+/// @param buffer_size The maximum number of bytes that can be written to the temporary name buffer.
+/// @param include_builtins Specify true to include GLSL builtin values in the returned vertex attribute count.
+/// @param out_num_attribs On return, this address is updated with the number of active vertex attribute values.
+/// @param out_num_samplers On return, this address is updated with the number of active texture sampler values.
+/// @param out_num_uniforms On return, this address is updated with the number of active uniform values.
+internal_function void glsl_reflect_program_counts(gl_display_t *display, GLuint program, char *buffer, size_t buffer_size, bool include_builtins, size_t &out_num_attribs, size_t &out_num_samplers, size_t &out_num_uniforms)
+{
+    size_t  num_attribs  = 0;
+    GLint   attrib_count = 0;
+    GLsizei buf_size     = (GLsizei) buffer_size;
+
+    glGetProgramiv(program, GL_ACTIVE_ATTRIBUTES, &attrib_count);
+    for (GLint i = 0; i < attrib_count; ++i)
+    {
+        GLenum type = GL_FLOAT;
+        GLuint idx  = (GLuint) i;
+        GLint  len  = 0;
+        GLint  sz   = 0;
+        glGetActiveAttrib(program, idx, buf_size, &len, &sz, &type, buffer);
+        if (glsl_builtin(buffer) && !include_builtins)
+            continue;
+        num_attribs++;
+    }
+
+    size_t num_samplers  = 0;
+    size_t num_uniforms  = 0;
+    GLint  uniform_count = 0;
+
+    glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &uniform_count);
+    for (GLint i = 0; i < uniform_count; ++i)
+    {
+        GLenum type = GL_FLOAT;
+        GLuint idx  = (GLuint) i;
+        GLint  len  = 0;
+        GLint  sz   = 0;
+        glGetActiveUniform(program, idx, buf_size, &len, &sz, &type, buffer);
+        if (glsl_builtin(buffer) && !include_builtins)
+            continue;
+
+        switch (type)
+        {
+            case GL_SAMPLER_1D:
+            case GL_INT_SAMPLER_1D:
+            case GL_UNSIGNED_INT_SAMPLER_1D:
+            case GL_SAMPLER_1D_SHADOW:
+            case GL_SAMPLER_2D:
+            case GL_INT_SAMPLER_2D:
+            case GL_UNSIGNED_INT_SAMPLER_2D:
+            case GL_SAMPLER_2D_SHADOW:
+            case GL_SAMPLER_3D:
+            case GL_INT_SAMPLER_3D:
+            case GL_UNSIGNED_INT_SAMPLER_3D:
+            case GL_SAMPLER_CUBE:
+            case GL_INT_SAMPLER_CUBE:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE:
+            case GL_SAMPLER_CUBE_SHADOW:
+            case GL_SAMPLER_1D_ARRAY:
+            case GL_SAMPLER_1D_ARRAY_SHADOW:
+            case GL_INT_SAMPLER_1D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+            case GL_SAMPLER_2D_ARRAY:
+            case GL_SAMPLER_2D_ARRAY_SHADOW:
+            case GL_INT_SAMPLER_2D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+            case GL_SAMPLER_BUFFER:
+            case GL_INT_SAMPLER_BUFFER:
+            case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+            case GL_SAMPLER_2D_RECT:
+            case GL_SAMPLER_2D_RECT_SHADOW:
+            case GL_INT_SAMPLER_2D_RECT:
+            case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+            case GL_SAMPLER_2D_MULTISAMPLE:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                num_samplers++;
+                break;
+
+            default:
+                num_uniforms++;
+                break;
+        }
+    }
+
+    // set the output values for the caller.
+    out_num_attribs  = num_attribs;
+    out_num_samplers = num_samplers;
+    out_num_uniforms = num_uniforms;
+}
+
+/// @summary Retrieves descriptions of active vertex attributes, texture samplers and uniform values defined in a shader program.
+/// @param display The display managing the rendering context.
+/// @param program The OpenGL program object to query.
+/// @param buffer A temporary buffer used to hold attribute and uniform names.
+/// @param buffer_size The maximum number of bytes that can be written to the temporary name buffer.
+/// @param include_builtins Specify true to include GLSL builtin values in the returned vertex attribute count.
+/// @param attrib_names Pointer to an array to be filled with the 32-bit hash values of the active vertex attribute names.
+/// @param attrib_info Pointer to an array to be filled with vertex attribute descriptions.
+/// @param sampler_names Pointer to an array to be filled with the 32-bit hash values of the active texture sampler names.
+/// @param sampler_info Pointer to an array to be filled with texture sampler descriptions.
+/// @param uniform_names Pointer to an array to be filled with the 32-bit hash values of the active uniform names.
+/// @param uniform_info Pointer to an array to be filled with uniform descriptions.
+internal_function void glsl_reflect_program_details(gl_display_t *display, GLuint program, char *buffer, size_t buffer_size, bool include_builtins, uint32_t *attrib_names, glsl_attribute_desc_t *attrib_info, uint32_t *sampler_names, glsl_sampler_desc_t *sampler_info, uint32_t *uniform_names, glsl_uniform_desc_t *uniform_info)
+{
+    size_t  num_attribs  = 0;
+    GLint   attrib_count = 0;
+    GLsizei buf_size     = (GLsizei) buffer_size;
+
+    glGetProgramiv(program, GL_ACTIVE_ATTRIBUTES, &attrib_count);
+    for (GLint i = 0; i < attrib_count; ++i)
+    {
+        GLenum type = GL_FLOAT;
+        GLuint idx  = (GLuint) i;
+        GLint  len  = 0;
+        GLint  loc  = 0;
+        GLint  sz   = 0;
+        glGetActiveAttrib(program, idx, buf_size, &len, &sz, &type, buffer);
+        if (glsl_builtin(buffer) && !include_builtins)
+            continue;
+
+        glsl_attribute_desc_t va;
+        loc           = glGetAttribLocation(program, buffer);
+        va.DataType   = (GLenum) type;
+        va.Location   = (GLint)  loc;
+        va.DataSize   = (size_t) gl_data_size(type) * sz;
+        va.DataOffset = (size_t) 0; // for application use only
+        va.Dimension  = (size_t) sz;
+        attrib_names[num_attribs] = glsl_shader_name(buffer);
+        attrib_info [num_attribs] = va;
+        num_attribs++;
+    }
+
+    size_t num_samplers  = 0;
+    size_t num_uniforms  = 0;
+    GLint  uniform_count = 0;
+    GLint  texture_unit  = 0;
+
+    glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &uniform_count);
+    for (GLint i = 0; i < uniform_count; ++i)
+    {
+        GLenum type = GL_FLOAT;
+        GLuint idx  = (GLuint) i;
+        GLint  len  = 0;
+        GLint  loc  = 0;
+        GLint  sz   = 0;
+        glGetActiveUniform(program, idx, buf_size, &len, &sz, &type, buffer);
+        if (glsl_builtin(buffer) && !include_builtins)
+            continue;
+
+        switch (type)
+        {
+            case GL_SAMPLER_1D:
+            case GL_INT_SAMPLER_1D:
+            case GL_UNSIGNED_INT_SAMPLER_1D:
+            case GL_SAMPLER_1D_SHADOW:
+            case GL_SAMPLER_2D:
+            case GL_INT_SAMPLER_2D:
+            case GL_UNSIGNED_INT_SAMPLER_2D:
+            case GL_SAMPLER_2D_SHADOW:
+            case GL_SAMPLER_3D:
+            case GL_INT_SAMPLER_3D:
+            case GL_UNSIGNED_INT_SAMPLER_3D:
+            case GL_SAMPLER_CUBE:
+            case GL_INT_SAMPLER_CUBE:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE:
+            case GL_SAMPLER_CUBE_SHADOW:
+            case GL_SAMPLER_1D_ARRAY:
+            case GL_SAMPLER_1D_ARRAY_SHADOW:
+            case GL_INT_SAMPLER_1D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+            case GL_SAMPLER_2D_ARRAY:
+            case GL_SAMPLER_2D_ARRAY_SHADOW:
+            case GL_INT_SAMPLER_2D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+            case GL_SAMPLER_BUFFER:
+            case GL_INT_SAMPLER_BUFFER:
+            case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+            case GL_SAMPLER_2D_RECT:
+            case GL_SAMPLER_2D_RECT_SHADOW:
+            case GL_INT_SAMPLER_2D_RECT:
+            case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+            case GL_SAMPLER_2D_MULTISAMPLE:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                {
+                    glsl_sampler_desc_t ts;
+                    loc            = glGetUniformLocation(program, buffer);
+                    ts.SamplerType = (GLenum) type;
+                    ts.BindTarget  = (GLenum) gl_texture_target(type);
+                    ts.Location    = (GLint)  loc;
+                    ts.ImageUnit   = (GLint)  texture_unit++;
+                    sampler_names[num_samplers] = glsl_shader_name(buffer);
+                    sampler_info [num_samplers] = ts;
+                    num_samplers++;
+                }
+                break;
+
+            default:
+                {
+                    glsl_uniform_desc_t uv;
+                    loc            = glGetUniformLocation(program, buffer);
+                    uv.DataType    = (GLenum) type;
+                    uv.Location    = (GLint)  loc;
+                    uv.DataSize    = (size_t) gl_data_size(type) * sz;
+                    uv.DataOffset  = (size_t) 0; // for application use only
+                    uv.Dimension   = (size_t) sz;
+                    uniform_names[num_uniforms] = glsl_shader_name(buffer);
+                    uniform_info [num_uniforms] = uv;
+                    num_uniforms++;
+                }
+                break;
+        }
+    }
+}
+
+/// @summary Binds a texture object to a texture sampler for the currently bound shader program.
+/// @param display The display managing the rendering context.
+/// @param sampler The description of the sampler to set.
+/// @param texture The OpenGL texture object to bind to the sampler.
+internal_function void glsl_set_sampler(gl_display_t *display, glsl_sampler_desc_t *sampler, GLuint texture)
+{
+    glActiveTexture(GL_TEXTURE0 + sampler->ImageUnit);
+    glBindTexture(sampler->BindTarget, texture);
+    glUniform1i(sampler->Location, sampler->ImageUnit);
+}
+
+/// @summary Sets a uniform value for the currently bound shader program.
+/// @param display The display managing the rendering context.
+/// @param uniform The description of the uniform to set.
+/// @param value The data to copy to the uniform.
+/// @param transpose For matrix values, specify true to transpose the matrix
+/// elements before passing them to the shader program.
+internal_function void glsl_set_uniform(gl_display_t *display, glsl_uniform_desc_t *uniform, void const *value, bool transpose)
+{
+    GLint          loc = uniform->Location;
+    GLsizei        dim = uniform->Dimension;
+    GLboolean      tm  = transpose ? GL_TRUE : GL_FALSE;
+    GLint const   *id  = (GLint const*)   value;
+    GLfloat const *fd  = (GLfloat const*) value;
+    switch (uniform->DataType)
+    {
+        case GL_FLOAT:        glUniform1fv(loc, dim, fd);             break;
+        case GL_FLOAT_VEC2:   glUniform2fv(loc, dim, fd);             break;
+        case GL_FLOAT_VEC3:   glUniform3fv(loc, dim, fd);             break;
+        case GL_FLOAT_VEC4:   glUniform4fv(loc, dim, fd);             break;
+        case GL_INT:          glUniform1iv(loc, dim, id);             break;
+        case GL_INT_VEC2:     glUniform2iv(loc, dim, id);             break;
+        case GL_INT_VEC3:     glUniform3iv(loc, dim, id);             break;
+        case GL_INT_VEC4:     glUniform4iv(loc, dim, id);             break;
+        case GL_BOOL:         glUniform1iv(loc, dim, id);             break;
+        case GL_BOOL_VEC2:    glUniform2iv(loc, dim, id);             break;
+        case GL_BOOL_VEC3:    glUniform3iv(loc, dim, id);             break;
+        case GL_BOOL_VEC4:    glUniform4iv(loc, dim, id);             break;
+        case GL_FLOAT_MAT2:   glUniformMatrix2fv  (loc, dim, tm, fd); break;
+        case GL_FLOAT_MAT3:   glUniformMatrix3fv  (loc, dim, tm, fd); break;
+        case GL_FLOAT_MAT4:   glUniformMatrix4fv  (loc, dim, tm, fd); break;
+        case GL_FLOAT_MAT2x3: glUniformMatrix2x3fv(loc, dim, tm, fd); break;
+        case GL_FLOAT_MAT2x4: glUniformMatrix2x4fv(loc, dim, tm, fd); break;
+        case GL_FLOAT_MAT3x2: glUniformMatrix3x2fv(loc, dim, tm, fd); break;
+        case GL_FLOAT_MAT3x4: glUniformMatrix3x4fv(loc, dim, tm, fd); break;
+        case GL_FLOAT_MAT4x2: glUniformMatrix4x2fv(loc, dim, tm, fd); break;
+        case GL_FLOAT_MAT4x3: glUniformMatrix4x3fv(loc, dim, tm, fd); break;
+        default: break;
+    }
+}
+
+/// @summary Initializes a shader source code buffer to empty.
+/// @param source The source code buffer to clear.
+internal_function void glsl_shader_source_init(glsl_shader_source_t *source)
+{
+    source->StageCount = 0;
+    for (size_t i = 0; i < GL_MAX_SHADER_STAGES; ++i)
+    {
+        source->StageNames [i] = 0;
+        source->StringCount[i] = 0;
+        source->SourceCode [i] = NULL;
+    }
+}
+
+/// @summary Adds source code for a shader stage to a shader source buffer.
+/// @param source The source code buffer to modify.
+/// @param shader_stage The shader stage, for example, GL_VERTEX_SHADER.
+/// @param source_code An array of NULL-terminated ASCII strings specifying the
+/// source code fragments for the specified shader stage.
+/// @param string_count The number of strings in the source_code array.
+internal_function void glsl_shader_source_add(glsl_shader_source_t *source, GLenum shader_stage, char **source_code, size_t string_count)
+{
+    if (source->StageCount < GL_MAX_SHADER_STAGES)
+    {
+        source->StageNames [source->StageCount] = shader_stage;
+        source->StringCount[source->StageCount] = GLsizei(string_count);
+        source->SourceCode [source->StageCount] = source_code;
+        source->StageCount++;
+    }
+}
+
+/// @summary Compiles, links and reflects a shader program.
+/// @param source The shader source code buffer.
+/// @param shader The shader program object to initialize.
+/// @param out_program On return, this address is set to the identifier of the OpenGL shader program object. If an error occurs, this value will be 0.
+/// @return true if the build process was successful.
+internal_function bool glsl_build_shader(gl_display_t *display, glsl_shader_source_t *source, glsl_shader_desc_t *shader, GLuint *out_program)
+{
+    GLuint shader_list[GL_MAX_SHADER_STAGES];
+    GLuint program       = 0;
+    char  *name_buffer   = NULL;
+    size_t num_attribs   = 0;
+    size_t num_samplers  = 0;
+    size_t num_uniforms  = 0;
+    size_t max_name      = 0;
+
+    for (size_t  i = 0; i < source->StageCount;  ++i)
+    {
+        size_t  ls = 0;
+        GLenum  sn = source->StageNames [i];
+        GLsizei fc = source->StringCount[i];
+        char  **sc = source->SourceCode [i];
+        if (!glsl_compile_shader(display, sn, sc, fc, &shader_list[i], &ls))
+            goto error_cleanup;
+    }
+
+    if (!glsl_attach_shaders(display, shader_list, source->StageCount, &program))
+        goto error_cleanup;
+
+    if (!glsl_link_program(display, program, &max_name, NULL))
+        goto error_cleanup;
+
+    // flag each attached shader for deletion when the program is deleted.
+    // the shaders are automatically detached when the program is deleted.
+    for (size_t i = 0; i < source->StageCount; ++i)
+        glDeleteShader(shader_list[i]);
+
+    // figure out how many attributes, samplers and uniforms we have.
+    name_buffer = (char*) malloc(max_name);
+    glsl_reflect_program_counts(display, program, name_buffer, max_name, false, num_attribs, num_samplers, num_uniforms);
+
+    if (!glsl_shader_desc_alloc(shader, num_attribs, num_samplers, num_uniforms))
+        goto error_cleanup;
+
+    // now reflect the shader program to retrieve detailed information
+    // about all vertex attributes, texture samplers and uniform variables.
+    glsl_reflect_program_details(display, program, name_buffer, max_name, false, shader->AttributeNames, shader->Attributes, shader->SamplerNames, shader->Samplers, shader->UniformNames, shader->Uniforms);
+    *out_program = program;
+    return true;
+
+error_cleanup:
+    for (size_t i = 0; i < source->StageCount; ++i)
+    {
+        if (shader_list[i] != 0)
+        {
+            glDeleteShader(shader_list[i]);
+        }
+    }
+    if (shader->Metadata != NULL) glsl_shader_desc_free(shader);
+    if (name_buffer  != NULL)     free(name_buffer);
+    if (program != 0)             glDeleteProgram(program);
+    *out_program = 0;
+    return false;
 }
 
 /*///////////////////////
