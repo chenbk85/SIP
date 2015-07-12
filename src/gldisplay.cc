@@ -59,13 +59,12 @@ EXTERN_C IMAGE_DOS_HEADER  __ImageBase;
 ///////////////////////*/
 /// @summary Initialize Windows GLEW and resolve WGL extension entry points.
 /// @param driver The presentation driver performing the initialization.
-/// @param window The handle of the window that is the target of rendering operations.
 /// @param x The x-coordinate of the upper-left corner of the target display.
 /// @param y The y-coordinate of the upper-left corner of the target display.
 /// @param w The width of the target display, in pixels.
 /// @param h The height of the target display, in pixels.
 /// @return true if WGLEW is initialized successfully.
-internal_function bool initialize_wglew(gl_display_t *display, HWND real_wnd, int x, int y, int w, int h)
+internal_function bool initialize_wglew(gl_display_t *display, int x, int y, int w, int h)
 {   
     PIXELFORMATDESCRIPTOR pfd;
     GLenum e = GLEW_OK;
@@ -252,7 +251,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
         }
 
         // initialize WGLEW, allowing us to possibly use modern-style context creation.
-        if(initialize_wglew(display, window, x, y, w, h) == false)
+        if(initialize_wglew(display, x, y, w, h) == false)
         {
             OutputDebugString(_T("ERROR: Unable to initialize WGLEW on display: "));
             OutputDebugString(dd.DeviceName);

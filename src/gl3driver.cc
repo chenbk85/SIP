@@ -422,9 +422,12 @@ public_function uintptr_t create_renderer(gl_display_t *display, size_t target_w
     GLuint         fbo    =  0;
     GLsizei        rbn    =  depth_stencil ? 2 : 1;
     GLuint         rbo[2] = {0, 0};
+    GLsizei        w      = (GLsizei) target_width;
+    GLsizei        h      = (GLsizei) target_height;
+    GLsizei        s      = (GLsizei) multisample_count;
 
-    if (target_width  == 0) target_width  = display->DisplayWidth;
-    if (target_height == 0) target_height = display->DisplayHeight;
+    if (target_width  == 0) w = (GLsizei) display->DisplayWidth;
+    if (target_height == 0) h = (GLsizei) display->DisplayHeight;
 
     // create and set up a framebuffer and associated renderbuffers:
     glGenFramebuffers (1  , &fbo);
@@ -433,24 +436,24 @@ public_function uintptr_t create_renderer(gl_display_t *display, size_t target_w
     if (multisample_count > 1)
     {   // allocate storage for the color buffer:
         glBindRenderbuffer(GL_RENDERBUFFER, rbo[0]);
-        glRenderbufferStorageMultisample(GL_RENDERBUFFER, multisample_count, GL_RGBA8, target_width, target_height);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, s, GL_RGBA8, w, h);
         glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo[0]);
         if (depth_stencil)
         {   // allocate storage for the depth+stencil buffer:
             glBindRenderbuffer(GL_RENDERBUFFER, rbo[1]);
-            glRenderbufferStorageMultisample(GL_RENDERBUFFER, multisample_count, GL_DEPTH_STENCIL, target_width, target_height);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER, s, GL_DEPTH_STENCIL, w, h);
             glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo[1]);
         }
     }
     else
     {   // allocate storage for the color buffer:
         glBindRenderbuffer(GL_RENDERBUFFER, rbo[0]);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, target_width, target_height);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
         glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo[0]);
         if (depth_stencil)
         {   // allocate storage for the depth+stencil buffer:
             glBindRenderbuffer(GL_RENDERBUFFER, rbo[1]);
-            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_STENCIL, target_width, target_height);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_STENCIL, w, h);
             glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo[1]);
         }
     }
@@ -463,13 +466,13 @@ public_function uintptr_t create_renderer(gl_display_t *display, size_t target_w
     }
 
     // default the viewport to the entire render target bounds:
-    glViewport(0, 0, target_width, target_height);
+    glViewport(0, 0, w, h);
 
     // allocate memory for the renderer state:
     gl = (gl3_renderer_t*)  malloc(sizeof(gl3_renderer_t));
 
-    gl->Width           = target_width;
-    gl->Height          = target_height;
+    gl->Width           = (size_t) w;
+    gl->Height          = (size_t) h;
     gl->Drawable        = display->DisplayDC;
     gl->Window          = display->DisplayHWND;
     gl->Display         = display;
@@ -513,6 +516,8 @@ public_function uintptr_t create_renderer(gl_display_t *display, size_t target_w
 public_function void reset_renderer(uintptr_t handle)
 {
     gl3_renderer_t    *gl = (gl3_renderer_t*) handle;
+    GLsizei             w = (GLsizei) gl->Width;
+    GLsizei             h = (GLsizei) gl->Height;
     gl_display_t *display =  gl->Display;
 
     // flush the image command queues:
@@ -540,7 +545,7 @@ public_function void reset_renderer(uintptr_t handle)
     
     // reset the framebufer and viewport:
     glBindFramebuffer(GL_DRAW_BUFFER, gl->Framebuffer);
-    glViewport(0, 0, gl->Width, gl->Height);
+    glViewport(0, 0, w, h);
 }
 
 /// @summary Resets the state of the renderer when its attached drawable changes displays.
@@ -641,8 +646,10 @@ public_function void update_drawable(uintptr_t handle)
     target_drawable(gl->Display, gl->Drawable);
 
     // bind the output renderbuffer, and set the viewport to the entire region:
+    GLsizei w = (GLsizei) gl->Width;
+    GLsizei h = (GLsizei) gl->Height;
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gl->Framebuffer);
-    glViewport(0, 0, gl->Width, gl->Height);
+    glViewport(0, 0, w, h);
 
     // launch as many frames as possible:
     while (frame_count(gl) < GLRC_MAX_FRAMES)
