@@ -12,7 +12,9 @@
 //   Constants   //
 /////////////////*/
 /// @summary Define the registered name of the WNDCLASS used for hidden windows.
+#ifndef GLRC_HIDDEN_WNDCLASS_NAME
 #define GLRC_HIDDEN_WNDCLASS_NAME       _T("GLRC_Hidden_WndClass")
+#endif
 
 /// @summary Defines the maximum number of shader stages. Currently, we have
 /// stages GL_VERTEX_SHADER, GL_GEOMETRY_SHADER and GL_FRAGMENT_SHADER.
@@ -27,8 +29,66 @@
 #define GL_BUFFER_OFFSET(x)             ((GLvoid*)(((uint8_t*)NULL)+(x)))
 #endif
 
+/// @summary Defines the location of the position and texture attributes within
+/// the position-texture-color vertex. These attributes are encoded as a vec4.
+#ifndef GL_SPRITE_PTC_LOCATION_PTX
+#define GL_SPRITE_PTC_LOCATION_PTX      (0)
+#endif
+
+/// @summary Defines the location of the tint color attribute within the vertex.
+/// This attribute is encoded as a packed 32-bit RGBA color value.
+#ifndef GL_SPRITE_PTC_LOCATION_CLR
+#define GL_SPRITE_PTC_LOCATION_CLR      (1)
+#endif
+
 /// @summary Define the maximum number of in-flight frames per-driver.
 static uint32_t const GLRC_MAX_FRAMES   = 4;
+
+/// @summary The vertex shader source code for rendering solid-colored quads specified in screen-space.
+static char const *SpriteShaderPTC_CLR_VSS =
+    "#version 330\n"
+    "uniform mat4 uMSS;\n"
+    "layout (location = 0) in vec4 aPTX;\n"
+    "layout (location = 1) in vec4 aCLR;\n"
+    "out vec4 vCLR;\n"
+    "void main() {\n"
+    "    vCLR = aCLR;\n"
+    "    gl_Position = uMSS * vec4(aPTX.x, aPTX.y, 0, 1);\n"
+    "}\n";
+
+/// @summary The fragment shader source code for rendering solid-colored quads specified in screen-space.
+static char const *SpriteShaderPTC_CLR_FSS =
+    "#version 330\n"
+    "in  vec4 vCLR;\n"
+    "out vec4 oCLR;\n"
+    "void main() {\n"
+    "    oCLR = vCLR;\n"
+    "}\n";
+
+/// @summary The vertex shader source code for rendering textured and tinted quads specified in screen-space.
+static char const *SpriteShaderPTC_TEX_VSS =
+    "#version 330\n"
+    "uniform mat4 uMSS;\n"
+    "layout (location = 0) in vec4 aPTX;\n"
+    "layout (location = 1) in vec4 aCLR;\n"
+    "out vec4 vCLR;\n"
+    "out vec2 vTEX;\n"
+    "void main() {\n"
+    "    vCLR = aCLR;\n"
+    "    vTEX = vec2(aPTX.z, aPTX.w);\n"
+    "    gl_Position = uMSS * vec4(aPTX.x, aPTX.y, 0, 1);\n"
+    "}\n";
+
+/// @summary The fragment shader source code for rendering textured and tinted quads specified in screen-space.
+static char const *SpriteShaderPTC_TEX_FSS =
+    "#version 330\n"
+    "uniform sampler2D sTEX;\n"
+    "in  vec2 vTEX;\n"
+    "in  vec4 vCLR;\n"
+    "out vec4 oCLR;\n"
+    "void main() {\n"
+    "    oCLR = texture(sTEX, vTEX) * vCLR;\n"
+    "}\n";
 
 /*///////////////////
 //   Local Types   //
@@ -189,6 +249,131 @@ struct gl_pixel_stream_h2d_t
     size_t                  ReserveSize;       /// The size of the active reservation, in bytes.
 };
 
+/// @summary A structure representing a single interleaved sprite vertex in the vertex buffer. The vertex encodes 2D screen space position, texture coordinate, and packed ABGR color values into 20 bytes per-vertex. The GPU expands the vertex into 32 bytes. Tint color is constant per-sprite.
+#pragma pack(push, 1)
+struct gl_sprite_vertex_ptc_t
+{
+    float                   XYUV[4];           /// Position.x,y (screen space), Texcoord.u,v.
+    uint32_t                TintColor;         /// The ABGR tint color.
+};
+#pragma pack(pop)
+
+/// @summary A structure representing the data required to describe a single sprite within the application. Each sprite is translated into four vertices and six indices. The application fills out a sprite descriptor and pushes it to the batch for later processing.
+struct gl_sprite_t
+{
+    float                   ScreenX;           /// Screen-space X coordinate of the origin.
+    float                   ScreenY;           /// Screen-space Y coordinate of the origin.
+    float                   OriginX;           /// Origin X-offset from the upper-left corner.
+    float                   OriginY;           /// Origin Y-offset from the upper-left corner.
+    float                   ScaleX;            /// The horizontal scale factor.
+    float                   ScaleY;            /// The vertical scale factor.
+    float                   Orientation;       /// The angle of orientation, in radians.
+    uint32_t                TintColor;         /// The ABGR tint color.
+    uint32_t                ImageX;            /// Y-offset of the upper-left corner of the source image.
+    uint32_t                ImageY;            /// Y-offset of the upper-left corner of the source image.
+    uint32_t                ImageWidth;        /// The width of the source image, in pixels.
+    uint32_t                ImageHeight;       /// The height of the source image, in pixels.
+    uint32_t                TextureWidth;      /// The width of the texture defining the source image.
+    uint32_t                TextureHeight;     /// The height of the texture defining the source image.
+    uint32_t                LayerDepth;        /// The layer depth of the sprite, increasing into the background.
+    uint32_t                RenderState;       /// An application-defined render state identifier.
+};
+
+/// @summary A structure storing the data required to represent a sprite within the sprite batch. Sprites are transformed to quads when they are pushed to the sprite batch. Each quad definition is 64 bytes.
+struct gl_sprite_quad_t
+{
+    float                   Source[4];         /// The XYWH rectangle on the source texture.
+    float                   Target[4];         /// The XYWH rectangle on the screen.
+    float                   Origin[2];         /// The XY origin point of rotation.
+    float                   Scale[2];          /// Texture coordinate scale factors.
+    float                   Orientation;       /// The angle of orientation, in radians.
+    uint32_t                TintColor;         /// The ABGR tint color.
+};
+
+/// @summary Data used for sorting buffered quads. Grouped together to improve cache usage by avoiding loading all of the data for a gl_sprite_quad_t.
+struct gl_sprite_sort_data_t
+{
+    uint32_t                LayerDepth;        /// The layer depth of the sprite, increasing into the background.
+    uint32_t                RenderState;       /// The render state associated with the sprite.
+};
+
+/// @summary A structure storing all of the data required to render sprites using a particular effect. All of the shader state is maintained externally.
+struct gl_sprite_effect_t
+{
+    size_t                  VertexCapacity;    /// The maximum number of vertices we can buffer.
+    size_t                  VertexOffset;      /// Current offset (in vertices) in buffer.
+    size_t                  VertexSize;        /// Size of one vertex, in bytes.
+    size_t                  IndexCapacity;     /// The maximum number of indices we can buffer.
+    size_t                  IndexOffset;       /// Current offset (in indices) in buffer.
+    size_t                  IndexSize;         /// Size of one index, in bytes.
+    uint32_t                CurrentState;      /// The active render state identifier.
+    GLuint                  VertexArray;       /// The VAO describing the vertex layout.
+    GLuint                  VertexBuffer;      /// Buffer object for dynamic vertex data.
+    GLuint                  IndexBuffer;       /// Buffer object for dynamic index data.
+    GLboolean               BlendEnabled;      /// GL_TRUE if blending is enabled.
+    GLenum                  BlendSourceColor;  /// The source color blend factor.
+    GLenum                  BlendSourceAlpha;  /// The source alpha blend factor.
+    GLenum                  BlendTargetColor;  /// The destination color blend factor.
+    GLenum                  BlendTargetAlpha;  /// The destination alpha blend factor.
+    GLenum                  BlendFuncColor;    /// The color channel blend function.
+    GLenum                  BlendFuncAlpha;    /// The alpha channel blend function.
+    GLfloat                 BlendColor[4];     /// RGBA constant blend color.
+    float                   Projection[16];    /// Projection matrix for current viewport
+};
+
+/// @summary Signature for a function used to apply render state for an effect prior to rendering any quads. The function should perform operations like setting the active program, calling gl_sprite_effect_bind_buffers() and gl_sprite_effect_apply_blendstate(), and so on.
+/// @param display The display managing the rendering context.
+/// @param effect The effect being used for rendering.
+/// @param context Opaque data passed by the application.
+typedef void (*gl_sprite_effect_setup_fn)(gl_display_t *display, gl_sprite_effect_t *effect, void *context);
+
+/// @summary Signature for a function used to apply render state for a quad primitive. The function should perform operations like setting up samplers, uniforms, and so on.
+/// @param display The display managing the rendering context.
+/// @param effect The effect being used for rendering.
+/// @param render_state The application render state identifier.
+/// @param context Opaque data passed by the application.
+typedef void (*gl_sprite_effect_apply_fn)(gl_display_t *display, gl_sprite_effect_t *effect, uint32_t render_state, void *context);
+
+/// @summary Wraps a set of function pointers used to apply effect-specific state.
+struct gl_sprite_effect_apply_t
+{
+    gl_sprite_effect_setup_fn SetupEffect;     /// Callback used to perform initial setup.
+    gl_sprite_effect_apply_fn ApplyState;      /// Callback used to perform state changes.
+};
+
+/// @summary A structure for buffering data associated with a set of sprites.
+struct gl_sprite_batch_t
+{
+    size_t                  Count;             /// The number of buffered sprites.
+    size_t                  Capacity;          /// The capacity of the various buffers.
+    gl_sprite_quad_t       *Quads;             /// Buffer for transformed quad data.
+    gl_sprite_sort_data_t  *State;             /// Render state identifiers for each quad.
+    uint32_t               *Order;             /// Insertion order values for each quad.
+};
+
+/// @summary Maintains the state associated with a default sprite shader
+/// accepting position, texture and color attributes as vertex input.
+struct gl_sprite_shader_ptc_clr_t
+{
+    GLuint                  Program;           /// The OpenGL program object ID.
+    glsl_shader_desc_t      ShaderDesc;        /// Metadata about the shader program.
+    glsl_attribute_desc_t  *AttribPTX;         /// Information about the Position-Texture attribute.
+    glsl_attribute_desc_t  *AttribCLR;         /// Information about the ARGB color attribute.
+    glsl_uniform_desc_t    *UniformMSS;        /// Information about the screenspace -> clipspace matrix.
+};
+
+/// @summary Maintains the state associated with a default sprite shader
+/// accepting position, texture and color attributes as vertex input.
+struct gl_sprite_shader_ptc_tex_t
+{
+    GLuint                  Program;           /// The OpenGL program object ID.
+    glsl_shader_desc_t      ShaderDesc;        /// Metadata about the shader program.
+    glsl_attribute_desc_t  *AttribPTX;         /// Information about the Position-Texture attribute.
+    glsl_attribute_desc_t  *AttribCLR;         /// Information about the ARGB color attribute.
+    glsl_sampler_desc_t    *SamplerTEX;        /// Information about the texture sampler.
+    glsl_uniform_desc_t    *UniformMSS;        /// Information about the screenspace -> clipspace matrix.
+};
+
 /// @summary Represents a unique identifier for a locked image.
 struct gl_image_id_t
 {
@@ -279,10 +464,182 @@ struct gl3_renderer_t
 // - each compute pipeline job needs its own presentation command
 //   - the data for the command defines input and output parameters, ie. output to this texture or buffer.
 // - once all (blocking) compute jobs have completed, process the command list
+/*//////////////
+//  Functors  //
+//////////////*/
+/// @summary Functor used for sorting sprites into back-to-front order.
+struct back_to_front
+{
+    gl_sprite_batch_t *batch;
+
+    inline back_to_front(gl_sprite_batch_t *sprite_batch)
+        :
+        batch(sprite_batch)
+    { /* empty */ }
+
+    inline bool operator()(uint32_t ia, uint32_t ib)
+    {
+        gl_sprite_sort_data_t const &sdata_a = batch->State[ia];
+        gl_sprite_sort_data_t const &sdata_b = batch->State[ib];
+        if (sdata_a.LayerDepth  > sdata_b.LayerDepth)  return true;
+        if (sdata_a.LayerDepth  < sdata_b.LayerDepth)  return false;
+        if (sdata_a.RenderState < sdata_b.RenderState) return true;
+        if (sdata_a.RenderState > sdata_b.RenderState) return false;
+        return  (ia < ib);
+    }
+};
+
+/// @summary Functor used for sorting sprites into front-to-back order.
+struct front_to_back
+{
+    gl_sprite_batch_t *batch;
+
+    inline front_to_back(gl_sprite_batch_t *sprite_batch)
+        :
+        batch(sprite_batch)
+    { /* empty */ }
+
+    inline bool operator()(uint32_t ia, uint32_t ib)
+    {
+        gl_sprite_sort_data_t const &sdata_a = batch->State[ia];
+        gl_sprite_sort_data_t const &sdata_b = batch->State[ib];
+        if (sdata_a.LayerDepth  < sdata_b.LayerDepth)  return true;
+        if (sdata_a.LayerDepth  > sdata_b.LayerDepth)  return false;
+        if (sdata_a.RenderState < sdata_b.RenderState) return true;
+        if (sdata_a.RenderState > sdata_b.RenderState) return false;
+        return  (ia > ib);
+    }
+};
+
+/// @summary Functor used for sorting sprites by render state.
+struct by_render_state
+{
+    gl_sprite_batch_t *batch;
+
+    inline by_render_state(gl_sprite_batch_t *sprite_batch)
+        :
+        batch(sprite_batch)
+    { /* empty */ }
+
+    inline bool operator()(uint32_t ia, uint32_t ib)
+    {
+        gl_sprite_sort_data_t const &sdata_a = batch->State[ia];
+        gl_sprite_sort_data_t const &sdata_b = batch->State[ib];
+        if (sdata_a.RenderState < sdata_b.RenderState) return true;
+        if (sdata_a.RenderState > sdata_b.RenderState) return false;
+        return  (ia < ib);
+    }
+};
 
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
+/// @summary Clamps a floating-point value into the given range.
+/// @param x The value to clamp.
+/// @param lower The inclusive lower-bound.
+/// @param upper The inclusive upper-bound.
+/// @return The value X: lower <= X <= upper.
+internal_function inline float gl_clampf(float x, float lower, float upper)
+{
+    return (x < lower) ? lower : ((x > upper) ? upper : x);
+}
+
+/// @summary Converts an RGBA tuple into a packed 32-bit ABGR value.
+/// @param rgba The RGBA tuple, with each component in [0, 1].
+/// @return The color value packed into a 32-bit unsigned integer.
+internal_function inline uint32_t gl_abgr32(float const *rgba)
+{
+    uint32_t r = (uint32_t) gl_clampf(rgba[0] * 255.0f, 0.0f, 255.0f);
+    uint32_t g = (uint32_t) gl_clampf(rgba[1] * 255.0f, 0.0f, 255.0f);
+    uint32_t b = (uint32_t) gl_clampf(rgba[2] * 255.0f, 0.0f, 255.0f);
+    uint32_t a = (uint32_t) gl_clampf(rgba[3] * 255.0f, 0.0f, 255.0f);
+    return ((a << 24) | (b << 16) | (g << 8) | r);
+}
+
+/// @summary Converts an RGBA value into a packed 32-bit ABGR value.
+/// @param R The red channel value, in [0, 1].
+/// @param G The green channel value, in [0, 1].
+/// @param B The blue channel value, in [0, 1].
+/// @param A The alpha channel value, in [0, 1].
+/// @return The color value packed into a 32-bit unsigned integer.
+internal_function inline uint32_t gl_abgr32(float R, float G, float B, float A)
+{
+    uint32_t r = (uint32_t) gl_clampf(R * 255.0f, 0.0f, 255.0f);
+    uint32_t g = (uint32_t) gl_clampf(G * 255.0f, 0.0f, 255.0f);
+    uint32_t b = (uint32_t) gl_clampf(B * 255.0f, 0.0f, 255.0f);
+    uint32_t a = (uint32_t) gl_clampf(A * 255.0f, 0.0f, 255.0f);
+    return ((a << 24) | (b << 16) | (g << 8) | r);
+}
+
+/// @summary Searches a list of name-value pairs for a named item.
+/// @param name_u32 The 32-bit unsigned integer hash of the search query.
+/// @param name_list A list of 32-bit unsigned integer name hashes.
+/// @param value_list A list of values, ordered such that name_list[i]
+/// corresponds to value_list[i].
+/// @param count The number of items in the name and value lists.
+template <typename T>
+internal_function inline T* gl_kv_find(uint32_t name_u32, uint32_t const *name_list, T *value_list, size_t count)
+{
+    for (size_t i = 0;  i < count; ++i)
+    {
+        if (name_list[i] == name_u32)
+            return &value_list[i];
+    }
+    return NULL;
+}
+
+/// @summary Searches a list of name-value pairs for a named item.
+/// @param name_str A NULL-terminated ASCII string specifying the search query.
+/// @param name_list A list of 32-bit unsigned integer name hashes.
+/// @param value_list A list of values, ordered such that name_list[i]
+/// corresponds to value_list[i].
+/// @param count The number of items in the name and value lists.
+template <typename T>
+internal_function inline T* gl_kv_find(char const *name_str, uint32_t const *name_list, T *value_list, size_t count)
+{
+    uint32_t name_u32 = glsl_shader_name(name_str);
+    return gl_kv_find(name_u32, name_list, value_list, count);
+}
+
+/// @summary Searches for a vertex attribute definition by name.
+/// @param shader The shader program object to query.
+/// @param name A NULL-terminated ASCII string vertex attribute identifier.
+/// @return The corresponding vertex attribute definition, or NULL.
+internal_function inline glsl_attribute_desc_t *glsl_find_attribute(glsl_shader_desc_t *shader, char const *name)
+{
+    return gl_kv_find(name, shader->AttributeNames, shader->Attributes, shader->AttributeCount);
+}
+
+/// @summary Searches for a texture sampler definition by name.
+/// @param shader The shader program object to query.
+/// @param name A NULL-terminated ASCII string texture sampler identifier.
+/// @return The corresponding texture sampler definition, or NULL.
+internal_function inline glsl_sampler_desc_t* glsl_find_sampler(glsl_shader_desc_t *shader, char const *name)
+{
+    return gl_kv_find(name, shader->SamplerNames, shader->Samplers, shader->SamplerCount);
+}
+
+/// @summary Searches for a uniform variable definition by name.
+/// @param shader The shader program object to query.
+/// @param name A NULL-terminated ASCII string uniform variable identifier.
+/// @return The corresponding uniform variable definition, or NULL.
+internal_function inline glsl_uniform_desc_t* glsl_find_uniform(glsl_shader_desc_t *shader, char const *name)
+{
+    return gl_kv_find(name, shader->UniformNames, shader->Uniforms, shader->UniformCount);
+}
+
+/// @summary Sorts a sprite batch using std::sort(). The sort is indirect; the
+/// order array is what gets sorted. The order array can then be used to read
+/// quad definitions from the batch in sorted order.
+/// @typename TComp A functor type (uint32_t index_a, uint32_t index_b).
+/// @param batch The sprite batch to sort.
+template <typename TComp>
+internal_function inline void sort_sprite_batch(gl_sprite_batch_t *batch)
+{
+    TComp cmp(batch);
+    std::sort(batch->Order, batch->Order + batch->Count, cmp);
+}
+
 /// @summary Calculate the number of in-flight frames.
 /// @param gl The render state to query.
 /// @return The number of in-flight frames.
@@ -1082,6 +1439,416 @@ internal_function GLenum gl_texture_target(GLenum sampler_type)
     return GL_TEXTURE_1D;
 }
 
+/// @summary Given a value from the DXGI_FORMAT enumeration, determine the appropriate OpenGL format, base format and data type values. This is useful when loading texture data from a DDS container.
+/// @param dxgi A value of the DXGI_FORMAT enumeration (data::dxgi_format_e).
+/// @param out_internalformat On return, stores the corresponding OpenGL internal format.
+/// @param out_baseformat On return, stores the corresponding OpenGL base format (layout).
+/// @param out_datatype On return, stores the corresponding OpenGL data type.
+/// @return true if the input format could be mapped to OpenGL.
+internal_function bool dxgi_format_to_gl(uint32_t dxgi, GLenum &out_internalformat, GLenum &out_format, GLenum &out_datatype)
+{
+    switch (dxgi)
+    {
+        case DXGI_FORMAT_UNKNOWN:
+        case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+        case DXGI_FORMAT_R32G32B32_TYPELESS:
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        case DXGI_FORMAT_R32G32_TYPELESS:
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_R16G16_TYPELESS:
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_R24G8_TYPELESS:
+        case DXGI_FORMAT_R8G8_TYPELESS:
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_R8_TYPELESS:
+        case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+        case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
+        case DXGI_FORMAT_R1_UNORM:
+        case DXGI_FORMAT_R8G8_B8G8_UNORM:
+        case DXGI_FORMAT_G8R8_G8B8_UNORM:
+        case DXGI_FORMAT_BC1_TYPELESS:
+        case DXGI_FORMAT_BC2_TYPELESS:
+        case DXGI_FORMAT_BC2_UNORM:
+        case DXGI_FORMAT_BC2_UNORM_SRGB:
+        case DXGI_FORMAT_BC3_TYPELESS:
+        case DXGI_FORMAT_BC4_TYPELESS:
+        case DXGI_FORMAT_BC4_UNORM:
+        case DXGI_FORMAT_BC4_SNORM:
+        case DXGI_FORMAT_BC5_TYPELESS:
+        case DXGI_FORMAT_BC5_SNORM:
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+        case DXGI_FORMAT_BC6H_TYPELESS:
+        case DXGI_FORMAT_BC7_TYPELESS:
+        case DXGI_FORMAT_AYUV:
+        case DXGI_FORMAT_Y410:
+        case DXGI_FORMAT_Y416:
+        case DXGI_FORMAT_NV12:
+        case DXGI_FORMAT_P010:
+        case DXGI_FORMAT_P016:
+        case DXGI_FORMAT_420_OPAQUE:
+        case DXGI_FORMAT_YUY2:
+        case DXGI_FORMAT_Y210:
+        case DXGI_FORMAT_Y216:
+        case DXGI_FORMAT_NV11:
+        case DXGI_FORMAT_AI44:
+        case DXGI_FORMAT_IA44:
+            break;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+            out_internalformat = GL_RGBA32F;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_FLOAT;
+            return true;
+        case DXGI_FORMAT_R32G32B32A32_UINT:
+            out_internalformat = GL_RGBA32UI;
+            out_format         = GL_BGRA_INTEGER;
+            out_datatype       = GL_UNSIGNED_INT;
+            return true;
+        case DXGI_FORMAT_R32G32B32A32_SINT:
+            out_internalformat = GL_RGBA32I;
+            out_format         = GL_BGRA_INTEGER;
+            out_datatype       = GL_INT;
+            return true;
+        case DXGI_FORMAT_R32G32B32_FLOAT:
+            out_internalformat = GL_RGB32F;
+            out_format         = GL_BGR;
+            out_datatype       = GL_FLOAT;
+            return true;
+        case DXGI_FORMAT_R32G32B32_UINT:
+            out_internalformat = GL_RGB32UI;
+            out_format         = GL_BGR_INTEGER;
+            out_datatype       = GL_UNSIGNED_INT;
+            return true;
+        case DXGI_FORMAT_R32G32B32_SINT:
+            out_internalformat = GL_RGB32I;
+            out_format         = GL_BGR_INTEGER;
+            out_datatype       = GL_INT;
+            return true;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            out_internalformat = GL_RGBA16F;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_HALF_FLOAT;
+            return true;
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+            out_internalformat = GL_RGBA16;
+            out_format         = GL_BGRA_INTEGER;
+            out_datatype       = GL_UNSIGNED_SHORT;
+            return true;
+        case DXGI_FORMAT_R16G16B16A16_UINT:
+            out_internalformat = GL_RGBA16UI;
+            out_format         = GL_BGRA_INTEGER;
+            out_datatype       = GL_UNSIGNED_SHORT;
+            return true;
+        case DXGI_FORMAT_R16G16B16A16_SNORM:
+            out_internalformat = GL_RGBA16_SNORM;
+            out_format         = GL_BGRA_INTEGER;
+            out_datatype       = GL_SHORT;
+            return true;
+        case DXGI_FORMAT_R16G16B16A16_SINT:
+            out_internalformat = GL_RGBA16I;
+            out_format         = GL_BGRA_INTEGER;
+            out_datatype       = GL_SHORT;
+            return true;
+        case DXGI_FORMAT_R32G32_FLOAT:
+            out_internalformat = GL_RG32F;
+            out_format         = GL_RG;
+            out_datatype       = GL_FLOAT;
+            return true;
+        case DXGI_FORMAT_R32G32_UINT:
+            out_internalformat = GL_RG32UI;
+            out_format         = GL_RG;
+            out_datatype       = GL_UNSIGNED_INT;
+            return true;
+        case DXGI_FORMAT_R32G32_SINT:
+            out_internalformat = GL_RG32I;
+            out_format         = GL_RG;
+            out_datatype       = GL_INT;
+            return true;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+            out_internalformat = GL_DEPTH_STENCIL;
+            out_format         = GL_DEPTH_STENCIL;
+            out_datatype       = GL_FLOAT; // ???
+            return true;
+        case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+            out_internalformat = GL_RG32F;
+            out_format         = GL_RG;
+            out_datatype       = GL_FLOAT;
+            return true;
+        case DXGI_FORMAT_X32_TYPELESS_G8X24_UINT:
+            return true;
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+            out_internalformat = GL_RGB10_A2;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_2_10_10_10_REV;
+            return true;
+        case DXGI_FORMAT_R10G10B10A2_UINT:
+            out_internalformat = GL_RGB10_A2UI;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_2_10_10_10_REV;
+            return true;
+        case DXGI_FORMAT_R11G11B10_FLOAT:
+            out_internalformat = GL_R11F_G11F_B10F;
+            out_format         = GL_BGR;
+            out_datatype       = GL_FLOAT; // ???
+            return true;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            out_internalformat = GL_RGBA8;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_8_8_8_8_REV;
+            return true;
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            out_internalformat = GL_SRGB8_ALPHA8;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_8_8_8_8_REV;
+            return true;
+        case DXGI_FORMAT_R8G8B8A8_UINT:
+            out_internalformat = GL_RGBA8UI;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_8_8_8_8_REV;
+            return true;
+        case DXGI_FORMAT_R8G8B8A8_SNORM:
+            out_internalformat = GL_RGBA8_SNORM;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_8_8_8_8_REV;
+            return true;
+        case DXGI_FORMAT_R8G8B8A8_SINT:
+            out_internalformat = GL_RGBA8I;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_BYTE;
+            return true;
+        case DXGI_FORMAT_R16G16_FLOAT:
+            out_internalformat = GL_RG16F;
+            out_format         = GL_RG;
+            out_datatype       = GL_HALF_FLOAT;
+            return true;
+        case DXGI_FORMAT_R16G16_UNORM:
+            out_internalformat = GL_RG16;
+            out_format         = GL_RG;
+            out_datatype       = GL_UNSIGNED_SHORT;
+            return true;
+        case DXGI_FORMAT_R16G16_UINT:
+            out_internalformat = GL_RG16UI;
+            out_format         = GL_RG;
+            out_datatype       = GL_UNSIGNED_SHORT;
+            return true;
+        case DXGI_FORMAT_R16G16_SNORM:
+            out_internalformat = GL_RG16_SNORM;
+            out_format         = GL_RG;
+            out_datatype       = GL_SHORT;
+            return true;
+        case DXGI_FORMAT_R16G16_SINT:
+            out_internalformat = GL_RG16I;
+            out_format         = GL_RG;
+            out_datatype       = GL_SHORT;
+            return true;
+        case DXGI_FORMAT_D32_FLOAT:
+            out_internalformat = GL_DEPTH_COMPONENT;
+            out_format         = GL_DEPTH_COMPONENT;
+            out_datatype       = GL_FLOAT;
+            return true;
+        case DXGI_FORMAT_R32_FLOAT:
+            out_internalformat = GL_R32F;
+            out_format         = GL_RED;
+            out_datatype       = GL_FLOAT;
+            return true;
+        case DXGI_FORMAT_R32_UINT:
+            out_internalformat = GL_R32UI;
+            out_format         = GL_RED;
+            out_datatype       = GL_UNSIGNED_INT;
+            return true;
+        case DXGI_FORMAT_R32_SINT:
+            out_internalformat = GL_R32I;
+            out_format         = GL_RED;
+            out_datatype       = GL_INT;
+            return true;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+            out_internalformat = GL_DEPTH_STENCIL;
+            out_format         = GL_DEPTH_STENCIL;
+            out_datatype       = GL_UNSIGNED_INT;
+            return true;
+        case DXGI_FORMAT_R8G8_UNORM:
+            out_internalformat = GL_RG8;
+            out_format         = GL_RG;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_R8G8_UINT:
+            out_internalformat = GL_RG8UI;
+            out_format         = GL_RG;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_R8G8_SNORM:
+            out_internalformat = GL_RG8_SNORM;
+            out_format         = GL_RG;
+            out_datatype       = GL_BYTE;
+            return true;
+        case DXGI_FORMAT_R8G8_SINT:
+            out_internalformat = GL_RG8I;
+            out_format         = GL_RG;
+            out_datatype       = GL_BYTE;
+            return true;
+        case DXGI_FORMAT_R16_FLOAT:
+            out_internalformat = GL_R16F;
+            out_format         = GL_RED;
+            out_datatype       = GL_HALF_FLOAT;
+            return true;
+        case DXGI_FORMAT_D16_UNORM:
+            out_internalformat = GL_DEPTH_COMPONENT;
+            out_format         = GL_DEPTH_COMPONENT;
+            out_datatype       = GL_UNSIGNED_SHORT;
+            return true;
+        case DXGI_FORMAT_R16_UNORM:
+            out_internalformat = GL_R16;
+            out_format         = GL_RED;
+            out_datatype       = GL_UNSIGNED_SHORT;
+            return true;
+        case DXGI_FORMAT_R16_UINT:
+            out_internalformat = GL_R16UI;
+            out_format         = GL_RED;
+            out_datatype       = GL_UNSIGNED_SHORT;
+            return true;
+        case DXGI_FORMAT_R16_SNORM:
+            out_internalformat = GL_R16_SNORM;
+            out_format         = GL_RED;
+            out_datatype       = GL_SHORT;
+            return true;
+        case DXGI_FORMAT_R16_SINT:
+            out_internalformat = GL_R16I;
+            out_format         = GL_RED;
+            out_datatype       = GL_SHORT;
+            return true;
+        case DXGI_FORMAT_R8_UNORM:
+            out_internalformat = GL_R8;
+            out_format         = GL_RED;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_R8_UINT:
+            out_internalformat = GL_R8UI;
+            out_format         = GL_RED;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_R8_SNORM:
+            out_internalformat = GL_R8_SNORM;
+            out_format         = GL_RED;
+            out_datatype       = GL_BYTE;
+            return true;
+        case DXGI_FORMAT_R8_SINT:
+            out_internalformat = GL_R8I;
+            out_format         = GL_RED;
+            out_datatype       = GL_BYTE;
+            return true;
+        case DXGI_FORMAT_A8_UNORM:
+            out_internalformat = GL_R8;
+            out_format         = GL_RED;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_R9G9B9E5_SHAREDEXP:
+            out_internalformat = GL_RGB9_E5;
+            out_format         = GL_RGB;
+            out_datatype       = GL_UNSIGNED_INT;
+            return true;
+        case DXGI_FORMAT_BC1_UNORM:
+            out_internalformat = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+            out_format         = GL_RGBA;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_BC1_UNORM_SRGB:
+            out_internalformat = 0x8C4D;
+            out_format         = GL_RGBA;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_BC3_UNORM:
+            out_internalformat = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+            out_format         = GL_RGBA;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_BC3_UNORM_SRGB:
+            out_internalformat = 0x8C4E;
+            out_format         = GL_RGBA;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_BC5_UNORM:
+            out_internalformat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+            out_format         = GL_RGBA;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_B5G6R5_UNORM:
+            out_internalformat = GL_RGB;
+            out_format         = GL_BGR;
+            out_datatype       = GL_UNSIGNED_SHORT_5_6_5_REV;
+            return true;
+        case DXGI_FORMAT_B5G5R5A1_UNORM:
+            out_internalformat = GL_RGBA;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_SHORT_1_5_5_5_REV;
+            return true;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            out_internalformat = GL_RGBA8;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_8_8_8_8_REV;
+            return true;
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+            out_internalformat = GL_RGBA8;
+            out_format         = GL_BGR;
+            out_datatype       = GL_UNSIGNED_INT_8_8_8_8_REV;
+            return true;
+        case DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM:
+            out_internalformat = GL_RGB10_A2;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_2_10_10_10_REV;
+            return true;
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            out_internalformat = GL_SRGB8_ALPHA8;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_INT_8_8_8_8_REV;
+            return true;
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+            out_internalformat = GL_SRGB8_ALPHA8;
+            out_format         = GL_BGR;
+            out_datatype       = GL_UNSIGNED_INT_8_8_8_8_REV;
+            return true;
+        case DXGI_FORMAT_BC6H_UF16:
+            out_internalformat = 0x8E8F;
+            out_format         = GL_RGB;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_BC6H_SF16:
+            out_internalformat = 0x8E8E;
+            out_format         = GL_RGB;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_BC7_UNORM:
+            out_internalformat = 0x8E8C;
+            out_format         = GL_RGBA;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_BC7_UNORM_SRGB:
+            out_internalformat = 0x8E8D;
+            out_format         = GL_RGBA;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_P8:
+            out_internalformat = GL_R8;
+            out_format         = GL_RED;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_A8P8:
+            out_internalformat = GL_RG8;
+            out_format         = GL_RG;
+            out_datatype       = GL_UNSIGNED_BYTE;
+            return true;
+        case DXGI_FORMAT_B4G4R4A4_UNORM:
+            out_internalformat = GL_RGBA4;
+            out_format         = GL_BGRA;
+            out_datatype       = GL_UNSIGNED_SHORT_4_4_4_4_REV;
+            return true;
+        default:
+            break;
+    }
+    return false;
+}
+
 /// @summary Computes the number of levels in a mipmap chain given the dimensions of the highest resolution level.
 /// @param width The width of the highest resolution level, in pixels.
 /// @param height The height of the highest resolution level, in pixels.
@@ -1468,12 +2235,12 @@ internal_function void* gl_pixel_stream_h2d_reserve(gl_display_t *display, gl_pi
     assert(stream->ReserveSize == 0);       // no existing reservation
     assert(amount <= stream->BufferSize);   // requested amount is less than the buffer size
 
-    GLsizei    align  = stream->Alignment;
+    GLsizei    align  = GLsizei(stream->Alignment);
     GLsizei    size   = (amount + (align - 1)) & ~(align - 1);
     GLintptr   offset = GLintptr(stream->ReserveOffset);
     GLbitfield access = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT;
 
-    if (offset + size > stream->BufferSize)
+    if (offset + size > GLintptr(stream->BufferSize))
     {   // orphan the existing buffer and reserve a new buffer.
         access |= GL_MAP_INVALIDATE_BUFFER_BIT;
         offset  = 0;
@@ -2298,6 +3065,621 @@ error_cleanup:
     if (program != 0)             glDeleteProgram(program);
     *out_program = 0;
     return false;
+}
+
+/// @summary Initializes a sprite batch with the specified capacity.
+/// @param batch The sprite batch.
+/// @param capacity The initial capacity of the batch, in quads.
+internal_function void gl_create_sprite_batch(gl_sprite_batch_t *batch, size_t capacity)
+{
+    if (batch)
+    {
+        batch->Count    = 0;
+        batch->Capacity = capacity;
+        if (capacity)
+        {
+            batch->Quads = (gl_sprite_quad_t*)      malloc(capacity * sizeof(gl_sprite_quad_t));
+            batch->State = (gl_sprite_sort_data_t*) malloc(capacity * sizeof(gl_sprite_sort_data_t));
+            batch->Order = (uint32_t*)              malloc(capacity * sizeof(uint32_t));
+        }
+        else
+        {
+            batch->Quads = NULL;
+            batch->State = NULL;
+            batch->Order = NULL;
+        }
+    }
+}
+
+/// @summary Frees the memory associated with a sprite batch.
+/// @param batch The sprite batch to free.
+internal_function void gl_delete_sprite_batch(gl_sprite_batch_t *batch)
+{
+    if (batch)
+    {
+        if (batch->Capacity)
+        {
+            free(batch->Order);
+            free(batch->State);
+            free(batch->Quads);
+        }
+        batch->Count    = 0;
+        batch->Capacity = 0;
+        batch->Quads    = NULL;
+        batch->State    = NULL;
+        batch->Order    = NULL;
+    }
+}
+
+/// @summary Ensures that the sprite batch has at least the specified capacity.
+/// @param batch The sprite batch.
+/// @param capacity need to pass batch->Count + NumToAdd as capacity
+internal_function void gl_ensure_sprite_batch(gl_sprite_batch_t *batch, size_t capacity)
+{
+    if (batch->Capacity < capacity)
+    {
+        batch->Capacity = capacity;
+        batch->Quads    = (gl_sprite_quad_t*)      realloc(batch->Quads, capacity * sizeof(gl_sprite_quad_t));
+        batch->State    = (gl_sprite_sort_data_t*) realloc(batch->State, capacity * sizeof(gl_sprite_sort_data_t));
+        batch->Order    = (uint32_t*)              realloc(batch->Order, capacity * sizeof(uint32_t));
+    }
+}
+
+/// @summary Discards data buffered by a sprite batch.
+/// @param batch The sprite batch to flush.
+internal_function void gl_flush_sprite_batch(gl_sprite_batch_t *batch)
+{
+    batch->Count = 0;
+}
+
+/// @summary Transforms a set of sprite definitions into a series of quad definitions.
+/// @param quads The buffer of quads to write to.
+/// @param sdata The buffer of state data to write to.
+/// @param indices The buffer of order indices to write to.
+/// @param quad_offset The zero-based index of the first quad to write.
+/// @param sprites The buffer of sprite definitions to read from.
+/// @param sprite_offset The zero-based index of the first sprite to read.
+/// @param count The number of sprite definitions to read.
+internal_function void gl_generate_quads(gl_sprite_quad_t *quads, gl_sprite_sort_data_t *sdata, uint32_t *indices, size_t quad_offset, gl_sprite_t const *sprites, size_t sprite_offset, size_t sprite_count)
+{
+    size_t qindex = quad_offset;
+    size_t sindex = sprite_offset;
+    for (size_t i = 0;  i < sprite_count; ++i, ++qindex, ++sindex)
+    {
+        gl_sprite_t const     &s = sprites[sindex];
+        gl_sprite_sort_data_t &r = sdata[qindex];
+        gl_sprite_quad_t      &q = quads[qindex];
+
+        q.Source[0]   = float(s.ImageX);
+        q.Source[1]   = float(s.ImageY);
+        q.Source[2]   = float(s.ImageWidth);
+        q.Source[3]   = float(s.ImageHeight);
+        q.Target[0]   = s.ScreenX;
+        q.Target[1]   = s.ScreenY;
+        q.Target[2]   = s.ImageWidth  * s.ScaleX;
+        q.Target[3]   = s.ImageHeight * s.ScaleY;
+        q.Origin[0]   = s.OriginX;
+        q.Origin[1]   = s.OriginY;
+        q.Scale [0]   = 1.0f / s.TextureWidth;
+        q.Scale [1]   = 1.0f / s.TextureHeight;
+        q.Orientation = s.Orientation;
+        q.TintColor   = s.TintColor;
+
+        r.LayerDepth  = s.LayerDepth;
+        r.RenderState = s.RenderState;
+
+        indices[qindex] = uint32_t(qindex);
+    }
+}
+
+/// @summary Generates transformed position-texture-color vertex data for a set, or subset, of quads.
+/// @param buffer The buffer to which vertex data will be written.
+/// @param buffer_offset The offset into the buffer of the first vertex.
+/// @param quads The buffer from which quad attributes will be read.
+/// @param indices An array of zero-based indices specifying the order in which to read quads from the quad buffer.
+/// @param quad_offset The offset into the quad list of the first quad.
+/// @param quad_count The number of quads to generate.
+internal_function void gl_generate_quad_vertices_ptc(void *buffer, size_t buffer_offset, gl_sprite_quad_t const *quads, uint32_t const *indices, size_t quad_offset, size_t quad_count)
+{
+    static size_t const X      =  0;
+    static size_t const Y      =  1;
+    static size_t const W      =  2;
+    static size_t const H      =  3;
+    static float  const XCO[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+    static float  const YCO[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+
+    gl_sprite_vertex_ptc_t *vertex_buffer = (gl_sprite_vertex_ptc_t*) buffer;
+    size_t                  vertex_offset = buffer_offset;
+    for (size_t i = 0; i < quad_count; ++i)
+    {
+        // figure out which quad we're working with.
+        uint32_t const id = indices[quad_offset + i];
+        gl_sprite_quad_t const &quad = quads[id];
+
+        // pre-calculate values constant across the quad.
+        float    const src_x = quad.Source[X];
+        float    const src_y = quad.Source[Y];
+        float    const src_w = quad.Source[W];
+        float    const src_h = quad.Source[H];
+        float    const dst_x = quad.Target[X];
+        float    const dst_y = quad.Target[Y];
+        float    const dst_w = quad.Target[W];
+        float    const dst_h = quad.Target[H];
+        float    const ctr_x = quad.Origin[X] / src_w;
+        float    const ctr_y = quad.Origin[Y] / src_h;
+        float    const scl_u = quad.Scale[X];
+        float    const scl_v = quad.Scale[Y];
+        float    const angle = quad.Orientation;
+        uint32_t const color = quad.TintColor;
+        float    const sin_o = sinf(angle);
+        float    const cos_o = cosf(angle);
+
+        // calculate values that change per-vertex.
+        for (size_t j = 0; j < 4; ++j)
+        {
+            gl_sprite_vertex_ptc_t &vert = vertex_buffer[vertex_offset++];
+            float ofs_x    = XCO[j];
+            float ofs_y    = YCO[j];
+            float x_dst    = (ofs_x - ctr_x) *  dst_w;
+            float y_dst    = (ofs_y - ctr_y) *  dst_h;
+            vert.XYUV[0]   = (dst_x + (x_dst * cos_o)) - (y_dst * sin_o);
+            vert.XYUV[1]   = (dst_y + (x_dst * sin_o)) + (y_dst * cos_o);
+            vert.XYUV[2]   = (src_x + (ofs_x * src_w)) *  scl_u;
+            vert.XYUV[3]   = 1.0f   -((src_y +(ofs_y   *  src_h)) *  scl_v);
+            vert.TintColor = color;
+        }
+    }
+}
+
+/// @summary Generates index data for a set, or subset, of quads. Triangles are specified using counter-clockwise winding. Indices are 16-bit unsigned int.
+/// @param buffer The destination buffer.
+/// @param offset The offset into the buffer of the first index.
+/// @param base_vertex The zero-based index of the first vertex of the batch. This allows multiple batches to write into the same index buffer.
+/// @param quad_count The number of quads being generated.
+internal_function void gl_generate_quad_indices_u16(void *buffer, size_t offset, size_t base_vertex, size_t quad_count)
+{
+    uint16_t *u16 = (uint16_t*) buffer;
+    uint16_t  b16 = (uint16_t ) base_vertex;
+    for (size_t i = 0; i < quad_count; ++i)
+    {
+        u16[offset++]  = (b16 + 1);
+        u16[offset++]  = (b16 + 0);
+        u16[offset++]  = (b16 + 2);
+        u16[offset++]  = (b16 + 2);
+        u16[offset++]  = (b16 + 0);
+        u16[offset++]  = (b16 + 3);
+        b16 += 4;
+    }
+}
+
+/// @summary Generates index data for a set, or subset, of quads. Triangles are specified using counter-clockwise winding. Indices are 32-bit unsigned int.
+/// @param buffer The destination buffer.
+/// @param offset The offset into the buffer of the first index.
+/// @param base_vertex The zero-based index of the first vertex of the batch. This allows multiple batches to write into the same index buffer.
+/// @param quad_count The number of quads being generated.
+internal_function void gl_generate_quad_indices_u32(void *buffer, size_t offset, size_t base_vertex, size_t quad_count)
+{
+    uint32_t *u32 = (uint32_t*) buffer;
+    uint32_t  b32 = (uint32_t ) base_vertex;
+    for (size_t i = 0; i < quad_count; ++i)
+    {
+        u32[offset++]  = (b32 + 1);
+        u32[offset++]  = (b32 + 0);
+        u32[offset++]  = (b32 + 2);
+        u32[offset++]  = (b32 + 2);
+        u32[offset++]  = (b32 + 0);
+        u32[offset++]  = (b32 + 3);
+        b32 += 4;
+    }
+}
+
+/// @summary Creates the GPU resources required to buffer and render quads.
+/// @param display The display managing the rendering context.
+/// @param effect The effect to initialize.
+/// @param quad_count The maximum number of quads that can be buffered.
+/// @param vertex_size The size of a single vertex, in bytes.
+/// @param index_size The size of a single index, in bytes.
+internal_function bool gl_create_sprite_effect(gl_display_t *display, gl_sprite_effect_t *effect, size_t quad_count, size_t vertex_size, size_t index_size)
+{
+    GLuint  vao        =  0;
+    GLuint  buffers[2] = {0, 0};
+    size_t  vcount     = quad_count  * 4;
+    size_t  icount     = quad_count  * 6;
+    GLsizei abo_size   = GLsizei(vertex_size * vcount);
+    GLsizei eao_size   = GLsizei(index_size  * icount);
+
+    glGenBuffers(2, buffers);
+    glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+    glBufferData(GL_ARRAY_BUFFER, abo_size, NULL, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, eao_size, NULL, GL_DYNAMIC_DRAW);
+    glGenVertexArrays(1, &vao);
+
+    effect->VertexCapacity   = vcount;
+    effect->VertexOffset     = 0;
+    effect->VertexSize       = vertex_size;
+    effect->IndexCapacity    = icount;
+    effect->IndexOffset      = 0;
+    effect->IndexSize        = index_size;
+    effect->CurrentState     = 0xFFFFFFFFU;
+    effect->VertexArray      = vao;
+    effect->VertexBuffer     = buffers[0];
+    effect->IndexBuffer      = buffers[1];
+    effect->BlendEnabled     = GL_FALSE;
+    effect->BlendSourceColor = GL_ONE;
+    effect->BlendSourceAlpha = GL_ONE;
+    effect->BlendTargetColor = GL_ZERO;
+    effect->BlendTargetAlpha = GL_ZERO;
+    effect->BlendFuncColor   = GL_FUNC_ADD;
+    effect->BlendFuncAlpha   = GL_FUNC_ADD;
+    effect->BlendColor[0]    = 0.0f;
+    effect->BlendColor[1]    = 0.0f;
+    effect->BlendColor[2]    = 0.0f;
+    effect->BlendColor[3]    = 0.0f;
+    return true;
+}
+
+/// @summary Releases the GPU resources used for buffering and rendering quads.
+/// @param display The display managing the rendering context.
+/// @param effect The effect to destroy.
+internal_function void gl_delete_sprite_effect(gl_display_t *display, gl_sprite_effect_t *effect)
+{
+    GLuint buffers[2] = {
+        effect->VertexBuffer,
+        effect->IndexBuffer
+    };
+    glDeleteBuffers(2, buffers);
+    glDeleteVertexArrays(1, &effect->VertexArray);
+    effect->VertexCapacity = 0;
+    effect->VertexOffset   = 0;
+    effect->VertexSize     = 0;
+    effect->IndexCapacity  = 0;
+    effect->IndexOffset    = 0;
+    effect->IndexSize      = 0;
+    effect->VertexArray    = 0;
+    effect->VertexBuffer   = 0;
+    effect->IndexBuffer    = 0;
+}
+
+/// @summary Disables alpha blending for an effect. The state changes do not take effect until the effect is (re)bound.
+/// @param effect The effect to update.
+internal_function void gl_sprite_effect_blend_none(gl_sprite_effect_t *effect)
+{
+    effect->BlendEnabled     = GL_FALSE;
+    effect->BlendSourceColor = GL_ONE;
+    effect->BlendSourceAlpha = GL_ONE;
+    effect->BlendTargetColor = GL_ZERO;
+    effect->BlendTargetAlpha = GL_ZERO;
+    effect->BlendFuncColor   = GL_FUNC_ADD;
+    effect->BlendFuncAlpha   = GL_FUNC_ADD;
+    effect->BlendColor[0]    = 0.0f;
+    effect->BlendColor[1]    = 0.0f;
+    effect->BlendColor[2]    = 0.0f;
+    effect->BlendColor[3]    = 0.0f;
+}
+
+/// @summary Enables standard alpha blending (texture transparency) for an effect. The state changes do not take effect until the effect is (re)bound.
+/// @param effect The effect to update.
+internal_function void gl_sprite_effect_blend_alpha(gl_sprite_effect_t *effect)
+{
+    effect->BlendEnabled     = GL_TRUE;
+    effect->BlendSourceColor = GL_SRC_COLOR;
+    effect->BlendSourceAlpha = GL_SRC_ALPHA;
+    effect->BlendTargetColor = GL_ONE_MINUS_SRC_ALPHA;
+    effect->BlendTargetAlpha = GL_ONE_MINUS_SRC_ALPHA;
+    effect->BlendFuncColor   = GL_FUNC_ADD;
+    effect->BlendFuncAlpha   = GL_FUNC_ADD;
+    effect->BlendColor[0]    = 0.0f;
+    effect->BlendColor[1]    = 0.0f;
+    effect->BlendColor[2]    = 0.0f;
+    effect->BlendColor[3]    = 0.0f;
+}
+
+/// @summary Enables additive alpha blending for an effect. The state changes do not take effect until the effect is (re)bound.
+/// @param effect The effect to update.
+internal_function void gl_sprite_effect_blend_additive(gl_sprite_effect_t *effect)
+{
+    effect->BlendEnabled     = GL_TRUE;
+    effect->BlendSourceColor = GL_SRC_COLOR;
+    effect->BlendSourceAlpha = GL_SRC_ALPHA;
+    effect->BlendTargetColor = GL_ONE;
+    effect->BlendTargetAlpha = GL_ONE;
+    effect->BlendFuncColor   = GL_FUNC_ADD;
+    effect->BlendFuncAlpha   = GL_FUNC_ADD;
+    effect->BlendColor[0]    = 0.0f;
+    effect->BlendColor[1]    = 0.0f;
+    effect->BlendColor[2]    = 0.0f;
+    effect->BlendColor[3]    = 0.0f;
+}
+
+/// @summary Enables alpha blending with premultiplied alpha in the source texture. The state changes do not take effect until the effect is (re)bound.
+/// @param effect The effect to update.
+internal_function void gl_sprite_effect_blend_premultiplied(gl_sprite_effect_t *effect)
+{
+    effect->BlendEnabled     = GL_TRUE;
+    effect->BlendSourceColor = GL_ONE;
+    effect->BlendSourceAlpha = GL_ONE;
+    effect->BlendTargetColor = GL_ONE_MINUS_SRC_ALPHA;
+    effect->BlendTargetAlpha = GL_ONE_MINUS_SRC_ALPHA;
+    effect->BlendFuncColor   = GL_FUNC_ADD;
+    effect->BlendFuncAlpha   = GL_FUNC_ADD;
+    effect->BlendColor[0]    = 0.0f;
+    effect->BlendColor[1]    = 0.0f;
+    effect->BlendColor[2]    = 0.0f;
+    effect->BlendColor[3]    = 0.0f;
+}
+
+/// @summary Sets up the effect projection matrix for the given viewport.
+/// @param effect The effect to update.
+/// @param width The viewport width.
+/// @param height The viewport height.
+internal_function void gl_sprite_effect_set_viewport(gl_sprite_effect_t *effect, int width, int height)
+{
+    float *dst16 = effect->Projection;
+    float  s_x = 1.0f / (width   * 0.5f);
+    float  s_y = 1.0f / (height  * 0.5f);
+    dst16[ 0]  = s_x ; dst16[ 1] = 0.0f; dst16[ 2] = 0.0f; dst16[ 3] = 0.0f;
+    dst16[ 4]  = 0.0f; dst16[ 5] = -s_y; dst16[ 6] = 0.0f; dst16[ 7] = 0.0f;
+    dst16[ 8]  = 0.0f; dst16[ 9] = 0.0f; dst16[10] = 1.0f; dst16[11] = 0.0f;
+    dst16[12]  =-1.0f; dst16[13] = 1.0f; dst16[14] = 0.0f; dst16[15] = 1.0f;
+}
+
+/// @summary Binds the vertex and index buffers of an effect for use in subsequent rendering commands.
+/// @param display The display managing the rendering context.
+/// @param effect The effect being applied.
+internal_function void gl_sprite_effect_bind_buffers(gl_display_t *display, gl_sprite_effect_t *effect)
+{
+    glBindVertexArray(effect->VertexArray);
+    glBindBuffer(GL_ARRAY_BUFFER, effect->VertexBuffer);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, effect->IndexBuffer);
+}
+
+/// @summary Applies the alpha blending state specified by the effect.
+/// @param display The display managing the rendering context.
+/// @param effect The effect being applied.
+internal_function void gl_sprite_effect_apply_blendstate(gl_display_t *display, gl_sprite_effect_t *effect)
+{
+    if (effect->BlendEnabled)
+    {
+        glEnable(GL_BLEND);
+        glBlendColor(effect->BlendColor[0], effect->BlendColor[1], effect->BlendColor[2], effect->BlendColor[3]);
+        glBlendFuncSeparate(effect->BlendSourceColor, effect->BlendTargetColor, effect->BlendSourceAlpha, effect->BlendTargetAlpha);
+        glBlendEquationSeparate(effect->BlendFuncColor, effect->BlendFuncAlpha);
+    }
+    else glDisable(GL_BLEND);
+}
+
+/// @summary Configures the Vertex Array Object for an effect using the standard Position-TexCoord-Color layout configuration.
+/// @param display The display managing the rendering context.
+/// @param effect The effect being applied.
+internal_function void gl_sprite_effect_setup_vao_ptc(gl_display_t *display, gl_sprite_effect_t *effect)
+{
+    glBindVertexArray(effect->VertexArray);
+    glEnableVertexAttribArray(GL_SPRITE_PTC_LOCATION_PTX);
+    glEnableVertexAttribArray(GL_SPRITE_PTC_LOCATION_CLR);
+    glVertexAttribPointer(GL_SPRITE_PTC_LOCATION_PTX, 4, GL_FLOAT,         GL_FALSE, sizeof(gl_sprite_vertex_ptc_t), (GLvoid const*)  0);
+    glVertexAttribPointer(GL_SPRITE_PTC_LOCATION_CLR, 4, GL_UNSIGNED_BYTE, GL_TRUE,  sizeof(gl_sprite_vertex_ptc_t), (GLvoid const*) 16);
+}
+
+/// @summary Generates and uploads vertex and index data for a batch of quads to the vertex and index buffers of an effect. The buffers act as circular buffers. If the end of the buffers is reached, as much data as possible is buffered, and the function returns.
+/// @param display The display managing the rendering context.
+/// @param effect The effect to update.
+/// @param quads The source quad definitions.
+/// @param indices An array of zero-based indices specifying the order in which to read quads from the quad buffer.
+/// @param quad_offset The offset, in quads, of the first quad to read.
+/// @param quad_count The number of quads to read.
+/// @param base_index On return, this address is updated with the offset, in indices, of the first buffered primitive written to the index buffer.
+/// @return The number of quads actually buffered. May be less than @a count.
+internal_function size_t gl_sprite_effect_buffer_data_ptc(gl_display_t *display, gl_sprite_effect_t *effect, gl_sprite_quad_t const *quads, uint32_t const *indices, size_t quad_offset, size_t quad_count, size_t *base_index_arg)
+{
+    if (effect->VertexOffset == effect->VertexCapacity)
+    {
+        // the buffer is completely full. time to discard it and
+        // request a new buffer from the driver, to avoid stalls.
+        GLsizei abo_size     = GLsizei(effect->VertexCapacity * effect->VertexSize);
+        GLsizei eao_size     = GLsizei(effect->IndexCapacity  * effect->IndexSize);
+        effect->VertexOffset = 0;
+        effect->IndexOffset  = 0;
+        glBufferData(GL_ARRAY_BUFFER, abo_size, NULL, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, eao_size, NULL, GL_DYNAMIC_DRAW);
+    }
+
+    size_t num_indices  = quad_count * 6;
+    size_t num_vertices = quad_count * 4;
+    size_t max_vertices = effect->VertexCapacity;
+    size_t base_vertex  = effect->VertexOffset;
+    size_t vertex_size  = effect->VertexSize;
+    size_t max_indices  = effect->IndexCapacity;
+    size_t base_index   = effect->IndexOffset;
+    size_t index_size   = effect->IndexSize;
+    if (max_vertices < base_vertex + num_vertices)
+    {   // not enough space in the buffer to fit everything.
+        // only a portion of the desired data will be buffered.
+        num_vertices = max_vertices - base_vertex;
+        num_indices  = max_indices  - base_index;
+    }
+
+    size_t buffer_count =  num_vertices / 4;
+    if (buffer_count == 0) return 0;
+
+    GLintptr   v_offset = base_vertex  * vertex_size;
+    GLsizeiptr v_size   = num_vertices * vertex_size;
+    GLbitfield v_access = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT;
+    GLvoid    *v_data   = glMapBufferRange(GL_ARRAY_BUFFER, v_offset, v_size, v_access);
+    if (v_data != NULL)
+    {
+        gl_generate_quad_vertices_ptc(v_data, 0, quads, indices, quad_offset, buffer_count);
+        glUnmapBuffer(GL_ARRAY_BUFFER);
+    }
+
+    GLintptr   i_offset = base_index  * index_size;
+    GLsizeiptr i_size   = num_indices * index_size;
+    GLbitfield i_access = GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT;
+    GLvoid    *i_data   = glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, i_offset, i_size, i_access);
+    if (i_data != NULL)
+    {
+        if (index_size == sizeof(uint16_t)) gl_generate_quad_indices_u16(i_data, 0, base_vertex, buffer_count);
+        else gl_generate_quad_indices_u32(i_data, 0, base_vertex, buffer_count);
+        glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+    }
+
+    effect->VertexOffset += buffer_count * 4;
+    effect->IndexOffset  += buffer_count * 6;
+    *base_index_arg       = base_index;
+    return buffer_count;
+}
+
+/// @summary Renders a portion of a sprite batch for which the vertex and index data has already been buffered. This function is generally not called by the user directly; it is called internally from gl_sprite_effect_draw_batch_ptc().
+/// @param display The display managing the rendering context.
+/// @param effect The effect being applied.
+/// @param batch The sprite batch being rendered.
+/// @param quad_offset The index of the first quad in the batch to be rendered.
+/// @param quad_count The number of quads to draw.
+/// @param base_index The first index to read from the index buffer.
+internal_function void gl_sprite_effect_draw_batch_region_ptc(gl_display_t *display, gl_sprite_effect_t *effect, gl_sprite_batch_t *batch, size_t quad_offset, size_t quad_count, size_t base_index, gl_sprite_effect_apply_t const *fxfuncs, void *context)
+{
+    uint32_t state_0 = effect->CurrentState;
+    uint32_t state_1 = effect->CurrentState;
+    size_t   index   = 0; // index of start of sub-batch
+    size_t   nquad   = 0; // count of quads in sub-batch
+    size_t   nindex  = 0; // count of indices in sub-batch
+    size_t   quad_id = 0; // quad insertion index
+    GLsizei  size    = GLsizei(effect->IndexSize);
+    GLenum   type    = size == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
+
+    for (size_t i = 0; i < quad_count; ++i)
+    {
+        quad_id = batch->Order[quad_offset + i];
+        state_1 = batch->State[quad_id].RenderState;
+        if (state_1 != state_0)
+        {   // render the previous sub-batch with the current state,
+            // as long as it has at least one quad in the sub-batch.
+            if (i > index)
+            {
+                nquad  = i - index;  // the number of quads being submitted
+                nindex = nquad * 6;  // the number of indices being submitted
+                glDrawElements(GL_TRIANGLES, GLsizei(nindex), type, GL_BUFFER_OFFSET(base_index * size));
+                base_index += nindex;
+            }
+            // now apply the new state and start a new sub-batch.
+            fxfuncs->ApplyState(display, effect, state_1, context);
+            state_0 = state_1;
+            index   = i;
+        }
+    }
+    // submit the remainder of the sub-batch.
+    nquad  = quad_count - index;
+    nindex = nquad * 6;
+    glDrawElements(GL_TRIANGLES, GLsizei(nindex), type, GL_BUFFER_OFFSET(base_index * size));
+    effect->CurrentState = state_1;
+}
+
+/// @summary Renders an entire sprite batch with a given effect.
+/// @param display The display managing the rendering context.
+/// @param effect The effect being applied.
+/// @param batch The sprite batch being rendered.
+/// @param fxfuncs The effect-specific functions for applying render state.
+/// @param context Opaque data defined by the application.
+internal_function void gl_sprite_effect_draw_batch_ptc(gl_display_t *display, gl_sprite_effect_t *effect, gl_sprite_batch_t *batch, gl_sprite_effect_apply_t const *fxfuncs, void *context)
+{
+    size_t quad_count = batch->Count;
+    size_t quad_index = 0;
+    size_t base_index = 0;
+    size_t n          = 0;
+
+    fxfuncs->SetupEffect(display, effect, context);
+    effect->CurrentState = 0xFFFFFFFFU;
+
+    while (quad_count > 0)
+    {
+        n = gl_sprite_effect_buffer_data_ptc(display, effect, batch->Quads, batch->Order, quad_index, quad_count, &base_index);
+        gl_sprite_effect_draw_batch_region_ptc(display, effect, batch, quad_index, n, base_index, fxfuncs, context);
+        base_index  = effect->IndexOffset;
+        quad_index += n;
+        quad_count -= n;
+    }
+}
+
+/// @summary Creates a shader program consisting of a vertex and fragment shader used for rendering solid-colored 2D sprites in screen space.
+/// @param display The display managing the rendering context.
+/// @param shader The shader state to initialize.
+/// @return true if the shader program was created successfully.
+internal_function bool gl_create_sprite_shader_ptc_clr(gl_display_t *display, gl_sprite_shader_ptc_clr_t *shader)
+{
+    if (shader)
+    {
+        glsl_shader_source_t     sources;
+        glsl_shader_source_init(&sources);
+        glsl_shader_source_add (&sources, GL_VERTEX_SHADER,   (char**) &SpriteShaderPTC_CLR_VSS, 1);
+        glsl_shader_source_add (&sources, GL_FRAGMENT_SHADER, (char**) &SpriteShaderPTC_CLR_FSS, 1);
+        if (glsl_build_shader(display, &sources, &shader->ShaderDesc, &shader->Program))
+        {
+            shader->AttribPTX  = glsl_find_attribute(&shader->ShaderDesc, "aPTX");
+            shader->AttribCLR  = glsl_find_attribute(&shader->ShaderDesc, "aCLR");
+            shader->UniformMSS = glsl_find_uniform  (&shader->ShaderDesc, "uMSS");
+            return true;
+        }
+        else return false;
+    }
+    else return false;
+}
+
+/// @summary Frees the resources associated with a solid-color sprite shader.
+/// @param display The display managing the rendering context.
+/// @param shader The shader program object to free.
+internal_function void gl_delete_sprite_shader_ptc_clr(gl_display_t *display, gl_sprite_shader_ptc_clr_t *shader)
+{
+    if (shader && shader->Program)
+    {
+        glsl_shader_desc_free(&shader->ShaderDesc);
+        glDeleteProgram(shader->Program);
+        shader->AttribPTX  = NULL;
+        shader->AttribCLR  = NULL;
+        shader->UniformMSS = NULL;
+        shader->Program    = 0;
+    }
+}
+
+/// @summary Creates a shader program consisting of a vertex and fragment shader used for rendering standard 2D sprites in screen space. The shaders sample image data from a single 2D texture object, and modulate the sample value with the per-sprite tint color.
+/// @param display The display managing the rendering context.
+/// @param shader The shader state to initialize.
+/// @return true if the shader program was created successfully.
+internal_function bool gl_create_sprite_shader_ptc_tex(gl_display_t *display, gl_sprite_shader_ptc_tex_t *shader)
+{
+    if (shader)
+    {
+        glsl_shader_source_t     sources;
+        glsl_shader_source_init(&sources);
+        glsl_shader_source_add (&sources, GL_VERTEX_SHADER,   (char**) &SpriteShaderPTC_TEX_VSS, 1);
+        glsl_shader_source_add (&sources, GL_FRAGMENT_SHADER, (char**) &SpriteShaderPTC_TEX_FSS, 1);
+        if (glsl_build_shader(display, &sources, &shader->ShaderDesc, &shader->Program))
+        {
+            shader->AttribPTX  = glsl_find_attribute(&shader->ShaderDesc, "aPTX");
+            shader->AttribCLR  = glsl_find_attribute(&shader->ShaderDesc, "aCLR");
+            shader->SamplerTEX = glsl_find_sampler  (&shader->ShaderDesc, "sTEX");
+            shader->UniformMSS = glsl_find_uniform  (&shader->ShaderDesc, "uMSS");
+            return true;
+        }
+        else return false;
+    }
+    else return false;
+}
+
+/// @summary Frees the resources associated with a textured sprite shader.
+/// @param display The display managing the rendering context.
+/// @param shader The shader program object to free.
+internal_function void gl_delete_sprite_shader_ptc_tex(gl_display_t *display, gl_sprite_shader_ptc_tex_t *shader)
+{
+    if (shader && shader->Program)
+    {
+        glsl_shader_desc_free(&shader->ShaderDesc);
+        glDeleteProgram(shader->Program);
+        shader->AttribPTX  = NULL;
+        shader->AttribCLR  = NULL;
+        shader->SamplerTEX = NULL;
+        shader->UniformMSS = NULL;
+        shader->Program    = 0;
+    }
 }
 
 /*///////////////////////
