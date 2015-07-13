@@ -45,7 +45,21 @@
 static uint32_t const GLRC_MAX_FRAMES   = 4;
 
 /// @summary The vertex shader source code for rendering solid-colored quads specified in screen-space.
-static char const *SpriteShaderPTC_CLR_VSS =
+/// Targeting OpenGL 3.2/GLSL 1.50.
+static char const *SpriteShaderPTC_CLR_VSS_150 =
+    "#version 150\n"
+    "uniform mat4 uMSS;\n"
+    "in      vec4 aPTX;\n"
+    "in      vec4 aCLR;\n"
+    "out     vec4 vCLR;\n"
+    "void main() {\n"
+    "    vCLR = aCLR;\n"
+    "    gl_Position = uMSS * vec4(aPTX.x, aPTX.y, 0, 1);\n"
+    "}\n";
+
+/// @summary The vertex shader source code for rendering solid-colored quads specified in screen-space.
+/// Targeting OpenGL 3.3/GLSL 3.30.
+static char const *SpriteShaderPTC_CLR_VSS_330 =
     "#version 330\n"
     "uniform mat4 uMSS;\n"
     "layout (location = 0) in vec4 aPTX;\n"
@@ -57,7 +71,18 @@ static char const *SpriteShaderPTC_CLR_VSS =
     "}\n";
 
 /// @summary The fragment shader source code for rendering solid-colored quads specified in screen-space.
-static char const *SpriteShaderPTC_CLR_FSS =
+/// Targeting OpenGL 3.2/GLSL 1.50.
+static char const *SpriteShaderPTC_CLR_FSS_150 =
+    "#version 150\n"
+    "in  vec4 vCLR;\n"
+    "out vec4 oCLR;\n"
+    "void main() {\n"
+    "    oCLR = vCLR;\n"
+    "}\n";
+
+/// @summary The fragment shader source code for rendering solid-colored quads specified in screen-space.
+/// Targeting OpenGL 3.3/GLSL 3.30.
+static char const *SpriteShaderPTC_CLR_FSS_330 =
     "#version 330\n"
     "in  vec4 vCLR;\n"
     "out vec4 oCLR;\n"
@@ -66,7 +91,23 @@ static char const *SpriteShaderPTC_CLR_FSS =
     "}\n";
 
 /// @summary The vertex shader source code for rendering textured and tinted quads specified in screen-space.
-static char const *SpriteShaderPTC_TEX_VSS =
+/// Targeting OpenGL 3.2/GLSL 1.50.
+static char const *SpriteShaderPTC_TEX_VSS_150 =
+    "#version 150\n"
+    "uniform mat4 uMSS;\n"
+    "in      vec4 aPTX;\n"
+    "in      vec4 aCLR;\n"
+    "out     vec4 vCLR;\n"
+    "out     vec2 vTEX;\n"
+    "void main() {\n"
+    "    vCLR = aCLR;\n"
+    "    vTEX = vec2(aPTX.z, aPTX.w);\n"
+    "    gl_Position = uMSS * vec4(aPTX.x, aPTX.y, 0, 1);\n"
+    "}\n";
+
+/// @summary The vertex shader source code for rendering textured and tinted quads specified in screen-space.
+/// Targeting OpenGL 3.3/GLSL 3.30.
+static char const *SpriteShaderPTC_TEX_VSS_330 =
     "#version 330\n"
     "uniform mat4 uMSS;\n"
     "layout (location = 0) in vec4 aPTX;\n"
@@ -80,12 +121,25 @@ static char const *SpriteShaderPTC_TEX_VSS =
     "}\n";
 
 /// @summary The fragment shader source code for rendering textured and tinted quads specified in screen-space.
-static char const *SpriteShaderPTC_TEX_FSS =
+/// Targeting OpenGL 3.2/GLSL 1.50.
+static char const *SpriteShaderPTC_TEX_FSS_150 =
+    "#version 150\n"
+    "uniform sampler2D sTEX;\n"
+    "in      vec2      vTEX;\n"
+    "in      vec4      vCLR;\n"
+    "out     vec4      oCLR;\n"
+    "void main() {\n"
+    "    oCLR = texture(sTEX, vTEX) * vCLR;\n"
+    "}\n";
+
+/// @summary The fragment shader source code for rendering textured and tinted quads specified in screen-space.
+/// Targeting OpenGL 3.3/GLSL 3.30.
+static char const *SpriteShaderPTC_TEX_FSS_330 =
     "#version 330\n"
     "uniform sampler2D sTEX;\n"
-    "in  vec2 vTEX;\n"
-    "in  vec4 vCLR;\n"
-    "out vec4 oCLR;\n"
+    "in      vec2      vTEX;\n"
+    "in      vec4      vCLR;\n"
+    "out     vec4      oCLR;\n"
     "void main() {\n"
     "    oCLR = texture(sTEX, vTEX) * vCLR;\n"
     "}\n";
@@ -3610,8 +3664,8 @@ internal_function bool gl_create_sprite_shader_ptc_clr(gl_display_t *display, gl
     {
         glsl_shader_source_t     sources;
         glsl_shader_source_init(&sources);
-        glsl_shader_source_add (&sources, GL_VERTEX_SHADER,   (char**) &SpriteShaderPTC_CLR_VSS, 1);
-        glsl_shader_source_add (&sources, GL_FRAGMENT_SHADER, (char**) &SpriteShaderPTC_CLR_FSS, 1);
+        glsl_shader_source_add (&sources, GL_VERTEX_SHADER,   (char**) &SpriteShaderPTC_CLR_VSS_150, 1);
+        glsl_shader_source_add (&sources, GL_FRAGMENT_SHADER, (char**) &SpriteShaderPTC_CLR_FSS_150, 1);
         if (glsl_build_shader(display, &sources, &shader->ShaderDesc, &shader->Program))
         {
             shader->AttribPTX  = glsl_find_attribute(&shader->ShaderDesc, "aPTX");
@@ -3650,8 +3704,8 @@ internal_function bool gl_create_sprite_shader_ptc_tex(gl_display_t *display, gl
     {
         glsl_shader_source_t     sources;
         glsl_shader_source_init(&sources);
-        glsl_shader_source_add (&sources, GL_VERTEX_SHADER,   (char**) &SpriteShaderPTC_TEX_VSS, 1);
-        glsl_shader_source_add (&sources, GL_FRAGMENT_SHADER, (char**) &SpriteShaderPTC_TEX_FSS, 1);
+        glsl_shader_source_add (&sources, GL_VERTEX_SHADER,   (char**) &SpriteShaderPTC_TEX_VSS_150, 1);
+        glsl_shader_source_add (&sources, GL_FRAGMENT_SHADER, (char**) &SpriteShaderPTC_TEX_FSS_150, 1);
         if (glsl_build_shader(display, &sources, &shader->ShaderDesc, &shader->Program))
         {
             shader->AttribPTX  = glsl_find_attribute(&shader->ShaderDesc, "aPTX");
