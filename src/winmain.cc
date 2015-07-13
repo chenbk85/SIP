@@ -116,7 +116,7 @@
 #if DISPLAY_BACKEND_OPENGL
 #include "gldisplay.cc"
 #include "glsprite.cc"
-#include "gl3driver.cc"
+#include "gldriver.cc"
 #endif
 
 #if DISPLAY_BACKEND_DIRECTX
