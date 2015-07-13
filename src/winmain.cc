@@ -36,6 +36,7 @@
 //   Includes   //
 ////////////////*/
 #include <Windows.h>
+#include <windowsx.h>
 #include <process.h>
 #include <objbase.h>
 #include <ShlObj.h>
@@ -114,6 +115,7 @@
 
 #if DISPLAY_BACKEND_OPENGL
 #include "gldisplay.cc"
+#include "glsprite.cc"
 #include "gl3driver.cc"
 #endif
 
@@ -139,12 +141,22 @@ static uint64_t const SEC_TO_NANOSEC = 1000000000ULL;
 /// @summary Defines the data required by the background I/O thread.
 struct io_thread_args_t
 {
-    HANDLE          Shutdown;    /// A manual reset event used to signal thread shutdown.
-    aio_driver_t   *AIODriver;   /// The application asynchronous I/O driver.
-    pio_driver_t   *PIODriver;   /// The application prioritized I/O driver.
-    vfs_driver_t   *VFSDriver;   /// The application virtual file system driver.
-    image_memory_t *ImageMemory; /// The memory block into which image data will be loaded.
-    image_cache_t  *ImageCache;  /// The image cache used to manage the image memory.
+    HANDLE             Shutdown;       /// A manual reset event used to signal thread shutdown.
+    aio_driver_t      *AIODriver;      /// The application asynchronous I/O driver.
+    pio_driver_t      *PIODriver;      /// The application prioritized I/O driver.
+    vfs_driver_t      *VFSDriver;      /// The application virtual file system driver.
+    image_memory_t    *ImageMemory;    /// The memory block into which image data will be loaded.
+    image_cache_t     *ImageCache;     /// The image cache used to manage the image memory.
+};
+
+/// @summary Defines the data associated with a window that needs to be passed to the WNDPROC.
+struct wndproc_data_t
+{
+    HWND               Window;         /// The window handle.
+    gl_display_t      *Display;        /// The last know display attached to the window.
+    gl_display_list_t *DisplayList;    /// The list of all enabled displays in the system.
+    uintptr_t          Renderer;       /// The renderer handle.
+    bool               DisplayChanged; /// Set to true if the window's display was changed.
 };
 
 /*///////////////
@@ -417,15 +429,55 @@ internal_function bool io_setup(thread_io_t *io)
 /// @return The return value depends on the message being processed.
 internal_function LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-	uintptr_t display = (uintptr_t) GetWindowLongPtr(hWnd, GWLP_USERDATA);
+	wndproc_data_t *disp_p = (wndproc_data_t*) GetWindowLongPtr(hWnd, GWLP_USERDATA);
 
     switch (uMsg)
     {
     case WM_DESTROY:
-        {	// post the quit message with the application exit code.
-			// this will be picked up back in WinMain and cause the
-			// message pump and display update loop to terminate.
-            PostQuitMessage(EXIT_SUCCESS);
+        {	
+            if (disp_p != NULL && disp_p->DisplayChanged)
+            {   // the window was destroyed because the display was just changed.
+                disp_p->DisplayChanged = false;
+            }
+            else
+            {   // post the quit message with the application exit code.
+    			// this will be picked up back in WinMain and cause the
+    			// message pump and display update loop to terminate.
+                PostQuitMessage(EXIT_SUCCESS);
+            }
+        }
+        return 0;
+
+    case WM_MOVE:
+        {   // detect the window being moved between displays.
+            DWORD ordinal = 0;
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            if (disp_p != NULL)
+            {
+                gl_display_t *new_display = display_for_window(disp_p->DisplayList, hWnd, ordinal);
+                if (new_display != NULL  && new_display != disp_p->Display)
+                {
+                    HWND new_window = NULL;
+                    disp_p->DisplayChanged = true;
+                    SetWindowText(hWnd, new_display->DisplayInfo.DeviceName);
+                    if (move_window_to_display(new_display, hWnd, new_window))
+                    {   // dispose of the old renderer and create a new renderer for the new display:
+                        uintptr_t old_rp = disp_p->Renderer;
+                        disp_p->Window   = new_window;
+                        disp_p->Display  = new_display;
+                        disp_p->Renderer = create_renderer(new_display, new_window);
+                        delete_renderer(old_rp);
+                        if (new_window  == hWnd)
+                        {   // the old window wasn't destroyed, so reset the DisplayChanged flag.
+                            disp_p->DisplayChanged = false;
+                        }
+                    }
+                }
+            }
+            UNREFERENCED_PARAMETER(x);
+            UNREFERENCED_PARAMETER(y);
+            UNREFERENCED_PARAMETER(ordinal);
         }
         return 0;
 
@@ -577,7 +629,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     wnd_class.hIcon          = LoadIcon(0, IDI_APPLICATION);
     wnd_class.hIconSm        = LoadIcon(0, IDI_APPLICATION);
     wnd_class.hCursor        = LoadCursor(0, IDC_ARROW);
-    wnd_class.style          = CS_HREDRAW | CS_VREDRAW ;
+    wnd_class.style          = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
     wnd_class.hbrBackground  = NULL;
     if (!RegisterClassEx(&wnd_class))
     {
@@ -593,7 +645,10 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         return 0;
     }
 
-    // create the renderer for the main display:
+    // create the renderer for the main display.
+    // do *not* use the returned handle for calling into the renderer directly; 
+    // instead, use the handle on wnd_data (below) because the window might move
+    // between displays, which will destroy and re-create the renderer.
     uintptr_t renderer = 0;
     if ((renderer = create_renderer(display, main_window)) == 0)
     {
@@ -602,7 +657,14 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     }
 
 	// attach the renderer handle to the window so it can be retrieved in WndProc.
-	SetWindowLongPtr(main_window, GWLP_USERDATA, (LONG_PTR) renderer);
+    // TODO(rlk): this maybe shouldn't be a stack variable in a 'real' application.
+    wndproc_data_t wnd_data;
+    wnd_data.Window         = main_window;
+    wnd_data.Display        = display;
+    wnd_data.DisplayList    =&display_list;
+    wnd_data.Renderer       = renderer;
+    wnd_data.DisplayChanged = false;
+	SetWindowLongPtr(main_window, GWLP_USERDATA, (LONG_PTR) &wnd_data);
 
     // query the monitor refresh rate and use that as our target frame rate.
     int monitor_refresh_hz =  60;
@@ -645,12 +707,12 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
         // TODO(rlk): perform application update here.
         // this consists primarily of queueing commands to the display driver.
-        pr_command_list_t *cmdlist  = renderer_command_list(renderer);
+        pr_command_list_t *cmdlist  = renderer_command_list(wnd_data.Renderer);
         pr_command_clear_color_buffer(cmdlist, 0.0, 0.0, 1.0, 1.0);
 
         // ...
-        renderer_submit(renderer, cmdlist); // TODO(rlk): specify target HWND
-        update_drawable(renderer);
+        renderer_submit(wnd_data.Renderer, cmdlist); // TODO(rlk): specify target HWND
+        update_drawable(wnd_data.Renderer);
 
         // throttle the application update rate.
         trace_marker_main("tick_throttle");
@@ -679,7 +741,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         // this may take some non-negligible amount of time, as it involves processing
         // queued command buffers to construct the current frame.
         trace_marker_main("tick_present");
-        present_drawable(renderer);
+        present_drawable(wnd_data.Renderer);
 
         // update timestamps to calculate the total presentation time.
         int64_t present_ticks = elapsed_ticks(flip_clock, ticktime());
@@ -698,7 +760,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
     // clean up application resources, and exit.
     CloseHandle(shutdown);
-    delete_renderer(renderer);
+    delete_renderer(wnd_data.Renderer);
     delete_display_list(&display_list);
     image_cache_delete(&cache_state);
     image_memory_delete(&image_memory);
