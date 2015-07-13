@@ -43,6 +43,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _MSC_VER
+#pragma warning (push)
+#pragma warning (disable:4127) // conditional expression is constant
+#pragma warning (disable:4996) // clCreateFromGLTextureND was declared deprecated
+#endif
+
 // Platform APIs
 CL_API_ENTRY cl_int CL_API_CALL
 clGetPlatformIDs(cl_uint          num_entries,
@@ -2040,7 +2046,7 @@ clGetDeviceIDsFromDX9MediaAdapterKHR(
     cl_platform_id                  platform,
     cl_uint                         num_media_adapters,
     cl_dx9_media_adapter_type_khr * media_adapters_type,
-    void *                          media_adapters[],
+    void *                          media_adapters,
     cl_dx9_media_adapter_set_khr    media_adapter_set,
     cl_uint                         num_entries,
     cl_device_id *                  devices,
@@ -2184,3 +2190,7 @@ clSetUserEventStatus(
         execution_status);
 }
 
+
+#ifdef _MSC_VER
+#pragma warning (pop)
+#endif

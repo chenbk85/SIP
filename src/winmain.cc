@@ -110,8 +110,6 @@
 #include "imloader.cc"
 #include "imcache.cc"
 
-#include "ocldriver.cc"
-
 #include "prcmdlist.cc"
 
 #if DISPLAY_BACKEND_OPENGL
@@ -126,6 +124,8 @@
 #if DISPLAY_BACKEND_GDI
 #include "gdidriver.cc"
 #endif
+
+#include "ocldriver.cc"
 
 /*/////////////////
 //   Constants   //
@@ -429,14 +429,8 @@ internal_function LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wPar
         }
         return 0;
 
-    case WM_SIZE:
-        {	// we'll receive WM_SIZE messages prior to the display driver being set up.
-            if (display != 0)
-            {
-                PrDisplayDriverResize(display);
-            }
-        }
-        break;
+    // TODO(rlk): Detect the window being moved between displays.
+    // TODO(rlk): Detect the window being resized and moving to another display.
 
     case WM_SYSKEYDOWN:
     case WM_SYSKEYUP:
@@ -559,7 +553,19 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
     UINT desired_granularity = 1; // millisecond
     BOOL sleep_is_granular   =(timeBeginPeriod(desired_granularity) == TIMERR_NOERROR);
 
-    // create the main application window.
+    // enumerate OpenGL displays and create the main application window.
+    gl_display_list_t        display_list;
+    if (!enumerate_displays(&display_list))
+    {
+        OutputDebugString(_T("ERROR: No OpenGL 3.2 displays available.\n"));
+        return 0;
+    }
+
+    // the main window will be created on the default display:
+    // TODO(rlk): add helper to get the primary display.
+    gl_display_t *display    = display_for_ordinal(&display_list, display_list.DisplayOrdinal[0]);
+
+    // register the window class for our main window:
     WNDCLASSEX wnd_class     = {};
     wnd_class.cbSize         = sizeof(WNDCLASSEX);
     wnd_class.cbClsExtra     = 0;
@@ -578,21 +584,25 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         OutputDebugString(_T("ERROR: Unable to register window class.\n"));
         return 0;
     }
-    HWND main_window  = CreateWindowEx(0, wnd_class.lpszClassName, _T("HAPPI Main Window"), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, hInstance, 0);
-    if  (main_window == NULL)
+
+    // TODO(rlk): make_window_on_display() should accept CW_USEDEFAULT for x, y, w and h.
+    HWND  main_window  = make_window_on_display(display, wnd_class.lpszClassName, display->DisplayInfo.DeviceName, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 0, 640, 480, NULL, NULL, hInstance, NULL, NULL);
+    if (main_window == NULL)
     {
-        OutputDebugString(_T("ERROR: Unable to create main application window.\n"));
-        return 0;
-    }
-    uintptr_t display = 0;
-    if ((display = PrDisplayDriverOpen(main_window)) == 0)
-    {
-        OutputDebugString(_T("ERROR: Unable to initialize the display driver.\n"));
+        OutputDebugString(_T("ERROR: Unable to create the main application window.\n"));
         return 0;
     }
 
-	// attach the display driver reference to the window so it can be retrieved in WndProc.
-	SetWindowLongPtr(main_window, GWLP_USERDATA, (LONG_PTR) display);
+    // create the renderer for the main display:
+    uintptr_t renderer = 0;
+    if ((renderer = create_renderer(display, main_window)) == 0)
+    {
+        OutputDebugString(_T("ERROR: Unable to create the main window renderer.\n"));
+        return 0;
+    }
+
+	// attach the renderer handle to the window so it can be retrieved in WndProc.
+	SetWindowLongPtr(main_window, GWLP_USERDATA, (LONG_PTR) renderer);
 
     // query the monitor refresh rate and use that as our target frame rate.
     int monitor_refresh_hz =  60;
@@ -635,12 +645,12 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
         // TODO(rlk): perform application update here.
         // this consists primarily of queueing commands to the display driver.
-        pr_command_list_t *cmdlist  = PrCreateCommandList(display);
+        pr_command_list_t *cmdlist  = renderer_command_list(renderer);
         pr_command_clear_color_buffer(cmdlist, 0.0, 0.0, 1.0, 1.0);
 
         // ...
-        pr_command_end_of_frame(cmdlist);
-        PrSubmitCommandList(display, cmdlist, false, 0); // TODO(rlk): specify target HWND
+        renderer_submit(renderer, cmdlist); // TODO(rlk): specify target HWND
+        update_drawable(renderer);
 
         // throttle the application update rate.
         trace_marker_main("tick_throttle");
@@ -669,7 +679,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
         // this may take some non-negligible amount of time, as it involves processing
         // queued command buffers to construct the current frame.
         trace_marker_main("tick_present");
-        PrPresentFrameToWindow(display);
+        present_drawable(renderer);
 
         // update timestamps to calculate the total presentation time.
         int64_t present_ticks = elapsed_ticks(flip_clock, ticktime());
@@ -688,7 +698,8 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int 
 
     // clean up application resources, and exit.
     CloseHandle(shutdown);
-    PrDisplayDriverClose(display);
+    delete_renderer(renderer);
+    delete_display_list(&display_list);
     image_cache_delete(&cache_state);
     image_memory_delete(&image_memory);
     vfs_driver_close(&vfs);

@@ -41,7 +41,7 @@ struct gl_display_t
 /// ordinal number. 
 struct gl_display_list_t
 {
-    size_t        *DisplayCount;          /// The number of displays attached to the system.
+    size_t         DisplayCount;          /// The number of displays attached to the system.
     DWORD         *DisplayOrdinal;        /// The set of ordinal values for each display.
     gl_display_t  *Displays;              /// The set of display information and rendering contexts.
 };
@@ -54,24 +54,17 @@ struct gl_display_list_t
 /// See: http://blogs.msdn.com/b/oldnewthing/archive/2004/10/25/247180.aspx
 EXTERN_C IMAGE_DOS_HEADER  __ImageBase;
 
-/// @summary The window class for hidden windows used for image streaming and context creation.
-global_variable WNDCLASSEX GLHiddenWndClass = {};
-
-/// @summary Global indicating whether the hidden window class needs to be registered.
-global_variable bool       GLCreateWndClass = true;
-
 /*///////////////////////
 //   Local Functions   //
 ///////////////////////*/
 /// @summary Initialize Windows GLEW and resolve WGL extension entry points.
 /// @param driver The presentation driver performing the initialization.
-/// @param window The handle of the window that is the target of rendering operations.
 /// @param x The x-coordinate of the upper-left corner of the target display.
 /// @param y The y-coordinate of the upper-left corner of the target display.
 /// @param w The width of the target display, in pixels.
 /// @param h The height of the target display, in pixels.
 /// @return true if WGLEW is initialized successfully.
-internal_function bool initialize_wglew(gl_display_t *display, HWND real_wnd, int x, int y, int w, int h)
+internal_function bool initialize_wglew(gl_display_t *display, int x, int y, int w, int h)
 {   
     PIXELFORMATDESCRIPTOR pfd;
     GLenum e = GLEW_OK;
@@ -161,8 +154,13 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
     dd.cb = sizeof(DISPLAY_DEVICE);
     for (DWORD ordinal = 0; EnumDisplayDevices(NULL, ordinal, &dd, 0); ++ordinal)
     {   // ignore pseudo-displays.
-        if ((dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) == 0)
-            display_count++;
+        if ((dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ACTIVE) == 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
+            continue;
+        display_count++;
     }
     if (display_count == 0)
     {
@@ -171,7 +169,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
     }
 
     // register the window class used for hidden windows, if necessary.
-    if (!GetClassInfo(instance, GL_HIDDEN_WNDCLASS_NAME, &wndclass))
+    if (!GetClassInfoEx(instance, GL_HIDDEN_WNDCLASS_NAME, &wndclass))
     {   // the window class has not been registered yet.
         wndclass.cbSize         = sizeof(WNDCLASSEX);
         wndclass.cbClsExtra     = 0;
@@ -179,7 +177,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
         wndclass.hInstance      = (HINSTANCE)&__ImageBase;
         wndclass.lpszClassName  = GL_HIDDEN_WNDCLASS_NAME;
         wndclass.lpszMenuName   = NULL;
-        wndclass.lpfnWndProc    = HiddenWndProc;
+        wndclass.lpfnWndProc    = DefWindowProc;
         wndclass.hIcon          = LoadIcon  (0, IDI_APPLICATION);
         wndclass.hIconSm        = LoadIcon  (0, IDI_APPLICATION);
         wndclass.hCursor        = LoadCursor(0, IDC_ARROW);
@@ -205,14 +203,16 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
     // enumerate all displays and retrieve their properties.
     // reset the display count to only track displays for which an OpenGL 3.2 
     // context can be successfully created - hide displays that fail.
-    for (DWORD ordinal = 0; EnumDisplayDevices(NULL, ordinal, &dd, 0); ordinal)
+    for (DWORD ordinal = 0; EnumDisplayDevices(NULL, ordinal, &dd, 0); ++ordinal)
     {   
-        gl_display_t             *display = &displays[display_count];
-        cl_device_id              preferred_cl_device   = NULL;
-        clGetGLContextInfoKHR_fn  clGetGLContextInfoKHR = NULL;
+        gl_display_t *display = &displays[display_count];
 
         // ignore pseudo-displays.
-        if (dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER)
+        if ((dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ACTIVE) == 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
             continue;
 
         // retrieve the current display settings and extract the 
@@ -241,7 +241,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
         else continue;
 
         // create a hidden window on the display.
-        HWND window  = CreateWindowEx(WS_EX_NOREDIRECTIONBITMAP, GL_HIDDEN_WNDCLASS_NAME, WS_POPUP, x, y, w, h, NULL, NULL, instance, NULL);
+        HWND window  = CreateWindowEx(0, GL_HIDDEN_WNDCLASS_NAME, dd.DeviceName, WS_POPUP, x, y, w, h, NULL, NULL, instance, NULL);
         if  (window == NULL)
         {
             OutputDebugString(_T("ERROR: Unable to create hidden window on display: "));
@@ -251,7 +251,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
         }
 
         // initialize WGLEW, allowing us to possibly use modern-style context creation.
-        if(initialize_wglew(display, window, NULL, NULL) == false)
+        if(initialize_wglew(display, x, y, w, h) == false)
         {
             OutputDebugString(_T("ERROR: Unable to initialize WGLEW on display: "));
             OutputDebugString(dd.DeviceName);
@@ -286,11 +286,11 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
                 WGL_BLUE_BITS_ARB     ,                            8,
                 WGL_PIXEL_TYPE_ARB    ,            WGL_TYPE_RGBA_ARB,
                 WGL_ACCELERATION_ARB  ,    WGL_FULL_ACCELERATION_ARB, 
-                WGL_SAMPLE_BUFFERS_ARB,                     GL_FALSE, /* GL_TRUE to enable MSAA */
-                WGL_SAMPLES_ARB       ,                            1, /* ex. 4 = 4x MSAA        */
+                //WGL_SAMPLE_BUFFERS_ARB,                     GL_FALSE, /* GL_TRUE to enable MSAA */
+                //WGL_SAMPLES_ARB       ,                            1, /* ex. 4 = 4x MSAA        */
                 0
             };
-            if (wglChoosePixelFormatARB(win_dc, fmt_attribs, NULL, 1, &fmt, &fmt_count) == FALSE)
+            if (wglChoosePixelFormatARB(win_dc, fmt_attribs, NULL, 1, &fmt, &fmt_count) != TRUE)
             {   // unable to find a matching pixel format - can't create an OpenGL rendering context.
                 OutputDebugString(_T("ERROR: wglChoosePixelFormatARB failed on display: "));
                 OutputDebugString(dd.DeviceName);
@@ -341,7 +341,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
 #endif
                     0
                 };
-                if ((gl_rc = wglCreateContextAttribsARB(win_dc, current_rc, rc_attribs)) == NULL)
+                if ((gl_rc = wglCreateContextAttribsARB(win_dc, NULL, rc_attribs)) == NULL)
                 {   // unable to create the OpenGL rendering context.
                     OutputDebugString(_T("ERROR: wglCreateContextAttribsARB failed on display: "));
                     OutputDebugString(dd.DeviceName);
@@ -362,7 +362,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
 #endif
                     0
                 };
-                if ((gl_rc = wglCreateContextAttribsARB(win_dc, current_rc, rc_attribs)) == NULL)
+                if ((gl_rc = wglCreateContextAttribsARB(win_dc, NULL, rc_attribs)) == NULL)
                 {   // unable to create the OpenGL rendering context.
                     OutputDebugString(_T("ERROR: wglCreateContextAttribsARB failed on display: "));
                     OutputDebugString(dd.DeviceName);
@@ -394,12 +394,13 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
             DestroyWindow(window);
             continue;
         }
+        glewExperimental = GL_TRUE; // else we crash - see: http://www.opengl.org/wiki/OpenGL_Loading_Library
         if ((err = glewInit()) != GLEW_OK)
         {   // unable to initialize GLEW - OpenGL entry points are not available.
             OutputDebugString(_T("ERROR: glewInit() failed on display: "));
             OutputDebugString(dd.DeviceName);
             OutputDebugStringA(", error: ");
-            OutputDebugStringA(glewGetErrorString(err));
+            OutputDebugStringA((char const*) glewGetErrorString(err));
             OutputDebugString(_T(".\n"));
             wglMakeCurrent(NULL, NULL);
             ReleaseDC(window, win_dc);
@@ -408,7 +409,7 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
         }
         if (GLEW_VERSION_3_2 == GL_FALSE)
         {   // OpenGL 3.2 is not supported by the driver.
-            OutputDebugString(_T("ERROR: Driver does not support OpenGL 3.2 on display: ");
+            OutputDebugString(_T("ERROR: Driver does not support OpenGL 3.2 on display: "));
             OutputDebugString(dd.DeviceName);
             OutputDebugString(_T(".\n"));
             wglMakeCurrent(NULL, NULL);
@@ -432,12 +433,6 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
             }
         }
 
-        // resolve the OpenCL entry point for retrieving the preferred 
-        // OpenCL device(s) for a given OpenGL rendering context. 
-        // subsequent OpenCL setup can use this function to retrieve 
-        // the preferred device list and devices supporting gl_sharing.
-        clGetGLContextInfoKHR = (clGetGLContextInfoKHR_fn) clGetExtensionFunctionAddress("clGetGLContextInfoKHR");
-
         // everything was successful; deselect the rendering context.
         wglMakeCurrent(NULL, NULL);
 
@@ -453,12 +448,11 @@ public_function bool enumerate_displays(gl_display_list_t *display_list)
         displays[display_count].DisplayY      = y;
         displays[display_count].DisplayWidth  = size_t(w);
         displays[display_count].DisplayHeight = size_t(h);
-        displays[display_count].clGetGLContextInfoKHR = clGetGLContextInfoKHR;
         display_count++;
     }
     if (display_count == 0)
     {   // there are no displays supporting OpenGL 3.2 or above.
-        OutputDebugString("ERROR: No displays found with support for OpenGL 3.2+.\n");
+        OutputDebugString(_T("ERROR: No displays found with support for OpenGL 3.2+.\n"));
         free(displays);
         free(ordinals);
         return false;
@@ -564,11 +558,18 @@ public_function HWND make_window_on_display(gl_display_t *display, TCHAR const *
     if (w == 0) w = (int)(display->DisplayWidth  - (display_rect.right  - x));
     if (h == 0) h = (int)(display->DisplayHeight - (display_rect.bottom - y));
 
+    // CW_USEDEFAULT x, y => (0, 0)
+    // CW_USEDEFAULT w, h => (width, height)
+    if (x == CW_USEDEFAULT) x = (int) display->DisplayX;
+    if (y == CW_USEDEFAULT) y = (int) display->DisplayY;
+    if (w == CW_USEDEFAULT) w = (int) display->DisplayWidth;
+    if (h == CW_USEDEFAULT) h = (int) display->DisplayHeight;
+
     // clip the window bounds to the display bounds.
     if (x + w <= display_rect.left || x >= display_rect.right)   x = display_rect.left;
     if (x + w >  display_rect.right ) w  = display_rect.right  - x;
     if (y + h <= display_rect.top  || y >= display_rect.bottom)  y = display_rect.bottom;
-    if (y + h >  display_rect.bottom) h  = display_rect.bottom - y
+    if (y + h >  display_rect.bottom) h  = display_rect.bottom - y;
 
     // retrieve the pixel format description for the target display.
     PIXELFORMATDESCRIPTOR pfd_dst;
@@ -690,18 +691,9 @@ public_function bool move_window_to_display(gl_display_t *display, HWND src_wind
     }
 }
 
-public_function void target_drawable(gl_display_list_t *display_list, DWORD ordinal, HDC target_dc)
-{
-    for (size_t i = 0, n = display_list->DisplayCount; i < n; ++i)
-    {
-        if (display_list->DisplayOrdinal[i] == ordinal)
-        {   // located the matching display object.
-            target_drawable(&display_list->Displays[i]);
-            return;
-        }
-    }
-}
-
+/// @summary Sets the target drawable for a display. Subsequent rendering commands will update the drawable.
+/// @param display The target display. If this value is NULL, the current rendering context is unbound.
+/// @param target_dc The device context to bind as the drawable. If this value is NULL, the display DC is used.
 public_function void target_drawable(gl_display_t *display, HDC target_dc)
 {
     if (display != NULL)
@@ -715,19 +707,41 @@ public_function void target_drawable(gl_display_t *display, HDC target_dc)
     }
 }
 
-public_function void flush_display(gl_display_list_t *display_list, DWORD ordinal)
+/// @summary Sets the target drawable for a display. Subsequent rendering commands will update the drawable.
+/// @param display_list The display list to search.
+/// @param ordinal The ordinal number of the display to target.
+/// @param target_dc The device context to bind as the drawable. If this value is NULL, the display DC is used.
+public_function void target_drawable(gl_display_list_t *display_list, DWORD ordinal, HDC target_dc)
 {
-    // glFlush
+    for (size_t i = 0, n = display_list->DisplayCount; i < n; ++i)
+    {
+        if (display_list->DisplayOrdinal[i] == ordinal)
+        {   // located the matching display object.
+            target_drawable(&display_list->Displays[i], target_dc);
+            return;
+        }
+    }
 }
 
-public_function void synchronize_display(gl_display_list_t *display_list, DWORD ordinal)
+/// @summary Flushes all pending rendering commands to the GPU for the specified display.
+/// @param display The display to flush.
+public_function void flush_display(gl_display_t *display)
 {
-    // glFinish
+    if (display != NULL) glFlush();
 }
 
-public_function void present_display(gl_display_list_t *display_list, DWORD ordinal)
+/// @summary Flushes all pending rendering commands to the GPU, and blocks the calling thread until they have been processed.
+/// @param display The display to synchronize.
+public_function void synchronize_display(gl_display_t *display)
 {
-    // SwapBuffers
+    if (display != NULL) glFinish();
+}
+
+/// @summary Flushes all rendering commands targeting the specified drawable, and updates the pixel data.
+/// @param dc The drawable to present.
+public_function void swap_buffers(HDC dc)
+{
+    SwapBuffers(dc);
 }
 
 /// @summary Deletes any rendering contexts and display resources, and then deletes the display list.
